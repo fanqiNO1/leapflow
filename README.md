@@ -264,6 +264,27 @@ Inside the TUI, the same control plane is available as `/config`. It supports ho
 
 ---
 
+## Multi-Profile
+
+LeapFlow supports multiple **profiles** — isolated runtime environments that can run in parallel. Each profile owns its own daemon process, databases, configuration, and credential vault.
+
+Select a profile via the `LEAPFLOW_PROFILE` environment variable (defaults to `default`):
+
+```bash
+# Run with the default profile
+leap
+
+# Run a separate instance under a different profile
+LEAPFLOW_PROFILE=work leap
+
+# Check daemon status for a specific profile
+LEAPFLOW_PROFILE=work leap daemon status
+```
+
+Profiles are stored under `~/.leapflow/profiles/<name>/`. Multiple profiles can run simultaneously without interference — useful for separating personal and work contexts, or running parallel experiments.
+
+---
+
 ## Quick Start — Use the TUI First
 
 LeapFlow's default experience is the interactive terminal UI. Start here for chat, tool execution, runtime status, session continuity, and progressively learning workflows from one surface.

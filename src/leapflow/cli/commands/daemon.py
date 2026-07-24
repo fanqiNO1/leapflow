@@ -93,6 +93,20 @@ def _print_runtime_status(status: dict) -> None:
             print(f"active_request_ids: {', '.join(active_ids)}")
     if status.get("session_id"):
         print(f"session: {status['session_id']}")
+    clients = status.get("clients")
+    if isinstance(clients, list) and clients:
+        print("clients:")
+        for client in clients:
+            if not isinstance(client, dict):
+                continue
+            workspace = client.get("workspace_root") or "?"
+            session = client.get("session_id") or "-"
+            print(
+                f"  - {client.get('kind', '?')}"
+                f" state={client.get('state', '?')}"
+                f" session={session}"
+                f" workspace={workspace}"
+            )
     if status.get("runtime_version"):
         print(f"version: {status['runtime_version']}")
     if status.get("runtime_source"):

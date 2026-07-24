@@ -63,6 +63,7 @@ class DaemonClient:
         *,
         enable_thinking: bool = False,
         session_id: str = "",
+        workspace_root: str = "",
     ) -> AsyncIterator[StreamEvent]:
         """Stream chat events from the daemon-owned AgentEngine.
 
@@ -70,10 +71,15 @@ class DaemonClient:
         sessions (e.g. two TUI clients) run concurrently and isolated when the
         daemon admits concurrency (daemon.max_concurrent_turns > 1). Empty means
         the daemon's current session (single-session behavior unchanged).
+        ``workspace_root`` is the client process' active workspace/cwd. It is
+        routed to the daemon so each TUI session gets its own project context
+        instead of inheriting the shared daemon process cwd.
         """
         params: dict[str, Any] = {"message": message, "enable_thinking": enable_thinking}
         if session_id:
             params["session_id"] = session_id
+        if workspace_root:
+            params["workspace_root"] = workspace_root
         request = RpcRequest(
             method="engine.chat",
             params=params,

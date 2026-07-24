@@ -13,6 +13,7 @@ import os
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from leapflow.cli.commands.run import _print_execution_result
@@ -1094,6 +1095,10 @@ async def cmd_interactive_daemon(
             f"connected={daemon_status.get('connected_clients', 0)} "
             f"volatile={daemon_status.get('volatile')}"
         )
+        # Surface this TUI's own workspace so a user running several TUIs against
+        # one shared daemon can confirm at a glance which project this session is
+        # bound to (tools and memory are scoped to exactly this root).
+        console.system(f"Workspace: {Path.cwd().resolve()}")
         admission = daemon_status.get("turn_admission")
         if isinstance(admission, dict):
             active = int(admission.get("active", 0) or 0)
@@ -1180,7 +1185,11 @@ async def cmd_interactive_daemon(
         saw_real_event = False
         turn_completed = False
         try:
-            async for event in bridge.client.engine_chat(prompt_text, session_id=active_session_id):
+            async for event in bridge.client.engine_chat(
+                prompt_text,
+                session_id=active_session_id,
+                workspace_root=str(Path.cwd().resolve()),
+            ):
                 metadata = event.metadata or {}
                 is_heartbeat = event.type == "status" and metadata.get("heartbeat")
                 if not is_heartbeat:

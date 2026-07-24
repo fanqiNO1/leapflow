@@ -13,8 +13,17 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 import signal
+from pathlib import Path
 from typing import Any, Dict, FrozenSet, Protocol, runtime_checkable
+
+from leapflow.tools.execution_context import (
+    current_tool_context,
+    is_within_allowed_roots,
+    resolve_workspace_path,
+    workspace_scope_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -131,10 +140,52 @@ async def _approve_command(command: str, cwd: str | None) -> tuple[bool, str]:
         return False, "Dangerous command requires approval (denied)"
 
 
+def _command_workspace_escape(command: str) -> dict[str, Any] | None:
+    """Reject absolute path operands outside the active workspace.
+
+    Shell is intentionally a broad escape hatch, so this is a conservative P0
+    guard rather than a full shell parser: it catches explicit absolute / ~ path
+    arguments that would let a daemon-backed turn read another TUI's workspace.
+    """
+    ctx = current_tool_context()
+    if ctx is None:
+        return None
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    for token in tokens:
+        if token.startswith(("http://", "https://")):
+            continue
+        candidate = token.split("=", 1)[-1]
+        if not candidate.startswith(("/", "~")):
+            continue
+        path = Path(candidate).expanduser().resolve()
+        if not is_within_allowed_roots(path, ctx):
+            return {
+                "ok": False,
+                "error": (
+                    "shell_run command references a path outside the active workspace. "
+                    f"Path: {path}; workspace root: {ctx.workspace_root}."
+                ),
+                "error_type": "outside_workspace",
+                "retryable": False,
+                "workspace_root": str(ctx.workspace_root),
+                "resolved_path": str(path),
+                "session_id": ctx.session_id,
+            }
+    return None
+
+
 async def shell_run(params: Dict[str, Any]) -> Dict[str, Any]:
     """Execute a shell command with timeout protection and safety layers."""
     command = params.get("command", "")
-    cwd = params.get("cwd") or None
+    raw_cwd = params.get("cwd") or None
+    cwd_path = resolve_workspace_path(raw_cwd, default=".") if raw_cwd else None
+    if cwd_path is None:
+        ctx = current_tool_context()
+        cwd_path = ctx.workspace_root if ctx is not None else None
+    cwd = str(cwd_path) if cwd_path is not None else None
     timeout = min(float(params.get("timeout", _DEFAULT_TIMEOUT)), _max_shell_timeout_s)
 
     if not command:
@@ -145,6 +196,15 @@ async def shell_run(params: Dict[str, Any]) -> Dict[str, Any]:
 
     if _is_cwd_blocked(cwd):
         return {"ok": False, "error": f"Working directory blocked by safety policy: {cwd}"}
+
+    if cwd_path is not None:
+        scope_error = workspace_scope_error(cwd_path, operation="shell_run cwd")
+        if scope_error:
+            return scope_error
+
+    command_scope_error = _command_workspace_escape(str(command))
+    if command_scope_error:
+        return command_scope_error
 
     if _is_dangerous(command):
         approved, message = await _approve_command(command, cwd)
@@ -178,6 +238,7 @@ async def shell_run(params: Dict[str, Any]) -> Dict[str, Any]:
             "returncode": proc.returncode,
             "stdout": stdout_text,
             "stderr": stderr_text,
+            "cwd": cwd,
         }
         if proc.returncode != 0:
             # Surface a concrete error: the tail of stderr holds the real cause

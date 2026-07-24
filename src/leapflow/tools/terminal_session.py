@@ -27,6 +27,8 @@ import uuid
 from collections import deque
 from typing import Any, Deque, Dict, Optional
 
+from leapflow.tools.execution_context import current_tool_context, resolve_workspace_path, workspace_scope_error
+
 logger = logging.getLogger(__name__)
 
 _ENABLED = False
@@ -165,7 +167,16 @@ async def terminal_open(params: Dict[str, Any]) -> Dict[str, Any]:
     shell = str(params.get("shell") or os.environ.get("SHELL") or "/bin/bash")
     if shutil.which(shell) is None and not os.path.exists(shell):
         shell = "/bin/sh"
-    cwd = str(params.get("cwd") or os.getcwd())
+    raw_cwd = params.get("cwd") or None
+    if raw_cwd:
+        cwd_path = resolve_workspace_path(raw_cwd, default=".")
+    else:
+        ctx = current_tool_context()
+        cwd_path = ctx.workspace_root if ctx is not None else resolve_workspace_path(os.getcwd())
+    scope_error = workspace_scope_error(cwd_path, operation="terminal_open cwd")
+    if scope_error:
+        return scope_error
+    cwd = str(cwd_path)
     if not os.path.isdir(cwd):
         return {"ok": False, "error": f"Working directory not found: {cwd}", "failure_code": "path_not_found"}
     initial = str(params.get("command") or "").strip()

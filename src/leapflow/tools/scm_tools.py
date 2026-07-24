@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Sequence
 
 from leapflow.security.redact import redact_sensitive_text
+from leapflow.tools.execution_context import resolve_workspace_path, workspace_scope_error
 
 _MAX_OUTPUT_CHARS = 10_000
 _DEFAULT_TIMEOUT_S = 120.0
@@ -41,8 +42,7 @@ def _clip_output(value: str, limit: int = _MAX_OUTPUT_CHARS) -> str:
 
 
 def _workspace(cwd: Any) -> Path:
-    raw = str(cwd or ".").strip() or "."
-    return Path(raw).expanduser().resolve()
+    return resolve_workspace_path(cwd or ".", default=".")
 
 
 def _safe_ref(value: Any, *, field: str) -> str:
@@ -163,6 +163,9 @@ async def scm_sync(params: Dict[str, Any], runner: GitRunner | None = None) -> D
         return {"ok": False, "error": f"Unsupported SCM action: {action}", "failure_code": "unsupported_scm_action"}
 
     cwd = _workspace(params.get("cwd"))
+    scope_error = workspace_scope_error(cwd, operation="scm_sync cwd")
+    if scope_error:
+        return scope_error
     if not cwd.exists():
         return {"ok": False, "error": f"Working directory does not exist: {cwd}", "failure_code": "path_not_found", "cwd": str(cwd)}
     if not cwd.is_dir():

@@ -196,6 +196,95 @@ def test_memory_manager_scope_gate_filters_other_workspaces(tmp_path: Path) -> N
     assert scoped == [active, global_note]
 
 
+class _ListProvider:
+    """Minimal provider that stores entries and does substring keyword search."""
+
+    name = "list"
+
+    def __init__(self) -> None:
+        self.entries: list[MemoryEntry] = []
+
+    async def initialize(self, **kwargs: object) -> None: ...
+    async def shutdown(self) -> None: ...
+
+    async def insert(self, entry: MemoryEntry) -> str:
+        self.entries.append(entry)
+        return entry.entry_id
+
+    async def search(self, query):  # type: ignore[no-untyped-def]
+        kws = [k.lower() for k in query.keywords]
+        hits = [e for e in self.entries if any(k in e.content.lower() for k in kws)]
+        return hits or list(self.entries)
+
+    async def delete(self, entry_id: str) -> bool:
+        return False
+
+    def accepts(self, entry: MemoryEntry) -> bool:
+        return True
+
+
+def test_memory_manager_search_isolates_by_workspace_tag(tmp_path: Path) -> None:
+    """A shared daemon: search() drops other-workspace-tagged entries but keeps
+    same-workspace and untagged (global) ones."""
+    from leapflow.memory.protocol import MemoryQuery
+
+    ws_a = str((tmp_path / "ws_a").resolve())
+    ws_b = str((tmp_path / "ws_b").resolve())
+    same = MemoryEntry(content="note A", metadata={"workspace_root": ws_a}, score=3.0)
+    other = MemoryEntry(content="note B", metadata={"workspace_root": ws_b}, score=2.0)
+    global_note = MemoryEntry(content="note global", metadata={}, score=1.0)
+
+    manager = MemoryManager()
+    provider = _ListProvider()
+    provider.entries = [same, other, global_note]
+    manager.add_provider(provider)
+
+    scoped = asyncio.run(
+        manager.search(MemoryQuery(keywords=["note"], workspace_root=ws_a, limit=10))
+    )
+    assert same in scoped and global_note in scoped
+    assert other not in scoped
+
+    # No workspace scope → no isolation (backward compatible).
+    unscoped = asyncio.run(manager.search(MemoryQuery(keywords=["note"], limit=10)))
+    assert other in unscoped
+
+
+def test_memory_tag_entry_workspace_is_idempotent(tmp_path: Path) -> None:
+    ws = str((tmp_path / "proj").resolve())
+    entry = MemoryEntry(content="x")
+    MemoryManager.tag_entry_workspace(entry, ws)
+    assert entry.metadata["workspace_root"] == ws
+    # An existing tag must be preserved, not overwritten by another workspace.
+    MemoryManager.tag_entry_workspace(entry, str(tmp_path / "other"))
+    assert entry.metadata["workspace_root"] == ws
+
+
+def test_memory_add_tool_tags_workspace_and_search_isolates(tmp_path: Path) -> None:
+    """memory_add tags the active workspace; cross-workspace memory_search never
+    returns it, same-workspace search does."""
+    ws_a = str((tmp_path / "a").resolve())
+    ws_b = str((tmp_path / "b").resolve())
+    manager = MemoryManager()
+    manager.add_provider(_ListProvider())
+
+    async def scenario() -> tuple[str, str]:
+        await manager.handle_tool_call(
+            "memory_add", {"content": "secret plan for A"}, workspace_root=ws_a
+        )
+        from_a = await manager.handle_tool_call(
+            "memory_search", {"query": "secret plan"}, workspace_root=ws_a
+        )
+        from_b = await manager.handle_tool_call(
+            "memory_search", {"query": "secret plan"}, workspace_root=ws_b
+        )
+        return from_a, from_b
+
+    from_a, from_b = asyncio.run(scenario())
+    assert "secret plan for A" in from_a
+    assert "secret plan for A" not in from_b
+
+
 # ── Immediate memory ───────────────────────────────────────────────
 
 

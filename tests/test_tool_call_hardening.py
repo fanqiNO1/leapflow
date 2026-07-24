@@ -180,3 +180,58 @@ def test_shell_run_success_has_no_error_field() -> None:
     from leapflow.tools.shell_tools import shell_run
     result = asyncio.run(shell_run({"command": "echo ok"}))
     assert result["ok"] is True and "error" not in result and "ok" in result["stdout"]
+
+
+def test_workspace_context_resolves_relative_paths_and_blocks_cross_workspace(tmp_path) -> None:
+    from leapflow.tools.execution_context import (
+        ToolExecutionContext,
+        reset_tool_context,
+        set_tool_context,
+    )
+    from leapflow.tools.file_operations import code_search, file_read
+    from leapflow.tools.repo_map import repo_map
+    from leapflow.tools.shell_tools import shell_run
+
+    workspace = tmp_path / "work"
+    other = tmp_path / "other"
+    workspace.mkdir()
+    other.mkdir()
+    (workspace / "alpha.txt").write_text("needle in workspace", encoding="utf-8")
+    (other / "secret.txt").write_text("needle outside", encoding="utf-8")
+
+    token = set_tool_context(
+        ToolExecutionContext.from_strings(
+            workspace_root=str(workspace),
+            session_id="sess-work",
+            task_id="turn-test",
+        )
+    )
+    try:
+        read_result = asyncio.run(file_read({"path": "alpha.txt"}))
+        assert read_result["ok"] is True
+        assert read_result["path"] == str((workspace / "alpha.txt").resolve())
+
+        search_result = asyncio.run(code_search({"pattern": "needle", "path": "."}))
+        assert search_result["ok"] is True
+        assert search_result["path"] == str(workspace.resolve())
+        assert search_result["match_count"] == 1
+
+        repo_result = asyncio.run(repo_map({"path": "."}))
+        assert repo_result["ok"] is True
+        assert repo_result["root"] == str(workspace.resolve())
+
+        shell_result = asyncio.run(shell_run({"command": "pwd"}))
+        assert shell_result["ok"] is True
+        assert shell_result["cwd"] == str(workspace.resolve())
+
+        blocked = asyncio.run(file_read({"path": str(other / "secret.txt")}))
+        assert blocked["ok"] is False
+        assert blocked["error_type"] == "outside_workspace"
+        assert blocked["workspace_root"] == str(workspace.resolve())
+
+        blocked_shell = asyncio.run(shell_run({"command": f"cat {other / 'secret.txt'}"}))
+        assert blocked_shell["ok"] is False
+        assert blocked_shell["error_type"] == "outside_workspace"
+        assert blocked_shell["workspace_root"] == str(workspace.resolve())
+    finally:
+        reset_tool_context(token)

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
 from leapflow.security.path_sensitivity import PathSensitivity, classify_path_sensitivity
+from leapflow.tools.execution_context import resolve_workspace_path, workspace_scope_error
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +239,10 @@ async def file_list(params: Dict[str, Any]) -> Dict[str, Any]:
     pattern = params.get("pattern", "*")
     depth = _safe_int(params.get("depth", 0), 0, minimum=0, maximum=5)
 
-    target = Path(path).expanduser().resolve()
+    target = resolve_workspace_path(path, default=".")
+    scope_error = workspace_scope_error(target, operation="file_list")
+    if scope_error:
+        return scope_error
     if not target.exists():
         return {"ok": False, "error": f"Path not found: {path}"}
     if not target.is_dir():
@@ -289,7 +293,10 @@ async def file_read(params: Dict[str, Any]) -> Dict[str, Any]:
     if not path:
         return {"ok": False, "error": "Missing required parameter: path"}
 
-    target = Path(path).expanduser().resolve()
+    target = resolve_workspace_path(path)
+    scope_error = workspace_scope_error(target, operation="file_read")
+    if scope_error:
+        return scope_error
     sensitivity = classify_path_sensitivity(target)
 
     if not sensitivity.readable:
@@ -419,7 +426,10 @@ async def file_write(params: Dict[str, Any]) -> Dict[str, Any]:
     if not path:
         return {"ok": False, "error": "Missing required parameter: path"}
 
-    target = Path(path).expanduser().resolve()
+    target = resolve_workspace_path(path)
+    scope_error = workspace_scope_error(target, operation="file_write")
+    if scope_error:
+        return scope_error
     sensitivity = classify_path_sensitivity(target)
 
     if sensitivity.hardline or not sensitivity.writable:
@@ -651,7 +661,10 @@ async def code_search(params: Dict[str, Any]) -> Dict[str, Any]:
     pattern = str(params.get("pattern", "") or "")
     if not pattern:
         return {"ok": False, "error": "Missing required parameter: pattern"}
-    base = Path(str(params.get("path", ".") or ".")).expanduser().resolve()
+    base = resolve_workspace_path(params.get("path", ".") or ".", default=".")
+    scope_error = workspace_scope_error(base, operation="code_search")
+    if scope_error:
+        return scope_error
     if not base.exists():
         return {"ok": False, "error": f"Path not found: {base}"}
     glob = params.get("glob") or None
@@ -711,7 +724,10 @@ async def file_find(params: Dict[str, Any]) -> Dict[str, Any]:
     pattern = str(params.get("glob", params.get("pattern", "")) or "")
     if not pattern:
         return {"ok": False, "error": "Missing required parameter: glob"}
-    base = Path(str(params.get("path", ".") or ".")).expanduser().resolve()
+    base = resolve_workspace_path(params.get("path", ".") or ".", default=".")
+    scope_error = workspace_scope_error(base, operation="file_find")
+    if scope_error:
+        return scope_error
     if not base.exists() or not base.is_dir():
         return {"ok": False, "error": f"Not a directory: {base}"}
     max_results = _safe_int(
@@ -804,7 +820,10 @@ async def edit_file(params: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": "Missing required parameter: edits (list of {original_text, new_text, replace_all?})"}
     dry_run = bool(params.get("dry_run", False))
 
-    target = Path(path).expanduser().resolve()
+    target = resolve_workspace_path(path)
+    scope_error = workspace_scope_error(target, operation="edit_file")
+    if scope_error:
+        return scope_error
     sensitivity = classify_path_sensitivity(target)
     if sensitivity.hardline or not sensitivity.writable:
         return {"ok": False, "error": _write_block_message(target, sensitivity)}

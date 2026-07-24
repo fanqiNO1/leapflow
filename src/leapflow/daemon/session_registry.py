@@ -18,15 +18,30 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 
-class SessionExecutionContext:
-    """Per-session execution state: an engine + a turn lock + activity clock."""
+class WorkspaceMismatchError(ValueError):
+    """Raised when one session id is reused from a different workspace root."""
 
-    def __init__(self, session_id: str, engine: Any) -> None:
+    def __init__(self, session_id: str, expected: Path, requested: Path) -> None:
+        super().__init__(
+            f"Session {session_id!r} is bound to workspace {expected}; "
+            f"current request uses {requested}. Start a fresh TUI session for this workspace."
+        )
+        self.session_id = session_id
+        self.expected = expected
+        self.requested = requested
+
+
+class SessionExecutionContext:
+    """Per-session execution state: an engine + workspace + turn lock."""
+
+    def __init__(self, session_id: str, engine: Any, workspace_root: Path) -> None:
         self.session_id = session_id
         self.engine = engine
+        self.workspace_root = workspace_root
         self.lock = asyncio.Lock()  # serialize this session's own turns
         self.last_active = time.monotonic()
 
@@ -55,7 +70,7 @@ class SessionRegistry:
         self,
         *,
         base_engine: Any,
-        build_engine: Callable[[Any, str, Any], Any],
+        build_engine: Callable[[Any, str, Any, Path], Any],
         build_working_memory: Callable[[], Any],
         max_sessions: int = 16,
         idle_ttl_s: float = 1800.0,
@@ -69,25 +84,43 @@ class SessionRegistry:
         self._primary_session_id: Optional[str] = None
         self._lock = asyncio.Lock()  # guards registry mutation
 
-    async def acquire(self, session_id: str) -> SessionExecutionContext:
-        """Return the context for ``session_id``, creating it if needed."""
+    def _default_workspace_root(self) -> Path:
+        settings = getattr(self._base, "_settings", None)
+        root = getattr(settings, "workspace_root", Path.cwd())
+        return Path(str(root)).expanduser().resolve()
+
+    async def acquire(
+        self,
+        session_id: str,
+        workspace_root: str | Path | None = None,
+    ) -> SessionExecutionContext:
+        """Return the context for ``session_id``, creating it if needed.
+
+        A session is bound to the workspace from its first request. Reusing the
+        same session id from another workspace is rejected because it would mix
+        one conversation's memory, task contract, and tool path boundary across
+        projects.
+        """
         sid = str(session_id or "")
+        requested_root = (
+            Path(str(workspace_root)).expanduser().resolve()
+            if workspace_root else None
+        )
         async with self._lock:
             self._evict_idle()
             existing = self._contexts.get(sid)
             if existing is not None:
+                if requested_root is not None and requested_root != existing.workspace_root:
+                    raise WorkspaceMismatchError(sid, existing.workspace_root, requested_root)
                 existing.touch()
                 return existing
+            root = requested_root or self._default_workspace_root()
             if self._primary_session_id is None:
-                # First session reuses the base engine → single-session daemon
-                # behaves exactly as before.
                 self._primary_session_id = sid
-                engine = self._base
-            else:
-                if len(self._contexts) >= self._max_sessions:
-                    self._evict_oldest()
-                engine = self._build_engine(self._base, sid, self._build_wm())
-            ctx = SessionExecutionContext(sid, engine)
+            elif len(self._contexts) >= self._max_sessions:
+                self._evict_oldest()
+            engine = self._build_engine(self._base, sid, self._build_wm(), root)
+            ctx = SessionExecutionContext(sid, engine, root)
             self._contexts[sid] = ctx
             return ctx
 

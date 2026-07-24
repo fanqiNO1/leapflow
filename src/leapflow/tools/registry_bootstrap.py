@@ -996,11 +996,31 @@ def set_memory_manager(manager: Any) -> None:
     _memory_manager_ref = manager
 
 
+def _active_workspace_root() -> str:
+    """Return the current turn's workspace root from the tool execution context.
+
+    Memory tools run inside ``Engine._execute_tool_scoped``, which installs the
+    per-turn :class:`ToolExecutionContext`. Reading it here scopes memory reads
+    and tags writes to the active workspace without threading the value through
+    every tool signature (concurrency-safe: it is a ContextVar, not shared
+    mutable state).
+    """
+    try:
+        from leapflow.tools.execution_context import current_tool_context
+
+        ctx = current_tool_context()
+    except Exception:
+        return ""
+    return str(getattr(ctx, "workspace_root", "") or "")
+
+
 async def _memory_search_handler(params: Dict[str, Any]) -> Dict[str, Any]:
     if _memory_manager_ref is None:
         return {"ok": False, "error": "Memory system not initialized"}
     try:
-        result = await _memory_manager_ref.handle_tool_call("memory_search", params)
+        result = await _memory_manager_ref.handle_tool_call(
+            "memory_search", params, workspace_root=_active_workspace_root()
+        )
         return {"ok": True, "result": result}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -1021,7 +1041,9 @@ async def _memory_add_handler(params: Dict[str, Any]) -> Dict[str, Any]:
         except ImportError:
             pass
     try:
-        result = await _memory_manager_ref.handle_tool_call("memory_add", params)
+        result = await _memory_manager_ref.handle_tool_call(
+            "memory_add", params, workspace_root=_active_workspace_root()
+        )
         return {"ok": True, "result": result}
     except Exception as e:
         return {"ok": False, "error": str(e)}

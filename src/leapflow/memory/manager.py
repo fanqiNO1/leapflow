@@ -171,11 +171,12 @@ class MemoryManager:
         Otherwise, queries all providers and merges by score.
         """
         if query.cross_domain:
-            return await self.search_cross_domain(
+            correlated = await self.search_cross_domain(
                 " ".join(query.keywords),
                 time_window_s=self._cross_domain_window_s,
                 limit=query.limit,
             )
+            return self._isolate_by_workspace(correlated, query.workspace_root)
 
         candidates = self._route_search(query)
         all_results: List[MemoryEntry] = []
@@ -193,6 +194,10 @@ class MemoryManager:
             if entry.entry_id not in seen:
                 seen.add(entry.entry_id)
                 unique.append(entry)
+        # Cross-workspace isolation: a daemon shared across projects must never
+        # surface another workspace's tagged memories. Untagged entries are
+        # global (user prefs, cross-project facts, legacy) and always pass.
+        unique = self._isolate_by_workspace(unique, query.workspace_root)
         return unique[:query.limit]
 
     async def search_cross_domain(
@@ -346,7 +351,55 @@ class MemoryManager:
         ]).lower()
         return bool(scope_terms and any(term in haystack for term in scope_terms))
 
-    async def sync_turn(self, messages: List[Dict[str, Any]]) -> None:
+    @staticmethod
+    def _normalize_workspace(root: str) -> str:
+        """Resolve a workspace root to a canonical absolute path string."""
+        if not root:
+            return ""
+        try:
+            return str(Path(str(root)).expanduser().resolve())
+        except (OSError, RuntimeError, ValueError):
+            return str(root)
+
+    @classmethod
+    def _entry_workspace_tag(cls, entry: MemoryEntry) -> str:
+        """Return the authoritative workspace tag on an entry, if any."""
+        metadata = entry.metadata or {}
+        raw = metadata.get("workspace_root") or metadata.get("project_root") or ""
+        return cls._normalize_workspace(str(raw)) if raw else ""
+
+    @classmethod
+    def _isolate_by_workspace(
+        cls, entries: List[MemoryEntry], workspace_root: str
+    ) -> List[MemoryEntry]:
+        """Drop entries whose workspace tag belongs to a different workspace.
+
+        Entries without a workspace tag are treated as global (user prefs,
+        cross-project facts, legacy records) and always pass. This enforces
+        per-workspace isolation on a daemon shared across concurrent projects
+        without hiding genuinely global knowledge.
+        """
+        root = cls._normalize_workspace(workspace_root)
+        if not root:
+            return entries
+        kept: List[MemoryEntry] = []
+        for entry in entries:
+            tag = cls._entry_workspace_tag(entry)
+            if not tag or tag == root:
+                kept.append(entry)
+        return kept
+
+    @classmethod
+    def tag_entry_workspace(cls, entry: MemoryEntry, workspace_root: str) -> MemoryEntry:
+        """Tag an entry with the active workspace unless it already carries one."""
+        root = cls._normalize_workspace(workspace_root)
+        if root and not (entry.metadata or {}).get("workspace_root"):
+            entry.metadata = {**(entry.metadata or {}), "workspace_root": root}
+        return entry
+
+    async def sync_turn(
+        self, messages: List[Dict[str, Any]], *, workspace_root: str = ""
+    ) -> None:
         """Background sync of conversation turn (fire-and-forget safe)."""
         # Extract last assistant message for storage
         for msg in reversed(messages):
@@ -356,6 +409,7 @@ class MemoryManager:
                     domain=SignalDomain.SYSTEM,
                     content=msg["content"][:500],
                 )
+                self.tag_entry_workspace(entry, workspace_root)
                 await self.insert(entry)
                 break
 
@@ -463,17 +517,21 @@ class MemoryManager:
             for s in self.get_tool_schemas()
         ]
 
-    async def handle_tool_call(self, tool_name: str, args: Dict[str, Any]) -> str:
+    async def handle_tool_call(
+        self, tool_name: str, args: Dict[str, Any], *, workspace_root: str = ""
+    ) -> str:
         """Route LLM tool calls to the appropriate handler.
 
         Manager-level tools (memory_search, memory_add) are handled directly.
         Provider-specific tools are dispatched to the owning provider.
+        ``workspace_root`` scopes reads and tags writes to the active project
+        so a shared daemon never mixes memories across workspaces.
         """
         # Manager-level tools
         if tool_name == "memory_search":
-            return await self._handle_memory_search(args)
+            return await self._handle_memory_search(args, workspace_root=workspace_root)
         if tool_name == "memory_add":
-            return await self._handle_memory_add(args)
+            return await self._handle_memory_add(args, workspace_root=workspace_root)
 
         # Provider-specific tools
         provider_name = self._tool_dispatch.get(tool_name)
@@ -533,7 +591,9 @@ class MemoryManager:
                 except Exception:
                     pass
 
-    async def _handle_memory_search(self, args: Dict[str, Any]) -> str:
+    async def _handle_memory_search(
+        self, args: Dict[str, Any], *, workspace_root: str = ""
+    ) -> str:
         """Handle manager-level memory_search tool call."""
         query_text = args.get("query", "")
         domain_str = args.get("domain")
@@ -544,6 +604,7 @@ class MemoryManager:
             keywords=query_text.split()[:8],
             domains=domains,
             limit=limit,
+            workspace_root=workspace_root,
         )
         results = await self.search(mq)
         return json.dumps({
@@ -558,7 +619,9 @@ class MemoryManager:
             ]
         }, ensure_ascii=False)
 
-    async def _handle_memory_add(self, args: Dict[str, Any]) -> str:
+    async def _handle_memory_add(
+        self, args: Dict[str, Any], *, workspace_root: str = ""
+    ) -> str:
         """Handle manager-level memory_add tool call."""
         content = args.get("content", "")
         if not content:
@@ -579,5 +642,6 @@ class MemoryManager:
             domain=domain,
             content=content[:2200],  # Safety cap per design doc
         )
+        self.tag_entry_workspace(entry, workspace_root)
         entry_id = await self.insert(entry)
         return json.dumps({"success": True, "id": entry_id})

@@ -876,6 +876,11 @@ class TaskContract:
                 "as the project root when a workspace root is provided."
             ),
             (
+                "- Workspace boundary is enforced by tools: do not read, search, edit, or run "
+                "commands against paths outside the allowed roots unless the user explicitly "
+                "requests an external path and the tool/approval policy permits it."
+            ),
+            (
                 "- LeapFlow workspace config is optional at `<workspace>/.leapflow/config.yaml`; "
                 "runtime config is loaded from `~/.leapflow/config/user.yaml` and "
                 "`~/.leapflow/profiles/<profile>/config/*.yaml`."
@@ -4011,6 +4016,34 @@ class AgentEngine:
                 break
         return executed
 
+    def _tool_execution_context(self) -> Any | None:
+        """Build the tool context from the current task contract, if any."""
+        contract = self._current_task_contract
+        if contract is None:
+            return None
+        from leapflow.tools.execution_context import ToolExecutionContext
+
+        return ToolExecutionContext.from_strings(
+            workspace_root=contract.workspace_root,
+            allowed_roots=contract.allowed_roots,
+            session_id=str(self._current_session_id or ""),
+            task_id=contract.task_id,
+        )
+
+    async def _execute_tool_scoped(
+        self,
+        tool_call: Dict[str, Any],
+        handlers: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Execute a tool with the current turn's workspace context installed."""
+        from leapflow.tools.execution_context import reset_tool_context, set_tool_context
+
+        token = set_tool_context(self._tool_execution_context())
+        try:
+            return await self._execute_general_tool(tool_call, handlers)
+        finally:
+            reset_tool_context(token)
+
     async def _execute_tool_with_ledger(
         self,
         tool_call: Dict[str, Any],
@@ -4025,7 +4058,7 @@ class AgentEngine:
         registry = _default_tool_registry()
         resolution = registry.resolve(proposed_name, args)
         if not resolution.auto_executable or resolution.normalized_name is None:
-            return await self._execute_general_tool(tool_call, handlers)
+            return await self._execute_tool_scoped(tool_call, handlers)
 
         tool_name = resolution.normalized_name
         spec = registry.specs.get(tool_name)
@@ -4073,7 +4106,7 @@ class AgentEngine:
             return duplicate
 
         try:
-            result = await self._execute_general_tool(normalized_call, handlers)
+            result = await self._execute_tool_scoped(normalized_call, handlers)
         except Exception as exc:
             failed_result: Dict[str, Any] = {
                 "ok": False,
@@ -4320,6 +4353,7 @@ class AgentEngine:
                 self._conversation_store.create_session(
                     self._current_session_id, title=title,
                     model=self._settings.llm_model, source="cli",
+                    cwd=str(getattr(self._settings, "workspace_root", "") or ""),
                 )
             self._persist_message(self._current_session_id, "user", user_text)
             return self._current_session_id
@@ -4424,8 +4458,12 @@ class AgentEngine:
         """Non-blocking wrapper for MemoryManager.sync_turn."""
         try:
             assert self._memory_manager is not None
+            workspace_root = (
+                self._current_task_contract.workspace_root
+                if self._current_task_contract else ""
+            )
             await asyncio.wait_for(
-                self._memory_manager.sync_turn(messages),
+                self._memory_manager.sync_turn(messages, workspace_root=workspace_root),
                 timeout=self._settings.memory_prefetch_timeout_s,
             )
             logger.debug("memory.sync_turn completed")
@@ -4952,8 +4990,14 @@ class AgentEngine:
         # Memory tool interception: route memory_* calls to MemoryManager
         if (a_type == "memory" or name.startswith("memory_")) and self._memory_manager:
             tool_name = name if name.startswith("memory_") else f"memory_{name}"
+            workspace_root = (
+                self._current_task_contract.workspace_root
+                if self._current_task_contract else ""
+            )
             try:
-                result = await self._memory_manager.handle_tool_call(tool_name, payload)
+                result = await self._memory_manager.handle_tool_call(
+                    tool_name, payload, workspace_root=workspace_root
+                )
                 logger.info("audit.memory_tool name=%s", tool_name)
                 return {"ok": True, "result": result}
             except Exception as exc:

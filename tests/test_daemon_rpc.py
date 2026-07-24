@@ -247,9 +247,9 @@ async def test_engine_chat_routes_turn_to_session_engine() -> None:
         def __init__(self) -> None:
             self.acquired: list[str] = []
 
-        async def acquire(self, sid: str) -> SessionExecutionContext:
+        async def acquire(self, sid: str, workspace_root=None) -> SessionExecutionContext:
             self.acquired.append(sid)
-            return SessionExecutionContext(sid, session_engine)
+            return SessionExecutionContext(sid, session_engine, Path(str(workspace_root or "/tmp")))
 
     service = RuntimeLeapService(SimpleNamespace(llm_context_length=100))
     service._ctx = FakeContext()
@@ -264,6 +264,204 @@ async def test_engine_chat_routes_turn_to_session_engine() -> None:
     unrouted = [c async for c in service.engine_chat("yo", request_id="r2")]
     assert service._session_registry.acquired == ["S1"]  # unchanged: registry not consulted
     assert [c.content for c in unrouted if c.content] == ["BASE:yo", "done"]
+
+
+@pytest.mark.asyncio
+async def test_engine_chat_binds_each_session_to_its_client_workspace(tmp_path) -> None:
+    """A shared daemon must execute each TUI session inside that client's cwd."""
+    from types import SimpleNamespace
+
+    from leapflow.daemon.service import RuntimeLeapService
+    from leapflow.engine import StreamEvent
+
+    base_workspace = tmp_path / "daemon-base"
+    work_a = tmp_path / "work-a"
+    work_b = tmp_path / "work-b"
+    for path in (base_workspace, work_a, work_b):
+        path.mkdir()
+
+    class FakeWm:
+        _max_tokens = 128
+
+    class WorkspaceEngine:
+        def __init__(self) -> None:
+            self._settings = SimpleNamespace(workspace_root=base_workspace)
+            self._wm = FakeWm()
+            self._current_session_id = ""
+
+        def _new_governance(self):
+            return object()
+
+        async def run_stream(self, message: str, *, enable_thinking: bool = False, request_id: str = ""):
+            yield StreamEvent(type="final", content=str(self._settings.workspace_root))
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.settings = SimpleNamespace(llm_context_length=100)
+            self.engine = WorkspaceEngine()
+
+        def reload_runtime_config_if_changed(self) -> bool:
+            return False
+
+    service = RuntimeLeapService(
+        SimpleNamespace(
+            llm_context_length=100,
+            daemon_max_concurrent_turns=2,
+            daemon_max_live_sessions=16,
+            daemon_session_idle_ttl_s=1800.0,
+        )
+    )
+    service._ctx = FakeContext()
+
+    out_a = [
+        c.content async for c in service.engine_chat(
+            "hi", request_id="r-a", session_id="A", workspace_root=str(work_a),
+        )
+        if c.content
+    ]
+    out_b = [
+        c.content async for c in service.engine_chat(
+            "hi", request_id="r-b", session_id="B", workspace_root=str(work_b),
+        )
+        if c.content
+    ]
+
+    assert out_a == [str(work_a.resolve())]
+    assert out_b == [str(work_b.resolve())]
+    assert service._ctx.engine._settings.workspace_root == base_workspace
+    assert service._session_registry.session_ids() == ["A", "B"]
+
+
+@pytest.mark.asyncio
+async def test_engine_chat_rejects_same_session_from_different_workspace(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from leapflow.daemon.service import RuntimeLeapService
+    from leapflow.engine import StreamEvent
+
+    work_a = tmp_path / "work-a"
+    work_b = tmp_path / "work-b"
+    work_a.mkdir()
+    work_b.mkdir()
+
+    class FakeWm:
+        _max_tokens = 128
+
+    class WorkspaceEngine:
+        def __init__(self) -> None:
+            self._settings = SimpleNamespace(workspace_root=work_a)
+            self._wm = FakeWm()
+            self._current_session_id = ""
+
+        def _new_governance(self):
+            return object()
+
+        async def run_stream(self, message: str, *, enable_thinking: bool = False, request_id: str = ""):
+            yield StreamEvent(type="final", content="ok")
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.settings = SimpleNamespace(llm_context_length=100)
+            self.engine = WorkspaceEngine()
+
+        def reload_runtime_config_if_changed(self) -> bool:
+            return False
+
+    service = RuntimeLeapService(
+        SimpleNamespace(
+            llm_context_length=100,
+            daemon_max_concurrent_turns=2,
+            daemon_max_live_sessions=16,
+            daemon_session_idle_ttl_s=1800.0,
+        )
+    )
+    service._ctx = FakeContext()
+
+    first = [
+        c async for c in service.engine_chat(
+            "hi", request_id="r1", session_id="S", workspace_root=str(work_a),
+        )
+    ]
+    second = [
+        c async for c in service.engine_chat(
+            "hi", request_id="r2", session_id="S", workspace_root=str(work_b),
+        )
+    ]
+
+    assert [c.content for c in first if c.content] == ["ok"]
+    assert len(second) == 1
+    assert second[0].event_type == "error"
+    assert second[0].metadata["workspace_mismatch"] is True
+    assert second[0].metadata["expected_workspace_root"] == str(work_a.resolve())
+    assert second[0].metadata["requested_workspace_root"] == str(work_b.resolve())
+
+
+@pytest.mark.asyncio
+async def test_engine_chat_rejects_resume_of_session_from_a_different_workspace(tmp_path) -> None:
+    """P1-C: after a daemon restart the in-memory registry is empty, but a
+    session's persisted origin workspace still blocks resuming it elsewhere."""
+    from types import SimpleNamespace
+
+    from leapflow.daemon.service import RuntimeLeapService
+    from leapflow.engine import StreamEvent
+
+    work_a = tmp_path / "work-a"
+    work_b = tmp_path / "work-b"
+    work_a.mkdir()
+    work_b.mkdir()
+
+    class FakeWm:
+        _max_tokens = 128
+
+    class FakeStore:
+        def get_session(self, session_id):
+            # The session "S" was first created in work_a.
+            if session_id == "S":
+                return SimpleNamespace(cwd=str(work_a.resolve()))
+            return None
+
+    class WorkspaceEngine:
+        def __init__(self) -> None:
+            self._settings = SimpleNamespace(workspace_root=work_b)
+            self._wm = FakeWm()
+            self._current_session_id = ""
+            self._conversation_store = FakeStore()
+
+        def _new_governance(self):
+            return object()
+
+        async def run_stream(self, message: str, *, enable_thinking: bool = False, request_id: str = ""):
+            yield StreamEvent(type="final", content="ok")
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.settings = SimpleNamespace(llm_context_length=100)
+            self.engine = WorkspaceEngine()
+
+        def reload_runtime_config_if_changed(self) -> bool:
+            return False
+
+    service = RuntimeLeapService(
+        SimpleNamespace(
+            llm_context_length=100,
+            daemon_max_concurrent_turns=2,
+            daemon_max_live_sessions=16,
+            daemon_session_idle_ttl_s=1800.0,
+        )
+    )
+    service._ctx = FakeContext()
+
+    # Fresh registry (as after a restart): resuming S in work_b must be rejected.
+    out = [
+        c async for c in service.engine_chat(
+            "hi", request_id="r1", session_id="S", workspace_root=str(work_b),
+        )
+    ]
+    assert len(out) == 1
+    assert out[0].event_type == "error"
+    assert out[0].metadata["workspace_mismatch"] is True
+    assert out[0].metadata["expected_workspace_root"] == str(work_a.resolve())
+    assert out[0].metadata["requested_workspace_root"] == str(work_b.resolve())
 
 
 @pytest.mark.asyncio
@@ -491,6 +689,54 @@ async def test_client_lease_blocks_daemon_idle_shutdown(tmp_path) -> None:
             pass
 
 
+def test_client_lease_snapshot_exposes_cwd(tmp_path) -> None:
+    """P1-B: the lease records the client's cwd so status can show its workspace."""
+    import os
+
+    from leapflow.daemon.lease import ClientLease, read_active_client_leases
+
+    async def scenario():
+        runtime_dir = tmp_path / "runtime"
+        lease = ClientLease(runtime_dir, kind="tui", session_id="sess-cwd")
+        await lease.start()
+        try:
+            return read_active_client_leases(runtime_dir, ttl_s=60.0)
+        finally:
+            await lease.stop()
+
+    snaps = asyncio.run(scenario())
+    assert len(snaps) == 1
+    assert snaps[0].cwd == os.getcwd()
+    assert snaps[0].session_id == "sess-cwd"
+
+
+def test_status_client_summaries_include_workspace(tmp_path) -> None:
+    """P1-B: status exposes per-client workspace for shared-daemon observability."""
+    from types import SimpleNamespace
+
+    from leapflow.daemon.lease import ClientLeaseSnapshot
+    from leapflow.daemon.service import RuntimeLeapService
+
+    service = RuntimeLeapService(SimpleNamespace(llm_context_length=100))
+    service._client_leases = lambda: [
+        ClientLeaseSnapshot(
+            client_id="c1", pid=111, kind="tui", state="busy",
+            session_id="sess-A", started_at=0.0, last_seen_at=0.0,
+            path=tmp_path / "c1.json", cwd="/work/a",
+        ),
+        ClientLeaseSnapshot(
+            client_id="c2", pid=222, kind="tui", state="idle",
+            session_id="sess-B", started_at=0.0, last_seen_at=0.0,
+            path=tmp_path / "c2.json", cwd="/work/b",
+        ),
+    ]
+    summaries = service._client_lease_summaries()
+    assert [(s["session_id"], s["workspace_root"], s["state"]) for s in summaries] == [
+        ("sess-A", "/work/a", "busy"),
+        ("sess-B", "/work/b", "idle"),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_runtime_service_streams_pending_approval_and_resolves(tmp_path) -> None:
     from conftest import make_settings
@@ -644,8 +890,8 @@ async def test_concurrent_sessions_run_in_parallel_when_admission_allows() -> No
     engines = {"A": ConcEngine("A"), "B": ConcEngine("B")}
 
     class FakeRegistry:
-        async def acquire(self, sid: str) -> SessionExecutionContext:
-            return SessionExecutionContext(sid, engines[sid])
+        async def acquire(self, sid: str, workspace_root=None) -> SessionExecutionContext:
+            return SessionExecutionContext(sid, engines[sid], Path(str(workspace_root or "/tmp")))
 
     class FakeContext:
         def __init__(self) -> None:
@@ -723,8 +969,8 @@ async def test_two_daemon_clients_stream_concurrently_through_dispatch_stream() 
     engines = {"A": ConcApprovalEngine("A", service), "B": ConcApprovalEngine("B", service)}
 
     class FakeRegistry:
-        async def acquire(self, sid: str) -> SessionExecutionContext:
-            return SessionExecutionContext(sid, engines[sid])
+        async def acquire(self, sid: str, workspace_root=None) -> SessionExecutionContext:
+            return SessionExecutionContext(sid, engines[sid], Path(str(workspace_root or "/tmp")))
 
     class FakeContext:
         def __init__(self) -> None:
@@ -807,8 +1053,8 @@ async def test_four_daemon_clients_run_and_fifth_queues_through_dispatch_stream(
     engines = {tag: HoldEngine(tag) for tag in ["A", "B", "C", "D", "E"]}
 
     class FakeRegistry:
-        async def acquire(self, sid: str) -> SessionExecutionContext:
-            return SessionExecutionContext(sid, engines[sid])
+        async def acquire(self, sid: str, workspace_root=None) -> SessionExecutionContext:
+            return SessionExecutionContext(sid, engines[sid], Path(str(workspace_root or "/tmp")))
 
     class FakeContext:
         def __init__(self) -> None:
@@ -903,8 +1149,13 @@ async def test_client_engine_chat_forwards_session_id(monkeypatch) -> None:
 
     client = DaemonClient(Path("/tmp/leapd-test.sock"))
 
-    _ = [e async for e in client.engine_chat("hi", session_id="sess-X")]
+    _ = [e async for e in client.engine_chat(
+        "hi",
+        session_id="sess-X",
+        workspace_root="/tmp/work-X",
+    )]
     assert captured["req"]["params"]["session_id"] == "sess-X"
+    assert captured["req"]["params"]["workspace_root"] == "/tmp/work-X"
     assert captured["req"]["params"]["message"] == "hi"
 
     captured.clear()
@@ -941,8 +1192,8 @@ async def test_engine_chat_binds_engine_to_routed_session() -> None:
             return False
 
     class FakeRegistry:
-        async def acquire(self, sid: str) -> SessionExecutionContext:
-            return SessionExecutionContext(sid, session_engine)
+        async def acquire(self, sid: str, workspace_root=None) -> SessionExecutionContext:
+            return SessionExecutionContext(sid, session_engine, Path(str(workspace_root or "/tmp")))
 
     service = RuntimeLeapService(SimpleNamespace(llm_context_length=100))
     service._ctx = FakeContext()

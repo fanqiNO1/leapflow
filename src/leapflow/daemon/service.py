@@ -278,15 +278,26 @@ class RuntimeLeapService:
         await ctx.event_bus.handle_event(event_type, payload)
         return {"ok": True}
 
-    async def memory_search(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    async def memory_search(
+        self, query: str, *, limit: int = 10, workspace_root: str = ""
+    ) -> list[dict[str, Any]]:
         ctx = self.context
-        memory_query = MemoryQuery(keywords=query.split()[:8], limit=limit)
+        memory_query = MemoryQuery(
+            keywords=query.split()[:8], limit=limit, workspace_root=workspace_root
+        )
         results = await ctx.memory.search(memory_query)
         return [self._memory_entry_to_dict(item) for item in results]
 
-    async def memory_insert(self, content: str, kind: str = "fact", **kwargs: Any) -> str:
+    async def memory_insert(
+        self, content: str, kind: str = "fact", *, workspace_root: str = "", **kwargs: Any
+    ) -> str:
         ctx = self.context
         metadata = dict(kwargs.get("metadata") or {})
+        if workspace_root and "workspace_root" not in metadata:
+            try:
+                metadata["workspace_root"] = str(Path(workspace_root).expanduser().resolve())
+            except (OSError, RuntimeError, ValueError):
+                metadata["workspace_root"] = workspace_root
         entry_id = ctx.lt.ingest(kind, content, metadata=metadata)
         return str(entry_id)
 
@@ -318,8 +329,11 @@ class RuntimeLeapService:
             s = self._settings
             self._session_registry = SessionRegistry(
                 base_engine=base_engine,
-                build_engine=lambda base, sid, wm: build_session_engine(
-                    base, session_id=sid, working_memory=wm
+                build_engine=lambda base, sid, wm, workspace_root: build_session_engine(
+                    base,
+                    session_id=sid,
+                    working_memory=wm,
+                    workspace_root=workspace_root,
                 ),
                 build_working_memory=lambda: WorkingMemoryProvider(max_tokens=max_tokens),
                 max_sessions=int(getattr(s, "daemon_max_live_sessions", 16) or 16),
@@ -337,6 +351,7 @@ class RuntimeLeapService:
 
     async def engine_chat(self, message: str, **kwargs: Any) -> AsyncIterator[StreamChunk]:
         request_id = str(kwargs.get("request_id") or uuid.uuid4().hex[:12])
+        workspace_arg = str(kwargs.get("workspace_root") or "").strip()
         # Turns are admitted up to daemon.max_concurrent_turns. When every slot
         # is busy (a long task can hold one for minutes), tell the waiting client
         # immediately instead of leaving it on a silent "thinking" spinner while
@@ -419,17 +434,60 @@ class RuntimeLeapService:
                 # engines so their working memory / per-turn state never
                 # cross-contaminate. Turns are admitted by TurnAdmission (bounded
                 # by daemon.max_concurrent_turns) and serialized within a session.
-                # Un-sessioned turns keep using the base engine directly, which
-                # is also the primary session's engine, so the two stay
-                # consistent through a ""→real session_id transition.
-                session_id = str(
-                    kwargs.get("session_id")
-                    or getattr(engine, "_current_session_id", "")
-                    or ""
-                )
+                # Un-sessioned turns keep using the base engine directly unless
+                # the client supplied a workspace_root, in which case this turn
+                # gets an ephemeral scoped session below so it cannot inherit the
+                # shared daemon process cwd.
+                session_id = str(kwargs.get("session_id") or "")
+                workspace_root = workspace_arg or str(self._workspace_root())
+                if workspace_arg and not session_id:
+                    # A daemon-backed one-shot chat still needs a scoped engine
+                    # when the client supplied a workspace; use the request id as
+                    # an ephemeral session key so it cannot mutate the shared base
+                    # engine's workspace state.
+                    session_id = request_id
                 session_lock: asyncio.Lock | None = None
                 if session_id:
-                    exec_ctx = await self._ensure_session_registry(engine).acquire(session_id)
+                    from leapflow.daemon.session_registry import WorkspaceMismatchError
+
+                    try:
+                        # Persistence-aware guard: a resumed session must stay in
+                        # its origin workspace even across daemon restarts, where
+                        # the in-memory registry no longer holds the binding. It
+                        # keys off the client's explicit declaration
+                        # (``workspace_arg``), never the daemon cwd fallback, so a
+                        # caller that does not declare a workspace can never
+                        # trigger a false rejection. It raises the same error type
+                        # as the live-collision guard so both share one render path.
+                        if workspace_arg:
+                            persisted_root = self._persisted_session_workspace(engine, session_id)
+                            if persisted_root:
+                                expected = Path(persisted_root).expanduser().resolve()
+                                requested = Path(workspace_arg).expanduser().resolve()
+                                if expected != requested:
+                                    raise WorkspaceMismatchError(session_id, expected, requested)
+                        exec_ctx = await self._ensure_session_registry(engine).acquire(
+                            session_id,
+                            workspace_root=workspace_root,
+                        )
+                    except WorkspaceMismatchError as exc:
+                        chunk = StreamChunk(
+                            request_id=request_id,
+                            content=str(exc),
+                            event_type="error",
+                            metadata={
+                                "request_id": request_id,
+                                "workspace_mismatch": True,
+                                "session_id": exc.session_id,
+                                "expected_workspace_root": str(exc.expected),
+                                "requested_workspace_root": str(exc.requested),
+                            },
+                        )
+                        request_record["chunks"].append(chunk)
+                        request_record["status"] = "failed"
+                        request_record["completed_at"] = time.time()
+                        yield chunk
+                        return
                     engine = exec_ctx.engine
                     session_lock = exec_ctx.lock
                     # Bind the engine to the routed session so it runs and
@@ -870,6 +928,7 @@ class RuntimeLeapService:
             "active_clients": max(0, self._client_count()),
             "active_connections": max(0, self._client_count()),
             "connected_clients": len(self._client_leases()),
+            "clients": self._client_lease_summaries(),
             "model": getattr(settings, "llm_model", ""),
             "llm_context_length": context_metadata.get("llm_context_length", getattr(settings, "llm_context_length", 0)),
             "context_used": context_metadata.get("context_used", 0),
@@ -888,6 +947,40 @@ class RuntimeLeapService:
             "watch_summary": watch_summary,
             "host_backend": self._host_backend_status(ctx),
         }
+
+    def _persisted_session_workspace(self, engine: Any, session_id: str) -> str:
+        """Return the workspace a session was first created in, if persisted.
+
+        Used to reject resuming a conversation in a different workspace after a
+        daemon restart (the in-memory registry binding is gone, but the stored
+        session still remembers its origin cwd).
+        """
+        store = getattr(engine, "_conversation_store", None)
+        if store is None:
+            return ""
+        try:
+            session = store.get_session(session_id)
+        except Exception:
+            return ""
+        return str(getattr(session, "cwd", "") or "") if session is not None else ""
+
+    def _client_lease_summaries(self) -> list[dict[str, Any]]:
+        """Per-client lease view (kind/session/workspace) for status observability.
+
+        On a daemon shared across TUIs this surfaces which workspace each client
+        is bound to, so cross-workspace confusion is diagnosable at a glance.
+        """
+        summaries: list[dict[str, Any]] = []
+        for snap in self._client_leases():
+            summaries.append({
+                "client_id": snap.client_id,
+                "pid": snap.pid,
+                "kind": snap.kind,
+                "state": snap.state,
+                "session_id": snap.session_id,
+                "workspace_root": snap.cwd,
+            })
+        return summaries
 
     async def host_status(self) -> dict[str, Any]:
         """Return daemon-owned host backend status."""

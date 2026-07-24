@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -73,13 +74,27 @@ def test_build_session_engine_isolates_substrate() -> None:
         try:
             wm_a = WorkingMemoryProvider(max_tokens=512)
             wm_b = WorkingMemoryProvider(max_tokens=512)
-            a = build_session_engine(base, session_id="sess-a", working_memory=wm_a)
-            b = build_session_engine(base, session_id="sess-b", working_memory=wm_b)
+            a = build_session_engine(
+                base,
+                session_id="sess-a",
+                working_memory=wm_a,
+                workspace_root="/tmp/work-a",
+            )
+            b = build_session_engine(
+                base,
+                session_id="sess-b",
+                working_memory=wm_b,
+                workspace_root="/tmp/work-b",
+            )
 
             # Fresh, distinct per-session substrate.
             assert a._wm is wm_a and b._wm is wm_b and a._wm is not b._wm
             assert a._tool_execution_ledger is not b._tool_execution_ledger
             assert a._current_session_id == "sess-a" and b._current_session_id == "sess-b"
+            assert a._settings.workspace_root == Path("/tmp/work-a").resolve()
+            assert b._settings.workspace_root == Path("/tmp/work-b").resolve()
+            assert a._settings is not b._settings and a._settings is not base._settings
+            assert base._settings.workspace_root != Path("/tmp/work-a").resolve()
             assert a._active_frame is None and b._active_frame is None
             assert a._cancel_requested is False and b._cancel_requested is False
 
@@ -101,8 +116,18 @@ async def test_concurrent_session_engines_are_isolated() -> None:
     with tempfile.TemporaryDirectory() as td:
         base, lt = _build_base_engine(td, _EchoLLM())
         try:
-            a = build_session_engine(base, session_id="A", working_memory=WorkingMemoryProvider(max_tokens=512))
-            b = build_session_engine(base, session_id="B", working_memory=WorkingMemoryProvider(max_tokens=512))
+            a = build_session_engine(
+                base,
+                session_id="A",
+                working_memory=WorkingMemoryProvider(max_tokens=512),
+                workspace_root="/tmp/work-a",
+            )
+            b = build_session_engine(
+                base,
+                session_id="B",
+                working_memory=WorkingMemoryProvider(max_tokens=512),
+                workspace_root="/tmp/work-b",
+            )
             out_a, out_b = await asyncio.gather(
                 a._unified_tool_loop("MARKER-AAA-111"),
                 b._unified_tool_loop("MARKER-BBB-222"),

@@ -26,6 +26,7 @@ class ClientLeaseSnapshot:
     started_at: float
     last_seen_at: float
     path: Path
+    cwd: str = ""
 
 
 def default_lease_ttl_s() -> float:
@@ -167,6 +168,7 @@ def _read_lease(path: Path) -> ClientLeaseSnapshot | None:
             started_at=float(payload.get("started_at") or 0.0),
             last_seen_at=float(payload.get("last_seen_at") or 0.0),
             path=path,
+            cwd=str(payload.get("cwd") or ""),
         )
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None

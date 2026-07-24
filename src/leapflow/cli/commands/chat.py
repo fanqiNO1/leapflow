@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable
 
 from leapflow.cli.helpers import require_initialized
@@ -73,7 +74,11 @@ async def _handle_approval_event(event: Any, approval_resolver: ApprovalResolver
 async def cmd_chat_daemon(client: "DaemonClient", prompt: str, thinking: bool) -> int:
     """Single-turn conversational mode backed by leapd."""
     return await render_chat_stream(
-        client.engine_chat(prompt, enable_thinking=thinking),
+        client.engine_chat(
+            prompt,
+            enable_thinking=thinking,
+            workspace_root=str(Path.cwd().resolve()),
+        ),
         lambda pending_id, decision: client.approval_resolve(pending_id, decision),
     )
 

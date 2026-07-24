@@ -151,12 +151,16 @@ class LeapService(Protocol):
         """Record a signal (observation, action, event)."""
         ...
 
-    async def memory_search(self, query: str, *, limit: int = 10) -> List[Dict[str, Any]]:
-        """Search memory across all providers."""
+    async def memory_search(
+        self, query: str, *, limit: int = 10, workspace_root: str = ""
+    ) -> List[Dict[str, Any]]:
+        """Search memory across all providers, scoped to the caller's workspace."""
         ...
 
-    async def memory_insert(self, content: str, kind: str = "fact", **kwargs: Any) -> str:
-        """Insert a memory entry. Returns entry_id."""
+    async def memory_insert(
+        self, content: str, kind: str = "fact", *, workspace_root: str = "", **kwargs: Any
+    ) -> str:
+        """Insert a memory entry tagged with the caller's workspace. Returns entry_id."""
         ...
 
     async def session_create(self, **kwargs: Any) -> Dict[str, Any]:

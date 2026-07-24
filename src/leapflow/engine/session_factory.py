@@ -19,6 +19,8 @@ See ``temp/plan/concurrent_turns_stage3.md`` (Approach D, §4.1–4.3).
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from leapflow.engine.prefix_commitment import PrefixCommitmentController
@@ -28,7 +30,25 @@ from leapflow.engine.tool_execution import ToolExecutionLedger
 from leapflow.engine.turn_usage import TurnUsageTracker
 
 
-def build_session_engine(base_engine: Any, *, session_id: str, working_memory: Any) -> Any:
+def _settings_for_workspace(settings: Any, workspace_root: str | Path | None) -> Any:
+    if settings is None or not workspace_root:
+        return settings
+    root = Path(str(workspace_root)).expanduser().resolve()
+    try:
+        return replace(settings, workspace_root=root)
+    except TypeError:
+        cloned = copy.copy(settings)
+        setattr(cloned, "workspace_root", root)
+        return cloned
+
+
+def build_session_engine(
+    base_engine: Any,
+    *,
+    session_id: str,
+    working_memory: Any,
+    workspace_root: str | Path | None = None,
+) -> Any:
     """Return a per-session engine sharing ``base_engine``'s wired services.
 
     The returned engine has its own working memory, idempotency ledger, and
@@ -44,6 +64,10 @@ def build_session_engine(base_engine: Any, *, session_id: str, working_memory: A
     internals are unchanged.
     """
     engine = copy.copy(base_engine)  # shallow copy: own __dict__, shared attr refs
+    engine._settings = _settings_for_workspace(
+        getattr(base_engine, "_settings", None),
+        workspace_root,
+    )
     # Fresh per-session substrate (the concurrency-corrupting parts).
     engine._wm = working_memory
     engine._tool_execution_ledger = ToolExecutionLedger()
