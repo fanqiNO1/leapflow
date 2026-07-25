@@ -5,6 +5,7 @@ manages lifecycle hooks, and exposes memory as LLM-callable tools.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import math
@@ -128,14 +129,20 @@ class MemoryManager:
 
     # ═══════════════ Core operations ═══════════════
 
-    async def insert(self, entry: MemoryEntry) -> str:
+    async def insert(self, entry: MemoryEntry, *, session_id: str = "") -> str:
         """Route entry to accepting providers and insert.
 
         Routing strategy:
         1. If a provider accepts() the entry → use it
         2. Otherwise fallback to first available provider
         After insert, fire on_inserted hook on all providers.
+
+        When *session_id* is provided, the entry is tagged with that session
+        so that session-scoped searches can later isolate it.
         """
+        if session_id:
+            entry.metadata = {**(entry.metadata or {}), "_session_id": session_id}
+
         inserted_by: Optional[str] = None
         entry_id = entry.entry_id
 
@@ -143,7 +150,13 @@ class MemoryManager:
             provider = self._providers[name]
             if provider.accepts(entry):
                 try:
-                    entry_id = await provider.insert(entry)
+                    # Pass session_id to providers that support it
+                    insert_fn = provider.insert
+                    sig = inspect.signature(insert_fn)
+                    if "session_id" in sig.parameters:
+                        entry_id = await insert_fn(entry, session_id=session_id)
+                    else:
+                        entry_id = await insert_fn(entry)
                     inserted_by = name
                     break
                 except Exception as exc:
@@ -153,7 +166,12 @@ class MemoryManager:
         if inserted_by is None and self._providers:
             first = self._providers[self._provider_order[0]]
             try:
-                entry_id = await first.insert(entry)
+                insert_fn = first.insert
+                sig = inspect.signature(insert_fn)
+                if "session_id" in sig.parameters:
+                    entry_id = await insert_fn(entry, session_id=session_id)
+                else:
+                    entry_id = await insert_fn(entry)
                 inserted_by = self._provider_order[0]
             except Exception as exc:
                 logger.warning("memory.insert_fallback_failed error=%s", exc)
@@ -275,8 +293,9 @@ class MemoryManager:
         workspace_root: str = "",
         task_id: str = "",
         scope_keywords: List[str] | None = None,
+        session_scope: str = "",
     ) -> List[MemoryEntry]:
-        """Quick search for LLM context injection with optional project/task scope."""
+        """Quick search for LLM context injection with optional project/task/session scope."""
         keywords = query_text.split()[:5]
         scope_terms = [term for term in (scope_keywords or []) if term]
         query = MemoryQuery(
@@ -285,6 +304,7 @@ class MemoryManager:
             workspace_root=workspace_root,
             task_id=task_id,
             scope_keywords=scope_terms,
+            session_scope=session_scope,
         )
         entries = await self.search(query)
         if workspace_root or scope_terms or task_id:
@@ -398,7 +418,7 @@ class MemoryManager:
         return entry
 
     async def sync_turn(
-        self, messages: List[Dict[str, Any]], *, workspace_root: str = ""
+        self, messages: List[Dict[str, Any]], *, workspace_root: str = "", session_id: str = ""
     ) -> None:
         """Background sync of conversation turn (fire-and-forget safe)."""
         # Extract last assistant message for storage
@@ -410,7 +430,7 @@ class MemoryManager:
                     content=msg["content"][:500],
                 )
                 self.tag_entry_workspace(entry, workspace_root)
-                await self.insert(entry)
+                await self.insert(entry, session_id=session_id)
                 break
 
     # ═══════════════ Promotion ═══════════════

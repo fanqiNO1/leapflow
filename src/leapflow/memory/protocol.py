@@ -78,6 +78,7 @@ class MemoryQuery:
     workspace_root: str = ""
     task_id: str = ""
     scope_keywords: List[str] = field(default_factory=list)
+    session_scope: str = ""  # When non-empty, restrict results to this session
 
 
 @dataclass

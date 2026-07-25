@@ -4437,6 +4437,7 @@ class AgentEngine:
                         if self._current_task_contract else ""
                     ),
                     scope_keywords=self._task_scope_keywords(user_text),
+                    session_scope=self._current_session_id or "",
                 ),
                 timeout=self._settings.memory_prefetch_timeout_s,
             )
@@ -4463,7 +4464,11 @@ class AgentEngine:
                 if self._current_task_contract else ""
             )
             await asyncio.wait_for(
-                self._memory_manager.sync_turn(messages, workspace_root=workspace_root),
+                self._memory_manager.sync_turn(
+                    messages,
+                    workspace_root=workspace_root,
+                    session_id=self._current_session_id or "",
+                ),
                 timeout=self._settings.memory_prefetch_timeout_s,
             )
             logger.debug("memory.sync_turn completed")

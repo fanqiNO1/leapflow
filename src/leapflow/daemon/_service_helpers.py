@@ -1,0 +1,203 @@
+"""Pure utility functions extracted from service.py to keep the orchestrator slim."""
+from __future__ import annotations
+
+import logging
+from typing import Any, TYPE_CHECKING
+
+from leapflow.engine import StreamEvent
+from leapflow.memory.protocol import MemoryEntry
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+# ── Stream event helpers ─────────────────────────────────────────────
+
+def normalize_stream_event(event: object) -> StreamEvent:
+    """Coerce an arbitrary engine event into a StreamEvent."""
+    if isinstance(event, StreamEvent):
+        return event
+    return StreamEvent(type="chunk", content=str(event), metadata=None)
+
+
+def memory_entry_to_dict(entry: MemoryEntry) -> dict[str, Any]:
+    """Serialize a MemoryEntry to a JSON-friendly dict."""
+    return {
+        "entry_id": entry.entry_id,
+        "kind": entry.kind.value,
+        "domain": entry.domain.value,
+        "content": entry.content,
+        "timestamp": entry.timestamp,
+        "score": entry.score,
+        "metadata": dict(entry.metadata),
+    }
+
+
+# ── Engine / context metadata ────────────────────────────────────────
+
+def engine_context_metadata(engine: Any | None, settings: Any) -> dict[str, Any]:
+    """Return safe context-budget metadata for daemon status and stream events."""
+    context_length = max(0, int(getattr(settings, "llm_context_length", 0) or 0))
+    metadata: dict[str, Any] = {
+        "llm_context_length": context_length,
+        "context_used": 0,
+    }
+    if engine is None:
+        return metadata
+    metadata["context_used"] = max(0, int(getattr(engine, "context_token_count", 0) or 0))
+    snapshot = getattr(engine, "context_budget_snapshot", {})
+    if callable(snapshot):
+        snapshot = snapshot()
+    if isinstance(snapshot, dict) and snapshot:
+        safe_snapshot = dict(snapshot)
+        if safe_snapshot.get("context_length"):
+            metadata["llm_context_length"] = max(1, int(safe_snapshot["context_length"]))
+        if safe_snapshot.get("total_tokens") is not None:
+            metadata["context_used"] = max(0, int(safe_snapshot["total_tokens"]))
+        posture = safe_snapshot.get("context_posture")
+        if posture:
+            metadata["context_posture"] = str(posture)
+        signal = safe_snapshot.get("context_signal")
+        if signal:
+            metadata["context_signal"] = str(signal)
+        guidance = safe_snapshot.get("context_guidance")
+        if guidance:
+            metadata["context_guidance"] = str(guidance)
+        for key in (
+            "compression_reason",
+            "compression_savings_ratio",
+            "compression_saved_tokens",
+            "disclosure_level",
+            "disclosure_reason",
+            "disclosure",
+        ):
+            if safe_snapshot.get(key) is not None:
+                metadata[key] = safe_snapshot[key]
+        metadata["context_budget_snapshot"] = safe_snapshot
+    return metadata
+
+
+def host_backend_status(ctx: Any | None) -> dict[str, Any]:
+    """Inspect daemon host-backend state for status reporting."""
+    if ctx is None:
+        return {"backend": "none", "started": False, "reason": "runtime_not_initialized"}
+    rpc = getattr(ctx, "rpc", None)
+    snapshot = getattr(rpc, "status_snapshot", None)
+    if callable(snapshot):
+        try:
+            return dict(snapshot())
+        except Exception as exc:
+            return {"backend": type(rpc).__name__, "started": False, "last_error": str(exc)}
+    return {
+        "backend": type(rpc).__name__ if rpc is not None else "none",
+        "started": rpc is not None,
+        "pid": None,
+        "pid_source": "unavailable",
+    }
+
+
+def persisted_session_workspace(engine: Any, session_id: str) -> str:
+    """Return the workspace a session was first created in, if persisted."""
+    store = getattr(engine, "_conversation_store", None)
+    if store is None:
+        return ""
+    try:
+        session = store.get_session(session_id)
+    except Exception:
+        return ""
+    return str(getattr(session, "cwd", "") or "") if session is not None else ""
+
+
+def checkpoint_open_connection(ctx: Any) -> None:
+    """Issue a DuckDB CHECKPOINT before daemon shutdown."""
+    holder = getattr(ctx, "_db_holder", None)
+    conn = getattr(holder, "_conn", None)
+    if conn is None:
+        return
+    try:
+        conn.execute("CHECKPOINT")
+    except Exception:
+        logger.debug("daemon: DuckDB checkpoint skipped", exc_info=True)
+
+
+def runtime_source() -> str:
+    import leapflow
+    return str(getattr(leapflow, "__file__", ""))
+
+
+def runtime_version() -> str:
+    try:
+        from leapflow.version import __version__
+    except ImportError:
+        return "unknown"
+    return str(__version__)
+
+
+# ── Notification wiring ──────────────────────────────────────────────
+
+def install_learn_notifications(ctx: Any, bus: Any) -> None:
+    """Wire session learn-progress/completion callbacks to a NotificationBus."""
+    def _on_progress(stage: str, current: int, total: int) -> None:
+        bus.emit_event(
+            "teach.progress",
+            phase=stage,
+            current=current,
+            total=total,
+            progress=current / total if total > 0 else 0.0,
+        )
+
+    def _on_complete(result: Any) -> None:
+        payload: dict[str, Any] = {"phase": "done"}
+        if result:
+            payload["step_count"] = getattr(result, "step_count", 0)
+            payload["duration"] = getattr(result, "duration", 0.0)
+            candidates = getattr(result, "candidates", None) or []
+            payload["candidate_count"] = len(candidates)
+            activated = getattr(result, "activated_skill_names", None) or set()
+            payload["activated_skills"] = list(activated)
+            new = getattr(result, "new_skills", None) or []
+            payload["new_skills"] = list(new)
+        bus.emit_event("teach.complete", **payload)
+
+    if ctx.session:
+        ctx.session.set_on_learn_progress(_on_progress)
+        if hasattr(ctx.session, "set_on_learn_complete"):
+            ctx.session.set_on_learn_complete(_on_complete)
+
+        original_on_idle = ctx.session._on_idle_timeout
+
+        def _on_idle_with_notification() -> None:
+            bus.emit_event("teach.stopped", reason="idle_timeout")
+            original_on_idle()
+
+        ctx.session._on_idle_timeout = _on_idle_with_notification
+
+
+# ── ProducerServices facade (used by monitor_coordinator) ────────────
+
+class ProducerServices:
+    """Facade exposing daemon capabilities to monitor producers (session, etc.)."""
+
+    def __init__(self, service: Any) -> None:
+        self._service = service
+
+    async def session_history(self) -> dict[str, Any]:
+        return await self._service.session_history()
+
+    async def analyze_session(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        prior: dict[str, Any] | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        return await self._service._session_coordinator.analyze_llm(
+            self._service._ctx, messages, artifacts=artifacts
+        )
+
+    async def should_refresh(self, messages: list[dict[str, Any]]) -> bool:
+        return await self._service._session_coordinator.should_refresh(
+            self._service._ctx, messages
+        )

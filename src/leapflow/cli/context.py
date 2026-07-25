@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -482,6 +483,23 @@ class Context:
         self._evolution_policy: Optional[EMAConfidencePolicy] = None
         self._pattern_miner: Optional[Any] = None
 
+        # Deferred initialization tracking
+        self._deferred_initialized: bool = False
+        self._deferred_lock: asyncio.Lock = asyncio.Lock()
+
+        # Intermediate attributes shared between critical and deferred init
+        self._critical_codegen: Optional[Any] = None
+        self._critical_traj_store: Optional[Any] = None
+        self._critical_distiller: Optional[Any] = None
+        self._critical_intent_inferrer: Optional[Any] = None
+        self._critical_attention_filters: Optional[List[Any]] = None
+        self._critical_surprise_annotator: Optional[Any] = None
+        self._critical_scorer: Optional[Any] = None
+        self._critical_llm_scorer: Optional[Any] = None
+        self._critical_feedback_evaluator: Optional[Any] = None
+        self._critical_activator: Optional[Any] = None
+        self._critical_tool_bridge: Optional[Any] = None
+
         # Unified approval gate is resource-free; create it in __init__ so all
         # initialize() wiring paths can safely reference the same session gate.
         from leapflow.security.approval import SessionAwareGate
@@ -500,6 +518,28 @@ class Context:
     def set_approval_handler(self, handler: Optional[Callable[["ApprovalRequest"], Any]]) -> None:
         """Bind the current interactive surface as the approval renderer."""
         self._tui_approval.set_handler(handler)
+
+    async def _ensure_deferred(self) -> None:
+        """Wait for deferred init if still pending, or trigger it."""
+        if self._deferred_initialized:
+            return
+        async with self._deferred_lock:
+            if self._deferred_initialized:
+                return
+            await self.initialize_deferred()
+            self._deferred_initialized = True
+
+    async def _ensure_skill_system(self) -> None:
+        """Ensure skill registry is fully populated (deferred skills loaded)."""
+        if self._deferred_initialized:
+            return
+        await self._ensure_deferred()
+
+    async def _ensure_world_model(self) -> None:
+        """Ensure world model components are ready."""
+        if self.prediction_loop is not None:
+            return
+        await self._ensure_deferred()
 
     def _configure_llm_clients(self, settings: Settings) -> None:
         """Build LLM/VLM clients from a settings snapshot."""
@@ -949,12 +989,16 @@ class Context:
         return bool(getattr(self._db_holder, "is_volatile", False))
 
     async def initialize(self) -> None:
-        """Async initialization: VSI handshake, pipeline assembly.
+        """Full initialization - used by CLI direct mode."""
+        await self.initialize_critical()
+        await self.initialize_deferred()
+        self._deferred_initialized = True
 
-        Phases:
-            1. Memory providers initialization
-            2. CuaDriver connection / mock setup
-            3. Platform adapter registration
+    async def initialize_critical(self) -> None:
+        """Critical-path initialization: platform, memory, engine core.
+
+        Must complete before service.start() returns. Provides enough state
+        for the engine to handle basic chat requests.
         """
         settings = self.settings
 
@@ -1066,24 +1110,6 @@ class Context:
         perception_session = _build_visual_components(settings, self.rpc)
         self.perception_session = perception_session
 
-        # Video-mode components
-        video_recorder = None
-        video_analyzer = None
-        video_segmenter = None
-        signal_timeline = None
-        if settings.recording_mode.uses_video and settings.visual_track_enabled:
-            if settings.has_vlm_credentials:
-                video_recorder, video_analyzer, video_segmenter, signal_timeline = (
-                    _build_video_components(settings, self.rpc, self.vlm or self.llm)
-                )
-            else:
-                message = (
-                    "Video analysis disabled: LEAPFLOW_VLM_API_KEY or "
-                    "LEAPFLOW_LLM_API_KEY is required for visual recording mode."
-                )
-                logger.warning(message)
-                _emit_status(message)
-
         platform_hint = manifest.platform_id.value
 
         from leapflow.analysis.abstractor import ActionAbstractor
@@ -1111,52 +1137,15 @@ class Context:
                 warmup_events=settings.surprise_warmup_events,
             ))
 
-        self.imitation = ImitationPipeline(
-            store=traj_store, distiller=distiller, codegen=codegen,
-            intent_inferrer=intent_inferrer,
-            abstractor=abstractor,
-            perception_session=perception_session,
-            goal_relevance_threshold=settings.attention_goal_relevance_threshold,
-            attention_filters=attention_filters,
-            surprise_annotator=surprise_annotator,
-            rpc=self.rpc,
-            event_bus=self.event_bus,
-            text_capture_enabled=settings.text_capture_enabled,
-            text_capture_exclude_apps=settings.text_capture_exclude_apps,
-            text_capture_secure_roles=settings.text_capture_secure_roles,
-            text_capture_max_length=settings.text_capture_max_length,
-            clipboard_max_length=settings.clipboard_max_length,
-            recording_mode=settings.recording_mode,
-            mhms_fusion_enabled=settings.mhms_fusion_enabled,
-            video_recorder=video_recorder,
-            video_analyzer=video_analyzer,
-            video_segmenter=video_segmenter,
-            signal_timeline=signal_timeline,
-            observation_daemon=self._observation_daemon,
-            recording_profile=_default_recording_profile(settings),
-        )
-        self.event_bus.subscribe(self.imitation.recorder.on_event)
+        # Store intermediates for deferred phase
+        self._critical_codegen = codegen
+        self._critical_traj_store = traj_store
+        self._critical_distiller = distiller
+        self._critical_intent_inferrer = intent_inferrer
+        self._critical_attention_filters = attention_filters
+        self._critical_surprise_annotator = surprise_annotator
 
-        # Wire perception session into EventBus with shared attention context
-        if perception_session:
-            perception_session._recording_context = self.imitation.recorder.attention_context
-            perception_session.set_recording_mode(settings.recording_mode)
-            self.event_bus.subscribe(perception_session.on_system_event)
-
-        # Wire signal timeline into EventBus for video mode
-        if settings.recording_mode.uses_video and signal_timeline is not None:
-            if self.event_bus is not None:
-                self.event_bus.subscribe(signal_timeline.record_event)
-                logger.info("EventBus -> SignalTimeline subscription established")
-            else:
-                logger.warning(
-                    "EventBus is None — skipping SignalTimeline subscription"
-                )
-        elif settings.recording_mode.uses_video and signal_timeline is None:
-            logger.warning(
-                "SignalTimeline is None — skipping EventBus subscription "
-                "(video mode active but timeline unavailable)"
-            )
+        # NOTE: ImitationPipeline, Video components are assembled in initialize_deferred()
 
         self.skill_lib = SkillLibraryStore(self._db_holder, audit_logger=self.audit)
         scorer = HeuristicSimilarityScorer()
@@ -1166,219 +1155,15 @@ class Context:
         )
 
         self.registry = build_default_registry(self.rpc, self.llm, self.wm, self.lt)
-
-        # ── World Model assembly ──
-        if settings.prediction_enabled:
-            from leapflow.world_model import (
-                LearningBudgetController,
-                ExperienceStore,
-                CuriosityConfig,
-                CuriositySignal,
-                PredictionLoop,
-                ExperienceReplayEngine,
-                TrajectoryGrader,
-            )
-            from leapflow.perception.state_snapshot import StateSnapshotService
-
-            self.learning_budget = LearningBudgetController(
-                prediction_budget=settings.prediction_budget,
-                comparison_budget=settings.comparison_budget,
-                replay_budget=settings.replay_budget,
-                grading_budget=settings.grading_budget,
-                distillation_budget=settings.distillation_budget,
-                discovery_baseline=settings.budget_discovery_baseline,
-                regression_baseline=settings.budget_regression_baseline,
-            )
-
-            embedding_provider = None
-            if settings.semantic_embedding_provider != "none":
-                from leapflow.world_model.embedding import (
-                    TFIDFEmbeddingProvider,
-                    LLMEmbeddingProvider,
-                )
-                if settings.semantic_embedding_provider == "llm":
-                    embedding_provider = LLMEmbeddingProvider(self.llm)
-                else:
-                    embedding_provider = TFIDFEmbeddingProvider()
-
-            self.experience_store = ExperienceStore(
-                self.lt,
-                embedding_provider=embedding_provider,
-                semantic_weight=settings.semantic_rerank_weight,
-            )
-            self.snapshot_service = StateSnapshotService(self.rpc, self.imm)
-            self.curiosity = CuriositySignal(
-                CuriosityConfig(
-                    alpha=settings.curiosity_alpha,
-                    beta=settings.curiosity_beta,
-                    gamma=settings.curiosity_gamma,
-                    auto_balance=settings.curiosity_auto_balance,
-                ),
-                experience_store=self.experience_store,
-            )
-            self.prediction_loop = PredictionLoop(
-                llm=self.llm,
-                snapshot_service=self.snapshot_service,
-                experience_store=self.experience_store,
-                budget=self.learning_budget,
-                enabled=settings.prediction_enabled,
-                delta_threshold=settings.prediction_delta_threshold,
-                structural_blend_weight=settings.prediction_structural_blend,
-                semantic_blend_weight=settings.prediction_semantic_blend,
-                semantic_compare_threshold=settings.prediction_semantic_threshold,
-                rag_advantage_floor=settings.prediction_rag_advantage_floor,
-                failure_advantage=settings.prediction_failure_advantage,
-            )
-            insight_callback = self._build_insight_callback()
-            self.replay_engine = ExperienceReplayEngine(
-                llm=self.llm,
-                experience_store=self.experience_store,
-                budget=self.learning_budget,
-                on_insight=insight_callback,
-                regression_sample_size=settings.replay_regression_sample_size,
-            )
-            self.trajectory_grader = TrajectoryGrader(
-                llm=self.llm,
-                experience_store=self.experience_store,
-                budget=self.learning_budget,
-            )
-            self.registry.set_prediction_loop(self.prediction_loop)
-
-            # Bridge CausalGraph → CuriositySignal (frequency data + graph reference)
-            if perception_session is not None:
-                self.curiosity.set_causal_graph(perception_session.causal_graph)
-                freq = perception_session.causal_graph.metadata.get("frequency_counter")
-                if freq:
-                    self.curiosity.load_frequency_counter(freq)
-
-            # Wire StateSnapshotService.update_focus() from EventBus
-            _ss = self.snapshot_service
-            def _on_focus_for_snapshot(event: Any) -> None:
-                if getattr(event, "event_type", "") == "app.focus_change":
-                    bid = event.payload.get("bundle_id", "")
-                    title = event.payload.get("window_title", "")
-                    if bid:
-                        _ss.update_focus(bid, title)
-            self.event_bus.subscribe(_on_focus_for_snapshot)
-
-            logger.info("World model initialized (prediction + curiosity + replay + OPD grading)")
-
-        activator = None
-        if perception and execution_adapter:
-            activator = SkillActivator(
-                self.registry, self.skill_lib, execution_adapter, perception,
-                codegen=codegen,
-            )
-            n_activated = activator.load_and_activate_all()
-            if n_activated:
-                logger.info("Activated %d learned skills from library", n_activated)
-
-        from leapflow.analysis.consensus import MultiTrajectoryDistiller
-        consensus_distiller = MultiTrajectoryDistiller(self.imitation)
-
-        self.doc_store = SkillDocStore(settings.skills_dir)
-        doc_generator: Optional[CompositeSkillDocGenerator] = None
-        if settings.has_llm_credentials:
-            doc_generator = CompositeSkillDocGenerator(
-                llm_generator=LLMSkillDocGenerator(self.llm),
-            )
-        else:
-            doc_generator = CompositeSkillDocGenerator()
-
-        self.active_observer = ActiveLearningObserver(
-            self.skill_lib, scorer, self.wm,
-            llm_scorer=llm_scorer,
-            feedback_evaluator=feedback_evaluator,
-            skill_activator=activator,
-            consensus_distiller=consensus_distiller,
-            doc_generator=doc_generator,
-            doc_store=self.doc_store,
-            skill_registry=self.registry,
-            llm=self.llm,
-            execution=execution_adapter,
-        )
-        observer = self.active_observer
-        self.imitation.set_on_candidates_ready(observer.on_candidates_ready)
-
-        # Wire curiosity signal from world model → active learning + attention tuner
-        if self.prediction_loop is not None and self.curiosity is not None:
-            _es = self.experience_store
-
-            from leapflow.recording.attention_tuner import AttentionTuner
-            pf_filter = None
-            for f in attention_filters:
-                if type(f).__name__ == "PerceptualFieldFilter":
-                    pf_filter = f
-                    break
-            self.attention_tuner = AttentionTuner(
-                self.imitation.recorder.attention_context,
-                perceptual_filter=pf_filter,
-                curiosity_expand_threshold=settings.attention_curiosity_expand_threshold,
-                accuracy_contract_threshold=settings.attention_accuracy_contract_threshold,
-            )
-            _tuner = self.attention_tuner
-
-            _ctx = self
-
-            def _on_prediction_outcome(outcome: Any) -> None:
-                score = _ctx.curiosity.compute(outcome)
-                exp_id = getattr(outcome, "experience_id", "")
-                if exp_id and _es is not None:
-                    _es.update_curiosity_score(exp_id, score.total)
-                _tuner.on_curiosity_signal(score, outcome)
-                observer.on_curiosity_signal(score, outcome)
-
-                # Delta-driven skill evolution: high delta means prediction
-                # was inaccurate (failure); low delta means accurate (success)
-                delta = getattr(outcome, "delta", 0.0)
-                evo_policy = _ctx._evolution_policy
-                skill_lib = _ctx.skill_lib
-                if evo_policy is not None and skill_lib is not None:
-                    action_desc = ""
-                    pred = getattr(outcome, "prediction", None)
-                    if pred is not None:
-                        action_desc = getattr(pred, "action_description", "")
-                    # Strip "skill:" / "bridge:" prefix for title lookup
-                    skill_title = action_desc.split(":", 1)[-1] if ":" in action_desc else action_desc
-                    if skill_title and (delta > 0.4 or delta < 0.15):
-                        try:
-                            stored = skill_lib.load_skill_by_title(skill_title)
-                            if stored:
-                                evo_outcome = evo_policy.on_execution_result(
-                                    stored.title,
-                                    success=(delta < 0.2),
-                                    duration_s=0.0,
-                                    current_confidence=stored.confidence,
-                                    current_version=stored.version,
-                                )
-                                skill_lib.update_skill_confidence(
-                                    stored.title, evo_outcome.new_confidence
-                                )
-                                if evo_outcome.tier_changed:
-                                    logger.info(
-                                        "Delta-driven evolution: '%s' confidence \u2192 %.3f",
-                                        stored.title, evo_outcome.new_confidence,
-                                    )
-                        except Exception:
-                            logger.debug("delta-driven evolution update failed", exc_info=True)
-
-            self.prediction_loop._on_outcome = _on_prediction_outcome
-
-        n_doc_skills = 0
-        for skill in self.doc_store.load_all_as_skills(
-            self.llm, execution=execution_adapter, perception=perception
-        ):
-            self.registry.register(skill)
-            n_doc_skills += 1
-        if n_doc_skills:
-            logger.info("Registered %d SKILL.md skills", n_doc_skills)
-
-        n_fallback = _register_stored_skill_fallbacks(
-            self.skill_lib, self.registry, self.llm,
-        )
-        if n_fallback:
-            logger.info("Registered %d stored skills as fallback", n_fallback)
-
+        
+        # Store scorers for deferred phase
+        self._critical_scorer = scorer
+        self._critical_llm_scorer = llm_scorer
+        self._critical_feedback_evaluator = feedback_evaluator
+        
+        # NOTE: World Model, SkillActivator, Learning Pipeline, Doc/Stored skills
+        # are assembled in initialize_deferred()
+        
         graph_planner = GraphPlanner(self.llm, self.registry) if settings.has_llm_credentials else None
         scheduler = TaskScheduler(
             self.registry, self.rpc, graph_planner=graph_planner,
@@ -1404,50 +1189,9 @@ class Context:
         )
         logger.info("Skill discovery initialized: %s", skills_dir)
 
-        from leapflow.engine.confirmation import ConfirmationHandler
-        confirmation = ConfirmationHandler(skill_store=self.skill_lib)
-
         self.session_store = LearningSessionStore(self._db_holder)
 
-        # Learnability assessor
-        learnability_assessor = None
-        if settings.learnability_enabled:
-            from leapflow.learning.learnability import DefaultLearnabilityAssessor, LearnabilityConfig
-            learnability_config = LearnabilityConfig(
-                min_steps=settings.learnability_min_steps,
-                min_duration_s=settings.learnability_min_duration_s,
-                max_idle_ratio=settings.learnability_max_idle_ratio,
-                min_action_diversity=settings.learnability_min_action_diversity,
-                learn_threshold=settings.learnability_learn_threshold,
-                ask_threshold=settings.learnability_ask_threshold,
-                vlm_enabled=settings.learnability_vlm_enabled,
-                llm_enabled=settings.learnability_llm_enabled,
-                rule_weight=settings.learnability_rule_weight,
-                vlm_weight=settings.learnability_vlm_weight,
-                llm_weight=settings.learnability_llm_weight,
-            )
-            learnability_assessor = DefaultLearnabilityAssessor(
-                llm=self.llm if settings.has_llm_credentials else None,
-                vlm=self.vlm,
-                config=learnability_config,
-            )
-
-        self._evolution_policy = EMAConfidencePolicy()
-        self.session = SessionController(
-            self.imitation,
-            self.registry,
-            idle_timeout=settings.learn_idle_timeout,
-            auto_learn=settings.learn_auto_distill,
-            confirmation=confirmation,
-            audit=self.audit,
-            storage_path=str(settings.duckdb_path),
-            audit_log_path=str(settings.audit_log_path),
-            active_learning_observer=observer,
-            session_store=self.session_store,
-            learnability_assessor=learnability_assessor,
-            evolution_policy=self._evolution_policy,
-            skill_store=self.skill_lib,
-        )
+        # NOTE: Learnability, SessionController are assembled in initialize_deferred()
 
         classifier: IntentClassifier = (
             LLMIntentClassifier(self.llm) if settings.has_llm_credentials else FallbackClassifier()
@@ -1456,124 +1200,13 @@ class Context:
         if settings.has_llm_credentials:
             self.assessor = LLMSituationalAssessor(self.llm)
 
-        # ── Workflow Copilot (proactive prediction pipeline) ──
-        if settings.copilot_enabled:
-            from leapflow.copilot import (
-                CopilotConfig,
-                ContextEncoder,
-                CopilotEventSubscriber,
-                PredictionEngine,
-                SpeculativePipeline,
-                IdleDetector,
-                FeedbackCollector,
-                EvolutionLoop,
-            )
-            from leapflow.copilot.predictors import (
-                L0HashPredictor,
-                L1MarkovPredictor,
-            )
-
-            copilot_config = CopilotConfig(
-                enabled=True,
-                action_ring_size=settings.copilot_action_ring_size,
-                min_idle_ms=settings.copilot_min_idle_ms,
-                max_idle_ms=settings.copilot_max_idle_ms,
-                cache_ttl_seconds=settings.copilot_cache_ttl_s,
-                speculative_cache_size=settings.copilot_speculative_cache_size,
-            )
-
-            # Context encoder
-            copilot_encoder = ContextEncoder(copilot_config)
-
-            # Predictors (L0 + L1 always; L2/L3 only if LLM available)
-            from leapflow.copilot.predictors.l0_hash import InMemoryContextHashStore
-
-            l0_store = InMemoryContextHashStore()
-            # Use SemanticHashAdapter for persistent storage if semantic provider available
-            if hasattr(self, 'lt') and self.lt is not None:
-                from leapflow.copilot.adapters import SemanticHashAdapter
-                l0_store = SemanticHashAdapter(self.lt)
-
-            l1_markov = L1MarkovPredictor()
-            self._l1_markov = l1_markov
-            self._hydrate_l1_markov(l1_markov)
-
-            predictors = [
-                L0HashPredictor(l0_store),
-                l1_markov,
-            ]
-            # L2/L3: wire Memory adapters when ExperienceStore is available
-            if hasattr(self, 'experience_store') and self.experience_store is not None:
-                from leapflow.copilot.adapters import ExperienceEmbedAdapter
-                from leapflow.copilot.predictors.l2_embed import L2EmbeddingPredictor
-                from leapflow.copilot.predictors.l3_llm import L3LLMPredictor
-
-                l2_provider = ExperienceEmbedAdapter(self.experience_store)
-                predictors.append(L2EmbeddingPredictor(l2_provider))
-
-                if settings.has_llm_credentials:
-                    from leapflow.copilot.adapters import MemoryRAGAdapter as _RAG
-                    rag_provider = _RAG(self.wm, self.experience_store)
-
-                    class _CopilotLLMClient:
-                        """Adapt OpenAIChat to L3's LLMClient protocol."""
-                        def __init__(self, llm):
-                            self._llm = llm
-                        async def complete(self, prompt: str) -> str:
-                            from leapflow.llm.message_builder import build_user_message_text
-                            resp = await self._llm.achat(
-                                [build_user_message_text(prompt)], stream=False,
-                            )
-                            return resp.content or ""
-
-                    predictors.append(L3LLMPredictor(
-                        _CopilotLLMClient(self.llm), rag_provider=rag_provider,
-                    ))
-
-            # Prediction engine
-            copilot_engine = PredictionEngine(predictors, copilot_config)
-
-            # Speculative pipeline
-            copilot_pipeline = SpeculativePipeline(copilot_engine, copilot_config)
-
-            # Feedback
-            copilot_feedback = FeedbackCollector()
-            copilot_evolution = EvolutionLoop(copilot_config, predictors)
-
-            # Idle detector (callback will be wired in Phase 2)
-            async def _copilot_on_idle(duration_ms: int) -> None:
-                pass  # Phase 2 will implement ghost hint rendering here
-
-            copilot_idle = IdleDetector(copilot_config, on_idle=_copilot_on_idle)
-
-            # Event subscriber — register to EventBus
-            warmup_raw = getattr(settings, "copilot_warmup_event_types", "")
-            warmup_types = frozenset(k.strip() for k in warmup_raw.split(",") if k.strip()) if warmup_raw else None
-            copilot_subscriber = CopilotEventSubscriber(
-                copilot_encoder,
-                tracker=None,
-                working_memory=self.wm if hasattr(self, 'wm') else None,
-                pipeline=copilot_pipeline,
-                warmup_event_types=warmup_types,
-            )
-            self.event_bus.subscribe(copilot_subscriber.on_system_event)
-
-            # Store references on Context for Phase 2 access
-            self.copilot_pipeline = copilot_pipeline
-            self.copilot_idle = copilot_idle
-            self.copilot_encoder = copilot_encoder
-            self.copilot_feedback = copilot_feedback
-            self.copilot_evolution = copilot_evolution
-            self.copilot_config = copilot_config
-
-            logger.info("Copilot initialized: L0+L1 predictors active, idle detection armed")
-        else:
-            self.copilot_pipeline = None
-            self.copilot_idle = None
-            self.copilot_encoder = None
-            self.copilot_feedback = None
-            self.copilot_evolution = None
-            self.copilot_config = None
+        # NOTE: Copilot pipeline is assembled in initialize_deferred()
+        self.copilot_pipeline = None
+        self.copilot_idle = None
+        self.copilot_encoder = None
+        self.copilot_feedback = None
+        self.copilot_evolution = None
+        self.copilot_config = None
 
         # ── Wire memory tools into TOOL_HANDLERS (late binding) ──
         from leapflow.tools.registry_bootstrap import set_memory_manager
@@ -1825,17 +1458,19 @@ class Context:
         except Exception:
             logger.debug("Shell approval gate setup skipped", exc_info=True)
 
+        self._critical_tool_bridge = tool_bridge
+
         self.engine = AgentEngine(
             settings, self.rpc, self.llm, self.wm, self.lt, self.imm,
             self.registry, classifier,
-            imitation=self.imitation,
+            imitation=None,  # wired in initialize_deferred()
             skill_library=self.skill_lib,
             graph_planner=graph_planner,
             scheduler=scheduler,
             perception=perception,
             execution=execution_adapter,
-            skill_activator=activator,
-            session=self.session,
+            skill_activator=None,  # wired in initialize_deferred()
+            session=None,  # wired in initialize_deferred()
             vlm=self.vlm,
             memory_manager=self.memory,
             evolution=self._evolution,
@@ -1912,43 +1547,8 @@ class Context:
             self._subagent_manager = None
             logger.debug("SubagentManager setup skipped", exc_info=True)
 
-        # ── Wire EvolutionStore (DuckDB persistence for skill episodes) ──
+        # NOTE: EvolutionStore + calibration are in initialize_deferred()
         self._evolution_store = None
-        try:
-            from leapflow.storage.evolution_store import DuckDBEvolutionStore
-            self._evolution_store = DuckDBEvolutionStore(self._db_holder)
-            # Hydrate in-memory provider from persisted episodes
-            persisted = self._evolution_store.load_recent_episodes(
-                limit=settings.memory_evolution_max_episodes,
-            )
-            for ep in persisted:
-                self._evolution.record_episode(
-                    skill_name=ep["skill_name"],
-                    actions=ep["actions"],
-                    outcome=ep["outcome"],
-                    reward=ep["reward"],
-                    context=ep.get("context"),
-                    episode_id=ep["episode_id"],
-                    timestamp=ep.get("timestamp"),
-                )
-            if persisted:
-                logger.info("Evolution: hydrated %d episodes from DuckDB", len(persisted))
-            self._evolution._persistent_store = self._evolution_store
-        except Exception:
-            logger.debug("EvolutionStore initialization skipped", exc_info=True)
-
-        # ── S3-L3/L4: one-shot difficulty + threshold calibration at startup (default off) ──
-        try:
-            if getattr(settings, "agent_calibration_enabled", False) and self._evolution_store is not None:
-                self.engine.set_calibration_store(self._evolution_store)   # enable periodic re-calibration
-                diff_result = self.engine.recalibrate_difficulty(self._evolution_store)
-                if getattr(diff_result, "applied", False):
-                    logger.info("Difficulty calibration applied at startup: %s", getattr(diff_result, "reason", ""))
-                thr_result = self.engine.recalibrate_thresholds(self._evolution_store)
-                if getattr(thr_result, "applied", False):
-                    logger.info("Threshold calibration applied at startup: %s", getattr(thr_result, "reason", ""))
-        except Exception:
-            logger.debug("Difficulty/threshold calibration skipped", exc_info=True)
 
         # ── Wire tool loop guardrails (progress-aware; thresholds from config) ──
         try:
@@ -2092,16 +1692,12 @@ class Context:
             self.engine.set_stale_stream_timeout(settings.stale_stream_timeout_s)
             self.engine.set_default_tool_timeout(settings.default_tool_timeout_s)
 
-            if self._evolution_store is not None:
-                self.engine.set_evolution_store(self._evolution_store)
+            # NOTE: evolution_store and experience_store wired in initialize_deferred()
 
             if hasattr(self, "doc_store") and self.doc_store is not None:
                 self.engine.set_doc_store(self.doc_store)
 
             self.engine.set_event_bus(self.event_bus)
-
-            if hasattr(self, "experience_store") and self.experience_store is not None:
-                self.engine.set_experience_store(self.experience_store)
 
         # ── Register session_search tool ──
         if self._conversation_store:
@@ -2150,6 +1746,495 @@ class Context:
                 logger.debug("session_search tool registered")
             except Exception:
                 logger.debug("session_search tool registration failed", exc_info=True)
+
+        # NOTE: PipelineObserver, ObservationDaemon, ColdStart, PatternMiner,
+        # ImplicitFeedback are assembled in initialize_deferred()
+
+    async def initialize_deferred(self) -> None:
+        """Deferred initialization: rich features that can run in background.
+
+        Assembles: ImitationPipeline, World Model, Skill System full load,
+        Learning Pipeline, Copilot, Observers. Components auto-initialize
+        on first use via _ensure_deferred() if this hasn't completed.
+        """
+        settings = self.settings
+        perception = self._platform_perception
+        execution_adapter = self._platform_execution
+        perception_session = self.perception_session
+        codegen = self._critical_codegen
+        traj_store = self._critical_traj_store
+        distiller = self._critical_distiller
+        intent_inferrer = self._critical_intent_inferrer
+        attention_filters = self._critical_attention_filters
+        surprise_annotator = self._critical_surprise_annotator
+        scorer = self._critical_scorer
+        llm_scorer = self._critical_llm_scorer
+        feedback_evaluator = self._critical_feedback_evaluator
+        tool_bridge = self._critical_tool_bridge
+
+        # ── Video-mode components ──
+        video_recorder = None
+        video_analyzer = None
+        video_segmenter = None
+        signal_timeline = None
+        if settings.recording_mode.uses_video and settings.visual_track_enabled:
+            if settings.has_vlm_credentials:
+                video_recorder, video_analyzer, video_segmenter, signal_timeline = (
+                    _build_video_components(settings, self.rpc, self.vlm or self.llm)
+                )
+            else:
+                message = (
+                    "Video analysis disabled: LEAPFLOW_VLM_API_KEY or "
+                    "LEAPFLOW_LLM_API_KEY is required for visual recording mode."
+                )
+                logger.warning(message)
+                _emit_status(message)
+
+        # ── ImitationPipeline full assembly ──
+        from leapflow.analysis.abstractor import ActionAbstractor
+        platform_hint = getattr(self._platform_manifest, 'platform_id', None)
+        platform_hint = platform_hint.value if platform_hint else "darwin"
+        abstractor = ActionAbstractor(platform_hint=platform_hint)
+
+        self.imitation = ImitationPipeline(
+            store=traj_store, distiller=distiller, codegen=codegen,
+            intent_inferrer=intent_inferrer,
+            abstractor=abstractor,
+            perception_session=perception_session,
+            goal_relevance_threshold=settings.attention_goal_relevance_threshold,
+            attention_filters=attention_filters,
+            surprise_annotator=surprise_annotator,
+            rpc=self.rpc,
+            event_bus=self.event_bus,
+            text_capture_enabled=settings.text_capture_enabled,
+            text_capture_exclude_apps=settings.text_capture_exclude_apps,
+            text_capture_secure_roles=settings.text_capture_secure_roles,
+            text_capture_max_length=settings.text_capture_max_length,
+            clipboard_max_length=settings.clipboard_max_length,
+            recording_mode=settings.recording_mode,
+            mhms_fusion_enabled=settings.mhms_fusion_enabled,
+            video_recorder=video_recorder,
+            video_analyzer=video_analyzer,
+            video_segmenter=video_segmenter,
+            signal_timeline=signal_timeline,
+            observation_daemon=self._observation_daemon,
+            recording_profile=_default_recording_profile(settings),
+        )
+        self.event_bus.subscribe(self.imitation.recorder.on_event)
+
+        if perception_session:
+            perception_session._recording_context = self.imitation.recorder.attention_context
+            perception_session.set_recording_mode(settings.recording_mode)
+            self.event_bus.subscribe(perception_session.on_system_event)
+
+        if settings.recording_mode.uses_video and signal_timeline is not None:
+            if self.event_bus is not None:
+                self.event_bus.subscribe(signal_timeline.record_event)
+                logger.info("EventBus -> SignalTimeline subscription established")
+        elif settings.recording_mode.uses_video and signal_timeline is None:
+            logger.warning(
+                "SignalTimeline is None — skipping EventBus subscription "
+                "(video mode active but timeline unavailable)"
+            )
+
+        # ── World Model assembly ──
+        if settings.prediction_enabled:
+            from leapflow.world_model import (
+                LearningBudgetController,
+                ExperienceStore,
+                CuriosityConfig,
+                CuriositySignal,
+                PredictionLoop,
+                ExperienceReplayEngine,
+                TrajectoryGrader,
+            )
+            from leapflow.perception.state_snapshot import StateSnapshotService
+
+            self.learning_budget = LearningBudgetController(
+                prediction_budget=settings.prediction_budget,
+                comparison_budget=settings.comparison_budget,
+                replay_budget=settings.replay_budget,
+                grading_budget=settings.grading_budget,
+                distillation_budget=settings.distillation_budget,
+                discovery_baseline=settings.budget_discovery_baseline,
+                regression_baseline=settings.budget_regression_baseline,
+            )
+
+            embedding_provider = None
+            if settings.semantic_embedding_provider != "none":
+                from leapflow.world_model.embedding import (
+                    TFIDFEmbeddingProvider,
+                    LLMEmbeddingProvider,
+                )
+                if settings.semantic_embedding_provider == "llm":
+                    embedding_provider = LLMEmbeddingProvider(self.llm)
+                else:
+                    embedding_provider = TFIDFEmbeddingProvider()
+
+            self.experience_store = ExperienceStore(
+                self.lt,
+                embedding_provider=embedding_provider,
+                semantic_weight=settings.semantic_rerank_weight,
+            )
+            self.snapshot_service = StateSnapshotService(self.rpc, self.imm)
+            self.curiosity = CuriositySignal(
+                CuriosityConfig(
+                    alpha=settings.curiosity_alpha,
+                    beta=settings.curiosity_beta,
+                    gamma=settings.curiosity_gamma,
+                    auto_balance=settings.curiosity_auto_balance,
+                ),
+                experience_store=self.experience_store,
+            )
+            self.prediction_loop = PredictionLoop(
+                llm=self.llm,
+                snapshot_service=self.snapshot_service,
+                experience_store=self.experience_store,
+                budget=self.learning_budget,
+                enabled=settings.prediction_enabled,
+                delta_threshold=settings.prediction_delta_threshold,
+                structural_blend_weight=settings.prediction_structural_blend,
+                semantic_blend_weight=settings.prediction_semantic_blend,
+                semantic_compare_threshold=settings.prediction_semantic_threshold,
+                rag_advantage_floor=settings.prediction_rag_advantage_floor,
+                failure_advantage=settings.prediction_failure_advantage,
+            )
+            insight_callback = self._build_insight_callback()
+            self.replay_engine = ExperienceReplayEngine(
+                llm=self.llm,
+                experience_store=self.experience_store,
+                budget=self.learning_budget,
+                on_insight=insight_callback,
+                regression_sample_size=settings.replay_regression_sample_size,
+            )
+            self.trajectory_grader = TrajectoryGrader(
+                llm=self.llm,
+                experience_store=self.experience_store,
+                budget=self.learning_budget,
+            )
+            self.registry.set_prediction_loop(self.prediction_loop)
+
+            if perception_session is not None:
+                self.curiosity.set_causal_graph(perception_session.causal_graph)
+                freq = perception_session.causal_graph.metadata.get("frequency_counter")
+                if freq:
+                    self.curiosity.load_frequency_counter(freq)
+
+            _ss = self.snapshot_service
+            def _on_focus_for_snapshot(event: Any) -> None:
+                if getattr(event, "event_type", "") == "app.focus_change":
+                    bid = event.payload.get("bundle_id", "")
+                    title = event.payload.get("window_title", "")
+                    if bid:
+                        _ss.update_focus(bid, title)
+            self.event_bus.subscribe(_on_focus_for_snapshot)
+
+            logger.info("World model initialized (prediction + curiosity + replay + OPD grading)")
+
+        # ── SkillActivator ──
+        activator = None
+        if perception and execution_adapter:
+            activator = SkillActivator(
+                self.registry, self.skill_lib, execution_adapter, perception,
+                codegen=codegen,
+            )
+            n_activated = activator.load_and_activate_all()
+            if n_activated:
+                logger.info("Activated %d learned skills from library", n_activated)
+        self._critical_activator = activator
+
+        # ── Learning Pipeline ──
+        from leapflow.analysis.consensus import MultiTrajectoryDistiller
+        consensus_distiller = MultiTrajectoryDistiller(self.imitation)
+
+        self.doc_store = SkillDocStore(settings.skills_dir)
+        doc_generator: Optional[CompositeSkillDocGenerator] = None
+        if settings.has_llm_credentials:
+            doc_generator = CompositeSkillDocGenerator(
+                llm_generator=LLMSkillDocGenerator(self.llm),
+            )
+        else:
+            doc_generator = CompositeSkillDocGenerator()
+
+        self.active_observer = ActiveLearningObserver(
+            self.skill_lib, scorer, self.wm,
+            llm_scorer=llm_scorer,
+            feedback_evaluator=feedback_evaluator,
+            skill_activator=activator,
+            consensus_distiller=consensus_distiller,
+            doc_generator=doc_generator,
+            doc_store=self.doc_store,
+            skill_registry=self.registry,
+            llm=self.llm,
+            execution=execution_adapter,
+        )
+        observer = self.active_observer
+        self.imitation.set_on_candidates_ready(observer.on_candidates_ready)
+
+        # Wire curiosity signal from world model → active learning + attention tuner
+        if self.prediction_loop is not None and self.curiosity is not None:
+            _es = self.experience_store
+
+            from leapflow.recording.attention_tuner import AttentionTuner
+            pf_filter = None
+            for f in attention_filters:
+                if type(f).__name__ == "PerceptualFieldFilter":
+                    pf_filter = f
+                    break
+            self.attention_tuner = AttentionTuner(
+                self.imitation.recorder.attention_context,
+                perceptual_filter=pf_filter,
+                curiosity_expand_threshold=settings.attention_curiosity_expand_threshold,
+                accuracy_contract_threshold=settings.attention_accuracy_contract_threshold,
+            )
+            _tuner = self.attention_tuner
+
+            _ctx = self
+
+            def _on_prediction_outcome(outcome: Any) -> None:
+                score = _ctx.curiosity.compute(outcome)
+                exp_id = getattr(outcome, "experience_id", "")
+                if exp_id and _es is not None:
+                    _es.update_curiosity_score(exp_id, score.total)
+                _tuner.on_curiosity_signal(score, outcome)
+                observer.on_curiosity_signal(score, outcome)
+
+                delta = getattr(outcome, "delta", 0.0)
+                evo_policy = _ctx._evolution_policy
+                skill_lib = _ctx.skill_lib
+                if evo_policy is not None and skill_lib is not None:
+                    action_desc = ""
+                    pred = getattr(outcome, "prediction", None)
+                    if pred is not None:
+                        action_desc = getattr(pred, "action_description", "")
+                    skill_title = action_desc.split(":", 1)[-1] if ":" in action_desc else action_desc
+                    if skill_title and (delta > 0.4 or delta < 0.15):
+                        try:
+                            stored = skill_lib.load_skill_by_title(skill_title)
+                            if stored:
+                                evo_outcome = evo_policy.on_execution_result(
+                                    stored.title,
+                                    success=(delta < 0.2),
+                                    duration_s=0.0,
+                                    current_confidence=stored.confidence,
+                                    current_version=stored.version,
+                                )
+                                skill_lib.update_skill_confidence(
+                                    stored.title, evo_outcome.new_confidence
+                                )
+                                if evo_outcome.tier_changed:
+                                    logger.info(
+                                        "Delta-driven evolution: '%s' confidence → %.3f",
+                                        stored.title, evo_outcome.new_confidence,
+                                    )
+                        except Exception:
+                            logger.debug("delta-driven evolution update failed", exc_info=True)
+
+            self.prediction_loop._on_outcome = _on_prediction_outcome
+
+        # ── Doc skills + stored fallbacks ──
+        n_doc_skills = 0
+        for skill in self.doc_store.load_all_as_skills(
+            self.llm, execution=execution_adapter, perception=perception
+        ):
+            self.registry.register(skill)
+            n_doc_skills += 1
+        if n_doc_skills:
+            logger.info("Registered %d SKILL.md skills", n_doc_skills)
+
+        n_fallback = _register_stored_skill_fallbacks(
+            self.skill_lib, self.registry, self.llm,
+        )
+        if n_fallback:
+            logger.info("Registered %d stored skills as fallback", n_fallback)
+
+        # ── Learnability + SessionController ──
+        from leapflow.engine.confirmation import ConfirmationHandler
+        confirmation = ConfirmationHandler(skill_store=self.skill_lib)
+
+        learnability_assessor = None
+        if settings.learnability_enabled:
+            from leapflow.learning.learnability import DefaultLearnabilityAssessor, LearnabilityConfig
+            learnability_config = LearnabilityConfig(
+                min_steps=settings.learnability_min_steps,
+                min_duration_s=settings.learnability_min_duration_s,
+                max_idle_ratio=settings.learnability_max_idle_ratio,
+                min_action_diversity=settings.learnability_min_action_diversity,
+                learn_threshold=settings.learnability_learn_threshold,
+                ask_threshold=settings.learnability_ask_threshold,
+                vlm_enabled=settings.learnability_vlm_enabled,
+                llm_enabled=settings.learnability_llm_enabled,
+                rule_weight=settings.learnability_rule_weight,
+                vlm_weight=settings.learnability_vlm_weight,
+                llm_weight=settings.learnability_llm_weight,
+            )
+            learnability_assessor = DefaultLearnabilityAssessor(
+                llm=self.llm if settings.has_llm_credentials else None,
+                vlm=self.vlm,
+                config=learnability_config,
+            )
+
+        self._evolution_policy = EMAConfidencePolicy()
+        self.session = SessionController(
+            self.imitation,
+            self.registry,
+            idle_timeout=settings.learn_idle_timeout,
+            auto_learn=settings.learn_auto_distill,
+            confirmation=confirmation,
+            audit=self.audit,
+            storage_path=str(settings.duckdb_path),
+            audit_log_path=str(settings.audit_log_path),
+            active_learning_observer=observer,
+            session_store=self.session_store,
+            learnability_assessor=learnability_assessor,
+            evolution_policy=self._evolution_policy,
+            skill_store=self.skill_lib,
+        )
+
+        # ── Wire deferred components to engine ──
+        if self.engine is not None:
+            self.engine._imitation = self.imitation
+            self.engine._session = self.session
+            if activator:
+                self.engine._skill_activator = activator
+            if self.experience_store is not None:
+                self.engine.set_experience_store(self.experience_store)
+
+        # ── EvolutionStore (DuckDB persistence for skill episodes) ──
+        try:
+            from leapflow.storage.evolution_store import DuckDBEvolutionStore
+            self._evolution_store = DuckDBEvolutionStore(self._db_holder)
+            persisted = self._evolution_store.load_recent_episodes(
+                limit=settings.memory_evolution_max_episodes,
+            )
+            for ep in persisted:
+                self._evolution.record_episode(
+                    skill_name=ep["skill_name"],
+                    actions=ep["actions"],
+                    outcome=ep["outcome"],
+                    reward=ep["reward"],
+                    context=ep.get("context"),
+                    episode_id=ep["episode_id"],
+                    timestamp=ep.get("timestamp"),
+                )
+            if persisted:
+                logger.info("Evolution: hydrated %d episodes from DuckDB", len(persisted))
+            self._evolution._persistent_store = self._evolution_store
+        except Exception:
+            logger.debug("EvolutionStore initialization skipped", exc_info=True)
+
+        # Calibration
+        try:
+            if getattr(settings, "agent_calibration_enabled", False) and self._evolution_store is not None:
+                self.engine.set_calibration_store(self._evolution_store)
+                diff_result = self.engine.recalibrate_difficulty(self._evolution_store)
+                if getattr(diff_result, "applied", False):
+                    logger.info("Difficulty calibration applied: %s", getattr(diff_result, "reason", ""))
+                thr_result = self.engine.recalibrate_thresholds(self._evolution_store)
+                if getattr(thr_result, "applied", False):
+                    logger.info("Threshold calibration applied: %s", getattr(thr_result, "reason", ""))
+        except Exception:
+            logger.debug("Difficulty/threshold calibration skipped", exc_info=True)
+
+        if self._evolution_store and self.engine is not None:
+            self.engine.set_evolution_store(self._evolution_store)
+
+        # ── Copilot pipeline ──
+        if settings.copilot_enabled:
+            from leapflow.copilot import (
+                CopilotConfig,
+                ContextEncoder,
+                CopilotEventSubscriber,
+                PredictionEngine,
+                SpeculativePipeline,
+                IdleDetector,
+                FeedbackCollector,
+                EvolutionLoop,
+            )
+            from leapflow.copilot.predictors import (
+                L0HashPredictor,
+                L1MarkovPredictor,
+            )
+
+            copilot_config = CopilotConfig(
+                enabled=True,
+                action_ring_size=settings.copilot_action_ring_size,
+                min_idle_ms=settings.copilot_min_idle_ms,
+                max_idle_ms=settings.copilot_max_idle_ms,
+                cache_ttl_seconds=settings.copilot_cache_ttl_s,
+                speculative_cache_size=settings.copilot_speculative_cache_size,
+            )
+
+            copilot_encoder = ContextEncoder(copilot_config)
+            from leapflow.copilot.predictors.l0_hash import InMemoryContextHashStore
+
+            l0_store = InMemoryContextHashStore()
+            if hasattr(self, 'lt') and self.lt is not None:
+                from leapflow.copilot.adapters import SemanticHashAdapter
+                l0_store = SemanticHashAdapter(self.lt)
+
+            l1_markov = L1MarkovPredictor()
+            self._l1_markov = l1_markov
+            self._hydrate_l1_markov(l1_markov)
+
+            predictors = [
+                L0HashPredictor(l0_store),
+                l1_markov,
+            ]
+            if hasattr(self, 'experience_store') and self.experience_store is not None:
+                from leapflow.copilot.adapters import ExperienceEmbedAdapter
+                from leapflow.copilot.predictors.l2_embed import L2EmbeddingPredictor
+                from leapflow.copilot.predictors.l3_llm import L3LLMPredictor
+
+                l2_provider = ExperienceEmbedAdapter(self.experience_store)
+                predictors.append(L2EmbeddingPredictor(l2_provider))
+
+                if settings.has_llm_credentials:
+                    from leapflow.copilot.adapters import MemoryRAGAdapter as _RAG
+                    rag_provider = _RAG(self.wm, self.experience_store)
+
+                    class _CopilotLLMClient:
+                        def __init__(self, llm):
+                            self._llm = llm
+                        async def complete(self, prompt: str) -> str:
+                            from leapflow.llm.message_builder import build_user_message_text
+                            resp = await self._llm.achat(
+                                [build_user_message_text(prompt)], stream=False,
+                            )
+                            return resp.content or ""
+
+                    predictors.append(L3LLMPredictor(
+                        _CopilotLLMClient(self.llm), rag_provider=rag_provider,
+                    ))
+
+            copilot_engine = PredictionEngine(predictors, copilot_config)
+            copilot_pipeline = SpeculativePipeline(copilot_engine, copilot_config)
+            copilot_feedback = FeedbackCollector()
+            copilot_evolution = EvolutionLoop(copilot_config, predictors)
+
+            async def _copilot_on_idle(duration_ms: int) -> None:
+                pass
+
+            copilot_idle = IdleDetector(copilot_config, on_idle=_copilot_on_idle)
+
+            warmup_raw = getattr(settings, "copilot_warmup_event_types", "")
+            warmup_types = frozenset(k.strip() for k in warmup_raw.split(",") if k.strip()) if warmup_raw else None
+            copilot_subscriber = CopilotEventSubscriber(
+                copilot_encoder,
+                tracker=None,
+                working_memory=self.wm if hasattr(self, 'wm') else None,
+                pipeline=copilot_pipeline,
+                warmup_event_types=warmup_types,
+            )
+            self.event_bus.subscribe(copilot_subscriber.on_system_event)
+
+            self.copilot_pipeline = copilot_pipeline
+            self.copilot_idle = copilot_idle
+            self.copilot_encoder = copilot_encoder
+            self.copilot_feedback = copilot_feedback
+            self.copilot_evolution = copilot_evolution
+            self.copilot_config = copilot_config
+            logger.info("Copilot initialized: L0+L1 predictors active")
 
         # Pipeline Observer (A6: learning pipeline observability)
         from leapflow.engine.pipeline_observer import StructuredPipelineLogger
