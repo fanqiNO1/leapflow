@@ -695,8 +695,6 @@ class SemanticMemoryProvider:
         )
         con.execute("CREATE INDEX IF NOT EXISTS idx_lm_created ON leap_memory(created_at);")
         con.execute("CREATE INDEX IF NOT EXISTS idx_lm_kind ON leap_memory(kind);")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_lm_domain ON leap_memory(domain);")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_lm_session ON leap_memory(session_id);")
 
         # Migrations: add columns if table existed without them
         for col, default in [("domain", "'system'"), ("path", None), ("session_id", "''")]:
@@ -707,3 +705,10 @@ class SemanticMemoryProvider:
                 con.execute(ddl)
             except duckdb.CatalogException:
                 pass  # Column already exists
+
+        # Indexes on migrated columns MUST be created after the ALTER TABLE
+        # loop above: on legacy databases the columns do not exist yet, and
+        # creating the index first fails with a Binder Error, aborting the
+        # whole provider initialization.
+        con.execute("CREATE INDEX IF NOT EXISTS idx_lm_domain ON leap_memory(domain);")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_lm_session ON leap_memory(session_id);")

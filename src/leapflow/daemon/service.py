@@ -49,6 +49,10 @@ logger = logging.getLogger(__name__)
 class RuntimeLeapService:
     """LeapService implementation backed by a single initialized Context."""
 
+    # Max time a turn waits for deferred init before degrading to
+    # critical-only mode (the background init keeps running).
+    _DEFERRED_WAIT_TIMEOUT_S: float = 15.0
+
     # ── Construction ─────────────────────────────────────────────────
 
     def __init__(self, settings: Any, *, mock_host: bool = False) -> None:
@@ -115,6 +119,26 @@ class RuntimeLeapService:
             return
         ctx = self._ctx
         self._ctx = None
+        # Stop background deferred init first: its yield points allow cleanup
+        # to interleave with a half-initialized context otherwise.
+        task = self._deferred_init_task
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._deferred_init_task = None
+        # The service-level task above only *waits* (shielded) on the
+        # context's runner task; cancel the runner itself so deferred init
+        # actually stops before cleanup proceeds.
+        runner = getattr(ctx, "_deferred_task", None)
+        if runner is not None and not runner.done():
+            runner.cancel()
+            try:
+                await runner
+            except (asyncio.CancelledError, Exception):
+                pass
         await self._reentry_coordinator.stop()
         await self._monitor_coordinator.stop()
         checkpoint_open_connection(ctx)
@@ -123,6 +147,10 @@ class RuntimeLeapService:
     async def _run_deferred_init(self, ctx: Any) -> None:
         """Background non-critical initialization."""
         try:
+            # This task is created before the RPC server task in serve_daemon().
+            # Yield once so the control-plane socket can start accepting status
+            # and recovery RPCs before the heavier deferred phases begin.
+            await asyncio.sleep(0)
             await ctx._ensure_deferred()
         except Exception:
             logger.warning("Deferred initialization failed; components will init on first use", exc_info=True)
@@ -166,10 +194,33 @@ class RuntimeLeapService:
         request_id = str(kwargs.get("request_id") or uuid.uuid4().hex[:12])
         workspace_arg = str(kwargs.get("workspace_root") or "").strip()
 
-        # Ensure deferred init completed
+        # Ensure deferred init completed. Emit a status chunk first so the
+        # server dispatch loop receives an immediate first chunk (keepalive
+        # heartbeats start right away) before the potentially long wait.
         ctx = self._ctx
         if ctx is not None and not getattr(ctx, '_deferred_initialized', True):
-            await ctx._ensure_deferred()
+            yield StreamChunk(
+                event_type="status",
+                content="Warming up runtime components...",
+                request_id=request_id,
+            )
+            try:
+                # Bounded wait: _ensure_deferred() shields the background
+                # runner task, so a timeout here cancels only this wait —
+                # deferred init keeps running in the background.
+                await asyncio.wait_for(
+                    ctx._ensure_deferred(), timeout=self._DEFERRED_WAIT_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                logger.info(
+                    "Deferred init still in progress after %.0fs; serving turn "
+                    "in critical-only mode", self._DEFERRED_WAIT_TIMEOUT_S,
+                )
+            except Exception:
+                logger.warning(
+                    "Deferred init failed; serving turn in critical-only mode",
+                    exc_info=True,
+                )
 
         # Busy-feedback for clients when all slots occupied
         if self._turn_admission.locked():
@@ -605,6 +656,8 @@ class RuntimeLeapService:
         workspace_root = Path(str(getattr(settings, "workspace_root", os.getcwd())))
         context_metadata = engine_context_metadata(engine, settings)
         self._approval_coordinator.prune_stale()
+        clients = await asyncio.to_thread(self._safe_client_lease_summaries)
+        host = await asyncio.to_thread(host_backend_status, ctx)
         return {
             "pid": os.getpid(),
             "profile": getattr(settings, "profile", "default"),
@@ -627,8 +680,8 @@ class RuntimeLeapService:
             "uptime_s": max(0.0, time.time() - self._started_at),
             "active_clients": max(0, self._client_count()),
             "active_connections": max(0, self._client_count()),
-            "connected_clients": len(self._client_leases()),
-            "clients": self._client_lease_summaries(),
+            "connected_clients": len(clients),
+            "clients": clients,
             "model": getattr(settings, "llm_model", ""),
             "llm_context_length": context_metadata.get("llm_context_length", getattr(settings, "llm_context_length", 0)),
             "context_used": context_metadata.get("context_used", 0),
@@ -644,8 +697,9 @@ class RuntimeLeapService:
             "runtime_version": runtime_version(),
             "pending_approvals": self._approval_coordinator.pending_count(),
             "turn_admission": self._turn_admission_status(),
+            "deferred_init": self._deferred_init_status(ctx),
             "watch_summary": self._monitor_coordinator.get_summary(),
-            "host_backend": host_backend_status(ctx),
+            "host_backend": host,
         }
 
     # ── Internal helpers ─────────────────────────────────────────────
@@ -661,6 +715,41 @@ class RuntimeLeapService:
             snapshot["waiting"] = max(0, int(snapshot.get("waiting", 0) or 0) + queued_delta)
         snapshot["active_request_ids"] = sorted(self._active_engines)
         return snapshot
+
+    def _deferred_init_status(self, ctx: Any | None) -> dict[str, Any]:
+        """Return a non-blocking diagnostic snapshot of deferred init state."""
+        if ctx is None:
+            return {"initialized": False, "running": False, "attempts": 0, "max_attempts": 0}
+        runner = getattr(ctx, "_deferred_task", None)
+        service_task = self._deferred_init_task
+        attempts = int(getattr(ctx, "_deferred_attempts", 0) or 0)
+        max_attempts = int(getattr(ctx, "_DEFERRED_MAX_ATTEMPTS", 0) or 0)
+        running = bool(
+            (runner is not None and not runner.done())
+            or (service_task is not None and not service_task.done())
+        )
+        snapshot: dict[str, Any] = {
+            "initialized": bool(getattr(ctx, "_deferred_initialized", False)),
+            "running": running,
+            "attempts": attempts,
+            "max_attempts": max_attempts,
+            "done": bool(runner.done()) if runner is not None else False,
+            "cancelled": bool(runner.cancelled()) if runner is not None else False,
+        }
+        if runner is not None and runner.done() and not runner.cancelled():
+            exc = runner.exception()
+            if exc is not None:
+                snapshot["error"] = str(exc)
+        if max_attempts and attempts >= max_attempts and not snapshot["initialized"]:
+            snapshot["degraded"] = True
+        return snapshot
+
+    def _safe_client_lease_summaries(self) -> list[dict[str, Any]]:
+        try:
+            return self._client_lease_summaries()
+        except Exception:
+            logger.debug("daemon: client lease status unavailable", exc_info=True)
+            return []
 
     def _client_lease_summaries(self) -> list[dict[str, Any]]:
         """Per-client lease view for status observability."""

@@ -228,6 +228,23 @@ class UnixRpcServer:
                 ).to_notification()
                 await _write_json(writer, notification.to_json())
                 pending = asyncio.create_task(anext(stream), context=ctx)
+        except (ConnectionResetError, BrokenPipeError) as exc:
+            # Client vanished mid-stream (e.g. TUI closed while a heartbeat
+            # or chunk write was in flight). This is routine churn — log a
+            # single debug line, no traceback, and skip the error response
+            # since the pipe is already gone.
+            if pending is not None and not pending.done():
+                pending.cancel()
+            if stream is not None and hasattr(stream, "aclose"):
+                try:
+                    await stream.aclose()
+                except Exception:
+                    logger.debug("daemon: failed to close stream after disconnect", exc_info=True)
+            logger.debug(
+                "daemon: client disconnected during stream method=%s (%s)",
+                request.method, type(exc).__name__,
+            )
+            return
         except Exception as exc:
             if pending is not None and not pending.done():
                 pending.cancel()

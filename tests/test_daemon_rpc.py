@@ -1610,6 +1610,10 @@ async def test_runtime_service_hot_reloads_config_before_daemon_chat(
     )
     service = RuntimeLeapService(settings, mock_host=True)
     await service.start()
+    # Wait for background deferred init so the first chunk is the config
+    # reload status (otherwise a "Warming up" status chunk precedes it).
+    if service._deferred_init_task is not None:
+        await service._deferred_init_task
     stream = None
     try:
         settings.profile_layout.llm_config_path.write_text(
@@ -1766,6 +1770,54 @@ async def test_ensure_daemon_client_does_not_spawn_when_daemon_unhealthy(
         await ensure_daemon_client(settings)
 
 
+@pytest.mark.asyncio
+async def test_recover_daemon_client_probes_rpc_and_force_restarts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from conftest import make_settings
+    import leapflow.daemon.client as client_module
+    from leapflow.daemon.lifecycle import StopDaemonResult
+
+    settings = make_settings(str(tmp_path))
+    sock_path = settings.runtime_dir / "leapd.sock"
+    attempts = 0
+
+    async def fake_ensure(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        return DaemonClient(sock_path)
+
+    async def fake_probe(client, *, timeout_s):
+        if attempts == 1:
+            raise DaemonUnavailableError("Timed out waiting for leapd response")
+
+    running = DaemonInfo(
+        pid=4321,
+        sock_path=sock_path,
+        start_time=1.0,
+        is_running=True,
+        is_healthy=True,
+    )
+    stop_kwargs: dict[str, Any] = {}
+
+    def fake_stop(runtime_dir, **kwargs):
+        stop_kwargs.update(kwargs)
+        return StopDaemonResult(pid=4321, stopped=True, signal_sent=True, forced=bool(kwargs.get("force")))
+
+    monkeypatch.setattr(client_module, "ensure_daemon_client", fake_ensure)
+    monkeypatch.setattr(client_module, "_probe_daemon_status", fake_probe)
+    monkeypatch.setattr(client_module.DaemonInfo, "discover", lambda runtime_dir: running)
+    monkeypatch.setattr(client_module, "stop_daemon", fake_stop)
+
+    client = await client_module.recover_daemon_client(settings)
+
+    assert client.sock_path == sock_path
+    assert attempts == 2
+    assert stop_kwargs["force"] is True
+    assert stop_kwargs["force_timeout_s"] >= 5.0
+
+
 def test_daemon_runtime_status_prints_diagnostics(capsys) -> None:
     from leapflow.cli.commands.daemon import _print_runtime_status
 
@@ -1802,6 +1854,12 @@ def test_daemon_runtime_status_prints_diagnostics(capsys) -> None:
             "waiting": 0,
             "active_request_ids": ["req-a", "req-b"],
         },
+        "deferred_init": {
+            "initialized": False,
+            "running": True,
+            "attempts": 1,
+            "max_attempts": 2,
+        },
     })
 
     output = capsys.readouterr().out
@@ -1809,6 +1867,7 @@ def test_daemon_runtime_status_prints_diagnostics(capsys) -> None:
     assert "model: qwen3.7-plus context=256/1000000" in output
     assert "turns: active=2/3 available=1 waiting=0" in output
     assert "active_request_ids: req-a, req-b" in output
+    assert "deferred_init: state=running attempts=1/2" in output
     assert "version: 0.0.test" in output
     assert "source: /repo/src/leapflow/__init__.py" in output
     assert "python: /venv/bin/python" in output

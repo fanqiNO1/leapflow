@@ -626,7 +626,7 @@ async def test_daemon_fallback_initializes_local_interactive_with_real_config(
     monkeypatch.delenv("LEAPFLOW_VISUAL_TRACK_ENABLED", raising=False)
     monkeypatch.delenv("LEAPFLOW_LLM_CONTEXT_LENGTH", raising=False)
 
-    async def fake_ensure_daemon_client(*args, **kwargs):
+    async def fake_recover_daemon_client(*args, **kwargs):
         raise daemon_client.DaemonUnavailableError("daemon unavailable")
 
     async def fake_interactive(ctx, *, resume_id=None) -> int:
@@ -638,7 +638,7 @@ async def test_daemon_fallback_initializes_local_interactive_with_real_config(
         events.append("interactive")
         return 0
 
-    monkeypatch.setattr(daemon_client, "ensure_daemon_client", fake_ensure_daemon_client)
+    monkeypatch.setattr(daemon_client, "recover_daemon_client", fake_recover_daemon_client)
     monkeypatch.setattr(interactive_module, "cmd_interactive", fake_interactive)
 
     result = await cli._async_daemon_main(

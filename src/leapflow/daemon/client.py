@@ -343,28 +343,43 @@ async def recover_daemon_client(
     mock_host: bool = False,
     status_callback: StatusCallback | None = None,
 ) -> DaemonClient:
-    """Return a usable daemon client, restarting an unhealthy daemon once."""
+    """Return a usable daemon client, restarting an unresponsive daemon once."""
+    runtime_dir = settings.runtime_dir
     try:
-        return await ensure_daemon_client(
+        client = await ensure_daemon_client(
             settings,
             mock_host=mock_host,
             status_callback=status_callback,
         )
+        await _probe_daemon_status(client, timeout_s=_daemon_recovery_probe_timeout())
+        return client
     except DaemonUnavailableError as exc:
-        runtime_dir = settings.runtime_dir
         info = DaemonInfo.discover(runtime_dir)
         if not info.is_running:
             raise
-        _emit(status_callback, f"Restarting unhealthy leapd (pid={info.pid})...")
-        result = await asyncio.to_thread(stop_daemon, runtime_dir, timeout_s=10.0)
+        _emit(status_callback, f"Restarting unresponsive leapd (pid={info.pid})...")
+        result = await asyncio.to_thread(
+            stop_daemon,
+            runtime_dir,
+            timeout_s=10.0,
+            force=True,
+            force_timeout_s=5.0,
+            on_progress=status_callback,
+        )
         if not result.stopped:
             raise exc
-        return await ensure_daemon_client(
+        client = await ensure_daemon_client(
             settings,
             mock_host=mock_host,
             status_callback=status_callback,
         )
+        await _probe_daemon_status(client, timeout_s=_daemon_recovery_probe_timeout())
+        return client
 
+
+async def _probe_daemon_status(client: DaemonClient, *, timeout_s: float) -> None:
+    """Verify that the daemon RPC loop responds, not just that its socket accepts."""
+    await DaemonClient(client.sock_path, timeout_s=timeout_s).status()
 
 
 def _event_from_params(params: dict[str, Any]) -> StreamEvent:
@@ -408,6 +423,14 @@ def _daemon_start_timeout() -> float:
         return max(1.0, float(raw))
     except ValueError:
         return 30.0
+
+
+def _daemon_recovery_probe_timeout() -> float:
+    raw = os.getenv("LEAPFLOW_DAEMON_RECOVERY_PROBE_TIMEOUT", "3").strip()
+    try:
+        return max(0.5, float(raw))
+    except ValueError:
+        return 3.0
 
 
 async def _send(writer: asyncio.StreamWriter, text: str) -> None:

@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
@@ -486,6 +487,14 @@ class Context:
         # Deferred initialization tracking
         self._deferred_initialized: bool = False
         self._deferred_lock: asyncio.Lock = asyncio.Lock()
+        self._deferred_attempts: int = 0
+        # Single runner task executing initialize_deferred(); callers only
+        # wait on it (shielded), so a caller timeout never cancels the init.
+        self._deferred_task: Optional["asyncio.Task[None]"] = None
+        # Dedicated single-thread executor for the heavy synchronous DuckDB
+        # work inside initialize_deferred(): keeps the event loop responsive
+        # and serializes deferred DB operations among themselves.
+        self._deferred_db_executor: Optional[ThreadPoolExecutor] = None
 
         # Intermediate attributes shared between critical and deferred init
         self._critical_codegen: Optional[Any] = None
@@ -519,15 +528,60 @@ class Context:
         """Bind the current interactive surface as the approval renderer."""
         self._tui_approval.set_handler(handler)
 
+    _DEFERRED_MAX_ATTEMPTS: int = 2
+
     async def _ensure_deferred(self) -> None:
-        """Wait for deferred init if still pending, or trigger it."""
+        """Wait for deferred init, starting the runner task if none is active.
+
+        The initialization itself always runs inside a dedicated runner task
+        (``_run_deferred_once``); callers only *wait* on it through
+        ``asyncio.shield``. This makes the wait cancellation-safe: when a
+        caller wraps this in ``asyncio.wait_for`` and times out, only the
+        wait is cancelled — the background initialization keeps running and
+        later callers pick up the completed state.
+
+        Gives up after _DEFERRED_MAX_ATTEMPTS failed attempts: components stay
+        uninitialized and the engine keeps running in critical-only mode.
+        """
         if self._deferred_initialized:
             return
+        task = getattr(self, "_deferred_task", None)
+        if task is None or task.done():
+            task = asyncio.create_task(self._run_deferred_once())
+            self._deferred_task = task
+        await asyncio.shield(task)
+
+    async def _run_deferred_once(self) -> None:
+        """Single deferred-init attempt; only ever runs in the runner task."""
         async with self._deferred_lock:
             if self._deferred_initialized:
                 return
+            if self._deferred_attempts >= self._DEFERRED_MAX_ATTEMPTS:
+                logger.error(
+                    "Deferred initialization abandoned after %d failed attempts; "
+                    "engine continues in critical-only degraded mode",
+                    self._deferred_attempts,
+                )
+                return
+            self._deferred_attempts += 1
             await self.initialize_deferred()
             self._deferred_initialized = True
+
+    async def _run_deferred_db(self, fn: Callable[[], Any]) -> Any:
+        """Run a blocking (DuckDB/file) operation off the event loop.
+
+        Uses a dedicated single-thread executor so that:
+        - the event loop stays responsive during heavy deferred-init work
+          (RPCs such as daemon.status keep answering), and
+        - deferred DB operations are serialized among themselves and never
+          hit the shared DuckDB connection concurrently.
+        """
+        if self._deferred_db_executor is None:
+            self._deferred_db_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="leap-deferred-db",
+            )
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._deferred_db_executor, fn)
 
     async def _ensure_skill_system(self) -> None:
         """Ensure skill registry is fully populated (deferred skills loaded)."""
@@ -1111,9 +1165,6 @@ class Context:
         self.perception_session = perception_session
 
         platform_hint = manifest.platform_id.value
-
-        from leapflow.analysis.abstractor import ActionAbstractor
-        abstractor = ActionAbstractor(platform_hint=platform_hint)
 
         attention_filters = build_attention_filters(
             foreground_gate=settings.attention_foreground_gate,
@@ -1770,7 +1821,10 @@ class Context:
         scorer = self._critical_scorer
         llm_scorer = self._critical_llm_scorer
         feedback_evaluator = self._critical_feedback_evaluator
-        tool_bridge = self._critical_tool_bridge
+
+        # Give leapd's control plane a scheduling point before deferred init
+        # begins constructing optional subsystems; this task is background work.
+        await asyncio.sleep(0)
 
         # ── Video-mode components ──
         video_recorder = None
@@ -1836,6 +1890,10 @@ class Context:
                 "SignalTimeline is None — skipping EventBus subscription "
                 "(video mode active but timeline unavailable)"
             )
+
+        # Yield to the event loop so heartbeats/RPC callbacks stay responsive
+        # during this long synchronous initialization (see daemon keepalive).
+        await asyncio.sleep(0)
 
         # ── World Model assembly ──
         if settings.prediction_enabled:
@@ -1931,6 +1989,9 @@ class Context:
 
             logger.info("World model initialized (prediction + curiosity + replay + OPD grading)")
 
+        # Event-loop yield point after world model assembly
+        await asyncio.sleep(0)
+
         # ── SkillActivator ──
         activator = None
         if perception and execution_adapter:
@@ -1938,10 +1999,14 @@ class Context:
                 self.registry, self.skill_lib, execution_adapter, perception,
                 codegen=codegen,
             )
-            n_activated = activator.load_and_activate_all()
+            # Heavy DuckDB skill-library load: run off the event loop
+            n_activated = await self._run_deferred_db(activator.load_and_activate_all)
             if n_activated:
                 logger.info("Activated %d learned skills from library", n_activated)
         self._critical_activator = activator
+
+        # Event-loop yield point after heavy skill-library DuckDB loading
+        await asyncio.sleep(0)
 
         # ── Learning Pipeline ──
         from leapflow.analysis.consensus import MultiTrajectoryDistiller
@@ -2034,19 +2099,28 @@ class Context:
 
         # ── Doc skills + stored fallbacks ──
         n_doc_skills = 0
-        for skill in self.doc_store.load_all_as_skills(
-            self.llm, execution=execution_adapter, perception=perception
-        ):
+        # SKILL.md loading is blocking file/DB IO: run off the event loop
+        doc_skills = await self._run_deferred_db(
+            lambda: list(self.doc_store.load_all_as_skills(
+                self.llm, execution=execution_adapter, perception=perception,
+            ))
+        )
+        for skill in doc_skills:
             self.registry.register(skill)
             n_doc_skills += 1
         if n_doc_skills:
             logger.info("Registered %d SKILL.md skills", n_doc_skills)
 
-        n_fallback = _register_stored_skill_fallbacks(
-            self.skill_lib, self.registry, self.llm,
+        n_fallback = await self._run_deferred_db(
+            lambda: _register_stored_skill_fallbacks(
+                self.skill_lib, self.registry, self.llm,
+            )
         )
         if n_fallback:
             logger.info("Registered %d stored skills as fallback", n_fallback)
+
+        # Event-loop yield point after doc-skill/fallback registration
+        await asyncio.sleep(0)
 
         # ── Learnability + SessionController ──
         from leapflow.engine.confirmation import ConfirmationHandler
@@ -2100,12 +2174,23 @@ class Context:
             if self.experience_store is not None:
                 self.engine.set_experience_store(self.experience_store)
 
+        # Event-loop yield point after SessionController/engine wiring
+        await asyncio.sleep(0)
+
         # ── EvolutionStore (DuckDB persistence for skill episodes) ──
         try:
             from leapflow.storage.evolution_store import DuckDBEvolutionStore
-            self._evolution_store = DuckDBEvolutionStore(self._db_holder)
-            persisted = self._evolution_store.load_recent_episodes(
-                limit=settings.memory_evolution_max_episodes,
+
+            def _load_evolution_store() -> "tuple[Any, list[dict[str, Any]]]":
+                # Construction runs schema init; both are blocking DuckDB work
+                store = DuckDBEvolutionStore(self._db_holder)
+                episodes = store.load_recent_episodes(
+                    limit=settings.memory_evolution_max_episodes,
+                )
+                return store, episodes
+
+            self._evolution_store, persisted = await self._run_deferred_db(
+                _load_evolution_store
             )
             for ep in persisted:
                 self._evolution.record_episode(
@@ -2127,10 +2212,14 @@ class Context:
         try:
             if getattr(settings, "agent_calibration_enabled", False) and self._evolution_store is not None:
                 self.engine.set_calibration_store(self._evolution_store)
-                diff_result = self.engine.recalibrate_difficulty(self._evolution_store)
+                diff_result = await self._run_deferred_db(
+                    lambda: self.engine.recalibrate_difficulty(self._evolution_store)
+                )
                 if getattr(diff_result, "applied", False):
                     logger.info("Difficulty calibration applied: %s", getattr(diff_result, "reason", ""))
-                thr_result = self.engine.recalibrate_thresholds(self._evolution_store)
+                thr_result = await self._run_deferred_db(
+                    lambda: self.engine.recalibrate_thresholds(self._evolution_store)
+                )
                 if getattr(thr_result, "applied", False):
                     logger.info("Threshold calibration applied: %s", getattr(thr_result, "reason", ""))
         except Exception:
@@ -2138,6 +2227,9 @@ class Context:
 
         if self._evolution_store and self.engine is not None:
             self.engine.set_evolution_store(self._evolution_store)
+
+        # Event-loop yield point after EvolutionStore hydration/calibration
+        await asyncio.sleep(0)
 
         # ── Copilot pipeline ──
         if settings.copilot_enabled:
@@ -2175,7 +2267,8 @@ class Context:
 
             l1_markov = L1MarkovPredictor()
             self._l1_markov = l1_markov
-            self._hydrate_l1_markov(l1_markov)
+            # Semantic-memory DuckDB read: run off the event loop
+            await self._run_deferred_db(lambda: self._hydrate_l1_markov(l1_markov))
 
             predictors = [
                 L0HashPredictor(l0_store),
@@ -2236,6 +2329,9 @@ class Context:
             self.copilot_config = copilot_config
             logger.info("Copilot initialized: L0+L1 predictors active")
 
+        # Event-loop yield point after copilot assembly (L1 Markov hydration)
+        await asyncio.sleep(0)
+
         # Pipeline Observer (A6: learning pipeline observability)
         from leapflow.engine.pipeline_observer import StructuredPipelineLogger
         self._pipeline_observer = StructuredPipelineLogger()
@@ -2258,12 +2354,18 @@ class Context:
         # ColdStartManager: adaptive threshold management
         from leapflow.learning.cold_start import ColdStartManager, ColdStartConfig
         self._cold_start = ColdStartManager(ColdStartConfig(mode="prompt"))
-        initial_skills = len(self.skill_lib.load_all_active()) if self.skill_lib else 0
+        initial_skills = (
+            await self._run_deferred_db(lambda: len(self.skill_lib.load_all_active()))
+            if self.skill_lib else 0
+        )
         self._cold_start.update_stats(skills_count=initial_skills)
 
         # LearningEffectivenessTracker: metrics observability
         from leapflow.learning.effectiveness import LearningEffectivenessTracker
         self._effectiveness_tracker = LearningEffectivenessTracker()
+
+        # Event-loop yield point before the observer/miner tail phase
+        await asyncio.sleep(0)
 
         # PatternMiner → ActiveLearningObserver bridge (closed loop)
         if settings.observer_auto_start and settings.has_llm_credentials:
@@ -2406,6 +2508,11 @@ class Context:
         8. VLM Tier 3 verification (if enabled)
         """
         observer = self._pipeline_observer
+        if observer is None:
+            # Deferred init never completed (degraded/critical-only mode):
+            # no learning components were assembled, nothing to flush.
+            logger.debug("Session-end learning skipped: pipeline observer not initialized")
+            return
         pipeline_start = time.perf_counter()
         phases_ok = 0
         phases_failed = 0
@@ -2691,6 +2798,13 @@ class Context:
             gw.register_trigger_policy(platform_id, policy)
 
     async def cleanup(self) -> None:
+        # Drain the deferred-DB executor first so no worker thread touches the
+        # shared DuckDB connection while stores below persist/close it.
+        db_executor = getattr(self, "_deferred_db_executor", None)
+        if db_executor is not None:
+            db_executor.shutdown(wait=True, cancel_futures=True)
+            self._deferred_db_executor = None
+
         # Persist evolution episodes to DuckDB before shutdown
         evo_store = getattr(self, "_evolution_store", None)
         if evo_store is not None and self._evolution is not None:
