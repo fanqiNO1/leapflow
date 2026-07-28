@@ -5,11 +5,18 @@
 
 ### News
 
+- **2026-07-28**: v0.0.5 released — adaptive-depth execution for long-horizon tasks, built-in coding tools, per-session daemon concurrency, improved TUI stability, and hardened leapd recovery/status diagnostics.
+
+<details>
+<summary>Previous releases</summary>
+
 - **2026-07-16**: **LeapBoard** — general-purpose monitoring web dashboard (Watch→Finding + Server-Driven UI); `/board` entry, live session analysis, and finance/sentiment/research templates.
 - **2026-07-16**: v0.0.4 released — protocol-driven recovery coordinator with budget-constrained strategies, unified error classification, checkpoint-based cross-turn resumption, structured audit trail, and tool execution idempotency ledger.
 - **2026-07-15**: v0.0.3 released — layered YAML config, Path/Profile/Cache layouts, encrypted secret refs, DuckDB cache indexing, `leap config`, and robustness hardening.
 - **2026-07-15**: v0.0.2 released — TUI, Gateway/App Connector, Hub sync, Scheduler, Workflow Copilot, and runtime hardening.
 - **2025-06-30**: LeapFlow Preview released — initial public release with record & replay, multi-modal signal fusion, and Workflow Copilot.
+
+</details>
 
 ---
 
