@@ -62,11 +62,27 @@ class DaemonClient:
         message: str,
         *,
         enable_thinking: bool = False,
+        session_id: str = "",
+        workspace_root: str = "",
     ) -> AsyncIterator[StreamEvent]:
-        """Stream chat events from the daemon-owned AgentEngine."""
+        """Stream chat events from the daemon-owned AgentEngine.
+
+        ``session_id`` routes the turn to that session's engine, so distinct
+        sessions (e.g. two TUI clients) run concurrently and isolated when the
+        daemon admits concurrency (daemon.max_concurrent_turns > 1). Empty means
+        the daemon's current session (single-session behavior unchanged).
+        ``workspace_root`` is the client process' active workspace/cwd. It is
+        routed to the daemon so each TUI session gets its own project context
+        instead of inheriting the shared daemon process cwd.
+        """
+        params: dict[str, Any] = {"message": message, "enable_thinking": enable_thinking}
+        if session_id:
+            params["session_id"] = session_id
+        if workspace_root:
+            params["workspace_root"] = workspace_root
         request = RpcRequest(
             method="engine.chat",
-            params={"message": message, "enable_thinking": enable_thinking},
+            params=params,
         )
         reader, writer = await self._open()
         try:
@@ -113,9 +129,13 @@ class DaemonClient:
         finally:
             await _close_writer(writer)
 
-    async def engine_cancel(self) -> bool:
-        """Request cancellation of the daemon-owned active engine turn."""
-        result = await self.request("engine.cancel")
+    async def engine_cancel(self, request_id: str = "") -> bool:
+        """Request cancellation of the daemon-owned active engine turn.
+
+        With ``request_id`` the daemon targets that specific turn; without one it
+        cancels the active turn(s) (at N=1 the single running turn).
+        """
+        result = await self.request("engine.cancel", {"request_id": request_id} if request_id else None)
         return bool(result)
 
     async def session_resume(self, session_id: str) -> dict[str, Any]:
@@ -323,28 +343,43 @@ async def recover_daemon_client(
     mock_host: bool = False,
     status_callback: StatusCallback | None = None,
 ) -> DaemonClient:
-    """Return a usable daemon client, restarting an unhealthy daemon once."""
+    """Return a usable daemon client, restarting an unresponsive daemon once."""
+    runtime_dir = settings.runtime_dir
     try:
-        return await ensure_daemon_client(
+        client = await ensure_daemon_client(
             settings,
             mock_host=mock_host,
             status_callback=status_callback,
         )
+        await _probe_daemon_status(client, timeout_s=_daemon_recovery_probe_timeout())
+        return client
     except DaemonUnavailableError as exc:
-        runtime_dir = settings.runtime_dir
         info = DaemonInfo.discover(runtime_dir)
         if not info.is_running:
             raise
-        _emit(status_callback, f"Restarting unhealthy leapd (pid={info.pid})...")
-        result = await asyncio.to_thread(stop_daemon, runtime_dir, timeout_s=10.0)
+        _emit(status_callback, f"Restarting unresponsive leapd (pid={info.pid})...")
+        result = await asyncio.to_thread(
+            stop_daemon,
+            runtime_dir,
+            timeout_s=10.0,
+            force=True,
+            force_timeout_s=5.0,
+            on_progress=status_callback,
+        )
         if not result.stopped:
             raise exc
-        return await ensure_daemon_client(
+        client = await ensure_daemon_client(
             settings,
             mock_host=mock_host,
             status_callback=status_callback,
         )
+        await _probe_daemon_status(client, timeout_s=_daemon_recovery_probe_timeout())
+        return client
 
+
+async def _probe_daemon_status(client: DaemonClient, *, timeout_s: float) -> None:
+    """Verify that the daemon RPC loop responds, not just that its socket accepts."""
+    await DaemonClient(client.sock_path, timeout_s=timeout_s).status()
 
 
 def _event_from_params(params: dict[str, Any]) -> StreamEvent:
@@ -388,6 +423,14 @@ def _daemon_start_timeout() -> float:
         return max(1.0, float(raw))
     except ValueError:
         return 30.0
+
+
+def _daemon_recovery_probe_timeout() -> float:
+    raw = os.getenv("LEAPFLOW_DAEMON_RECOVERY_PROBE_TIMEOUT", "3").strip()
+    try:
+        return max(0.5, float(raw))
+    except ValueError:
+        return 3.0
 
 
 async def _send(writer: asyncio.StreamWriter, text: str) -> None:

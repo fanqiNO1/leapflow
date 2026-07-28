@@ -8,7 +8,7 @@ import logging
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Literal, Optional, Union
@@ -16,6 +16,9 @@ from typing import Any, AsyncIterator, Dict, List, Literal, Optional, Union
 from leapflow.platform.protocol import HostRpc, Methods
 from leapflow.config import Settings
 from leapflow.engine.budget import BudgetConfig, BudgetStatus, IterationBudget
+from leapflow.engine.prefix_commitment import PrefixCommitmentController
+from leapflow.engine.research_ledger import ResearchLedger
+from leapflow.engine.agent_loop import AgentLoopFrame
 from leapflow.engine.context_compressor import CompressorConfig, ContextCompressor
 from leapflow.engine.context_control import (
     ContextBudgetEstimator,
@@ -45,13 +48,14 @@ from leapflow.engine.message_sanitizer import MessageSanitizer
 from leapflow.engine.prompt_cache import CacheStrategy
 from leapflow.engine.stale_stream import StaleStreamError, stale_guarded_stream, build_continuation_prompt
 from leapflow.engine.turn_recovery import TurnRecoveryState
-from leapflow.engine.turn_usage import TurnUsageTracker
+from leapflow.engine.turn_usage import TurnUsageTracker, cost_ceiling_exceeded, build_adaptive_learning_signal
 from leapflow.engine.recovery_coordinator import RecoveryCoordinator
 from leapflow.engine.recovery_budget import RecoveryBudget
 from leapflow.engine.unified_classifier import UnifiedErrorClassifier
 from leapflow.engine.recovery_decision import RecoveryAction, RecoveryDecision
 from leapflow.engine.recovery_strategies import default_strategies
 from leapflow.engine.recovery_audit import JsonlAuditSink, create_audit_entry
+from leapflow.engine.failure_envelope import Recoverability
 from leapflow.engine.recovery_checkpoint import RecoveryCheckpoint, InMemoryCheckpointStore
 from leapflow.engine.tool_concurrency import (
     DefaultConcurrencyPolicy,
@@ -74,7 +78,6 @@ from leapflow.memory.providers.semantic import SemanticMemoryProvider
 from leapflow.memory.providers.working import WorkingMemoryProvider
 from leapflow.memory.providers.evolution import EvolutionMemoryProvider
 from leapflow.memory.manager import MemoryManager
-from leapflow.prompts.templates import REACT_SYSTEM_TEMPLATE
 from leapflow.learning.active_learning import SkillMerger
 from leapflow.skills.builtin import app_launcher, clipboard_manager, file_organizer
 from leapflow.security.permission_failures import (
@@ -82,6 +85,7 @@ from leapflow.security.permission_failures import (
     is_permission_hard_stop_payload,
 )
 from leapflow.storage.skill_library import SkillLibraryStore
+from leapflow.storage.reentry_store import build_reentry_trigger
 from leapflow.skills.registry import Skill, SkillRegistry
 from leapflow.tools.name_resolver import ToolRegistry, ToolResolution
 
@@ -107,6 +111,18 @@ def _resolve_tool_name(tool_name: str, arguments: Dict[str, Any] | None = None) 
 def _normalize_tool_name(tool_name: str) -> str:
     """Return the canonical executable tool name when resolution is safe."""
     return _default_tool_registry().normalize_name(tool_name)
+
+
+def _concurrency_spec_lookup(tool_name: str) -> Any:
+    """Return the registry ToolSpec for a (possibly gp_-prefixed) tool name.
+
+    Injected into the tool concurrency policy so parallel-safety is classified
+    from the same registry metadata that drives idempotency and the batch-stop
+    gate (one source of truth). Returns None for an unregistered tool, which the
+    policy treats as sequential.
+    """
+    specs = _default_tool_registry().specs
+    return specs.get(tool_name) or specs.get(tool_name.removeprefix("gp_"))
 
 
 def _normalize_tool_call(tool_call: Dict[str, Any]) -> Dict[str, Any]:
@@ -278,17 +294,6 @@ def _is_permission_hard_stop_payload(payload: Dict[str, Any]) -> bool:
 
 
 _SIDE_EFFECT_STOP_POLICIES = frozenset({"external_side_effect", "mutating_once", "mutating_idempotent"})
-_SIDE_EFFECT_STOP_TOOLS = frozenset({
-    "shell_run",
-    "scm_sync",
-    "platform_action",
-    "platform_connect",
-    "gateway_send",
-    "gateway_connect",
-    "hub_push",
-    "hub_pull",
-    "hub_sync",
-})
 
 
 def _tool_result_counts_as_failure(payload: Dict[str, Any]) -> bool:
@@ -315,14 +320,143 @@ def _tool_failure_text(payload: Dict[str, Any]) -> str:
 
 
 def _should_stop_after_tool_result(tool_name: str, payload: Dict[str, Any]) -> bool:
-    """Return whether a failed side-effect result must stop the current tool batch."""
+    """Return whether a failed side-effect result must stop the current tool batch.
+
+    Side-effect determination is policy-driven: the execution ledger injects an
+    ``execution_policy`` (derived from registry metadata — risk level, mutation,
+    idempotency) into every executed tool result, so a mutating/side-effecting
+    tool is identified by its declared policy rather than a hardcoded tool-name
+    list. This keeps the safety gate general and free of vendor-specific names.
+    """
     if _is_permission_hard_stop_payload(payload):
         return True
     if not _tool_result_counts_as_failure(payload):
         return False
-    policy = str(payload.get("execution_policy") or "")
-    normalized_name = str(tool_name or "").removeprefix("gp_")
-    return policy in _SIDE_EFFECT_STOP_POLICIES or normalized_name in _SIDE_EFFECT_STOP_TOOLS
+    return str(payload.get("execution_policy") or "") in _SIDE_EFFECT_STOP_POLICIES
+
+
+def _validate_tool_arguments(spec: Any, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Pre-execution argument check against a tool's declared required params.
+
+    Returns a structured ``invalid_arguments`` result (for in-turn self-repair) if
+    a required parameter key is absent, else ``None``. Presence-only (an empty but
+    present value is the handler's concern) to avoid rejecting legitimately empty
+    values. The result is marked non-failing and carries no execution_policy, so it
+    neither trips the side-effect batch-stop gate nor penalizes failure budgets —
+    the model simply sees the missing fields plus the accepted schema and retries.
+    """
+    if spec is None:
+        return None
+    required = getattr(spec, "required", frozenset()) or frozenset()
+    if not required:
+        return None
+    missing = [name for name in required if name not in args]
+    if not missing:
+        return None
+    accepted = sorted((getattr(spec, "parameters", frozenset()) or frozenset()) | set(required))
+    tool_name = str(getattr(spec, "name", "") or "")
+    return {
+        "ok": False,
+        "error": f"Invalid arguments for {tool_name}: missing required parameter(s): {', '.join(sorted(missing))}",
+        "error_type": "invalid_arguments",
+        "tool_name": tool_name,
+        "missing": sorted(missing),
+        "required": sorted(required),
+        "accepted_parameters": accepted,
+        "retryable": True,
+        "counts_as_failure": False,
+    }
+
+
+def _head_tail_truncate(text: str, allow: int) -> str:
+    """Keep the head and tail of a long string with an explicit elision marker.
+
+    The tail of stdout/stderr/tracebacks/test output usually holds the actual
+    error, so a naive head-only cut discards the most useful part.
+    """
+    if len(text) <= allow:
+        return text
+    keep = max(40, allow - 40)  # leave room for the marker
+    head = (keep * 2) // 3
+    tail = keep - head
+    elided = len(text) - head - tail
+    return f"{text[:head]}\n… [{elided} chars elided] …\n{text[-tail:]}"
+
+
+def _truncate_result_for_budget(payload: Any, budget: int) -> str:
+    """Serialize a tool result to JSON within ``budget``, preserving structure.
+
+    Pass 1 – prune list fields (e.g. file_list entries): drop tail elements
+    and annotate ``<key>_omitted`` so the LLM knows how many were removed.
+    Pass 2 – shrink the largest string fields with head+tail truncation so
+    the tail error / trace survives.  The final fallback emits a minimal
+    valid-JSON sentinel; a raw string cut that leaves invalid JSON is never
+    returned.  Never raises.
+    """
+    try:
+        text = json.dumps(payload, default=str, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(payload)[:budget]
+    if len(text) <= budget:
+        return text
+    if isinstance(payload, dict):
+        shrunk = dict(payload)
+
+        # Pass 1: prune list fields until the result fits.
+        # This handles file_list / file_find payloads that carry many entries.
+        for key in list(shrunk):
+            v = shrunk[key]
+            if not isinstance(v, list) or not v:
+                continue
+            orig_len = len(v)
+            # Estimate target entry count from a small sample to minimise
+            # iterations; then fine-tune with a tight while-loop.
+            sample = json.dumps(v[:min(4, orig_len)], default=str, ensure_ascii=False)
+            chars_per = max(1, len(sample) / min(4, orig_len))
+            empty_payload = {**shrunk, key: [], key + "_omitted": orig_len}
+            overhead = len(json.dumps(empty_payload, default=str, ensure_ascii=False))
+            target = max(0, int((budget - overhead) / chars_per))
+            shrunk[key] = v[:target]
+            if target < orig_len:
+                shrunk[key + "_omitted"] = orig_len - target
+            # Fine-tune (estimation may be off by ±1 entry).
+            while shrunk[key] and len(json.dumps(shrunk, default=str, ensure_ascii=False)) > budget:
+                shrunk[key] = shrunk[key][:-1]
+                shrunk[key + "_omitted"] = orig_len - len(shrunk[key])
+            if len(json.dumps(shrunk, default=str, ensure_ascii=False)) <= budget:
+                return json.dumps(shrunk, default=str, ensure_ascii=False)
+
+        # Pass 2: shrink the largest string fields with head+tail truncation.
+        while True:
+            over = len(json.dumps(shrunk, default=str, ensure_ascii=False)) - budget
+            if over <= 0:
+                break
+            candidates = [(k, v) for k, v in shrunk.items() if isinstance(v, str) and len(v) > 160]
+            if not candidates:
+                break
+            key, value = max(candidates, key=lambda kv: len(kv[1]))
+            allow = max(120, len(value) - over - 60)
+            if allow >= len(value):
+                break
+            shrunk[key] = _head_tail_truncate(value, allow)
+
+        text = json.dumps(shrunk, default=str, ensure_ascii=False)
+        if len(text) <= budget:
+            return text
+
+        # Sentinel: emit minimal valid JSON rather than a raw string cut that
+        # leaves the LLM with an unparseable fragment.
+        sentinel = json.dumps({
+            "ok": payload.get("ok"),
+            "kind": payload.get("kind", ""),
+            "truncated": True,
+            "original_chars": len(text),
+            "budget_chars": budget,
+        }, default=str, ensure_ascii=False)
+        return sentinel
+
+    # Non-dict: hard string cut is unavoidable; the LLM sees a partial raw value.
+    return text[:budget]
 
 
 def _skipped_after_failure_result(blocking_tool: str, blocking_result: Dict[str, Any]) -> Dict[str, Any]:
@@ -710,19 +844,6 @@ class StreamEvent:
     metadata: Optional[Dict[str, Any]] = None
 
 
-@dataclass
-class _LoopContext:
-    """Mutable state carried across state machine transitions."""
-
-    messages: List[Dict[str, Any]]
-    last_content: str = ""
-    last_action: Optional[Dict[str, Any]] = None
-    last_observation: Any = None
-    last_error: Optional[Exception] = None
-    consecutive_failures: int = 0
-    prefetch_done: bool = False  # track whether memory prefetch ran this loop
-
-
 @dataclass(frozen=True)
 class _PromptAssembly:
     """Resolved prompt pieces for a unified-loop turn."""
@@ -753,6 +874,11 @@ class TaskContract:
             (
                 "- Treat relative project paths as relative to the workspace root; never infer `.` "
                 "as the project root when a workspace root is provided."
+            ),
+            (
+                "- Workspace boundary is enforced by tools: do not read, search, edit, or run "
+                "commands against paths outside the allowed roots unless the user explicitly "
+                "requests an external path and the tool/approval policy permits it."
             ),
             (
                 "- LeapFlow workspace config is optional at `<workspace>/.leapflow/config.yaml`; "
@@ -837,7 +963,8 @@ class AgentEngine:
 
         # Tool concurrency policy (None = sequential fallback)
         self._concurrency_policy: Optional[ToolConcurrencyPolicy] = (
-            concurrency_policy if concurrency_policy is not None else DefaultConcurrencyPolicy()
+            concurrency_policy if concurrency_policy is not None
+            else DefaultConcurrencyPolicy(spec_lookup=_concurrency_spec_lookup)
         )
 
         # Session persistence (injected by CLI)
@@ -855,6 +982,14 @@ class AgentEngine:
         # Cancellation: tracks active task for interrupt support
         self._active_task: Optional[asyncio.Task] = None
         self._cancel_requested = False
+        # Per-turn identity, set at turn start; initialized so reads and the
+        # subagent frame save/restore never hit an unset attribute. NOTE:
+        # _current_session_id is intentionally NOT re-initialized here — it is set
+        # to None at the top of __init__, and the session-creation path relies on
+        # that ``is None`` sentinel to mint a new session id, so overriding it to
+        # "" would silently disable conversation persistence.
+        self._current_turn_id: str = ""
+        self._current_command_id: str = ""
 
         # Tool loop guardrails (injected by CLI)
         self._guardrail: Optional[Any] = None
@@ -890,45 +1025,40 @@ class AgentEngine:
 
         # State-machine loop infrastructure (config-driven)
         self._budget_config = BudgetConfig(
-            max_iterations=settings.react_max_iterations,
+            max_iterations=settings.agent_iter_floor,
             soft_limit=settings.react_soft_limit,
             warning_threshold=settings.react_warning_threshold,
+            iter_ceiling=settings.agent_iter_ceiling,
+            hard_cap=settings.agent_iter_hard_cap,
+            scale_k=settings.agent_budget_scale_k,
         )
+        # S3-L3: baseline difficulty weight, kept as the rollback/recompute anchor
+        # so calibration never compounds and reset is exact.
+        self._baseline_scale_k = settings.agent_budget_scale_k
+        # S3-L4: calibrated finalize-posture threshold (None = use configured baseline).
+        self._calibrated_finalizing_ratio: Optional[float] = None
+        # S3 periodic re-calibration (opt-in): evolution store + root-turn counter.
+        self._calibration_store: Optional[Any] = None
+        self._turns_since_calibration = 0
         self._error_classifier = ErrorClassifier(
             recovery_map=build_recovery_map(
                 transient_max_retries=settings.error_transient_max_retries,
                 rate_limit_base_delay=settings.error_rate_limit_base_delay,
             )
         )
-        ctx_len = settings.llm_context_length
-        self._compressor = ContextCompressor(CompressorConfig(
-            token_budget=max(1, int(ctx_len * settings.context_hard_limit_ratio)),
-            context_length=ctx_len,
-            threshold=settings.compress_threshold,
-            keep_tail=settings.compress_keep_tail,
-            max_output_chars=settings.max_tool_output_chars,
-        ))
+        self._compressor = self._new_compressor()
         self._context_controller = ContextWindowController(
             estimator=ContextBudgetEstimator(),
             hard_limit_ratio=settings.context_hard_limit_ratio,
             warning_ratio=settings.context_warning_ratio,
         )
-        self._context_governance_controller = ContextGovernanceController(
-            evidence_builder=ToolEvidenceBuilder(
-                max_content_chars=settings.tool_evidence_max_chars,
-                context_length=ctx_len,
-            ),
-            repeated_read_limit=settings.repeated_read_limit,
-            convergence_round=settings.long_task_convergence_round,
-            posture_config=ContextPostureConfig(
-                expanded_ratio=settings.context_expanded_ratio,
-                finalizing_ratio=settings.context_finalizing_ratio,
-                expanded_evidence_threshold=settings.context_expanded_evidence_threshold,
-                expanded_tool_call_threshold=settings.context_expanded_tool_call_threshold,
-                research_source_threshold=settings.context_research_source_threshold,
-                research_evidence_threshold=settings.context_research_evidence_threshold,
-            ),
-        )
+        self._context_governance_controller = self._new_governance()
+        self._prefix_commitment = PrefixCommitmentController()
+        self._research_ledger = ResearchLedger()
+        self._research_ledger_store: Optional[Any] = None
+        self._reentry_store: Optional[Any] = None
+        self._active_frame: Optional[AgentLoopFrame] = None
+        self._full_tools_tokens: int | None = None
         self._last_context_snapshot: dict[str, Any] = {}
         self._last_disclosure_metadata: dict[str, Any] = {}
         self._current_task_contract: TaskContract | None = None
@@ -953,6 +1083,21 @@ class AgentEngine:
         self._recovery_coordinator = RecoveryCoordinator()  # Re-created per turn
         self._checkpoint_store = InMemoryCheckpointStore()
         self._audit_sink = JsonlAuditSink()  # In-memory; path-based if layout available
+
+        # Apply startup-time tool configuration derived from settings.
+        self._configure_tool_defaults()
+
+    def _configure_tool_defaults(self) -> None:
+        """Wire settings-derived values into module-level tool defaults at start-up.
+
+        Kept in its own method so child frames and test fixtures can call it
+        without re-running the full ``__init__`` body.
+        """
+        try:
+            from leapflow.tools.shell_tools import set_max_shell_timeout
+            set_max_shell_timeout(self._settings.max_shell_timeout_s)
+        except Exception:  # noqa: BLE001 - optional; defaults remain if import fails
+            logger.debug("_configure_tool_defaults: shell_tools not available")
 
     # ── Optional strategy setters (config-driven) ────────────────────────
 
@@ -1004,35 +1149,13 @@ class AgentEngine:
         self._llm = llm
         self._vlm = vlm
         self._classifier = classifier
-        ctx_len = settings.llm_context_length
-        self._compressor = ContextCompressor(CompressorConfig(
-            token_budget=max(1, int(ctx_len * settings.context_hard_limit_ratio)),
-            context_length=ctx_len,
-            threshold=settings.compress_threshold,
-            keep_tail=settings.compress_keep_tail,
-            max_output_chars=settings.max_tool_output_chars,
-        ))
+        self._compressor = self._new_compressor()
         self._context_controller = ContextWindowController(
             estimator=ContextBudgetEstimator(),
             hard_limit_ratio=settings.context_hard_limit_ratio,
             warning_ratio=settings.context_warning_ratio,
         )
-        self._context_governance_controller = ContextGovernanceController(
-            evidence_builder=ToolEvidenceBuilder(
-                max_content_chars=settings.tool_evidence_max_chars,
-                context_length=ctx_len,
-            ),
-            repeated_read_limit=settings.repeated_read_limit,
-            convergence_round=settings.long_task_convergence_round,
-            posture_config=ContextPostureConfig(
-                expanded_ratio=settings.context_expanded_ratio,
-                finalizing_ratio=settings.context_finalizing_ratio,
-                expanded_evidence_threshold=settings.context_expanded_evidence_threshold,
-                expanded_tool_call_threshold=settings.context_expanded_tool_call_threshold,
-                research_source_threshold=settings.context_research_source_threshold,
-                research_evidence_threshold=settings.context_research_evidence_threshold,
-            ),
-        )
+        self._context_governance_controller = self._new_governance()
         self._skill_merger = SkillMerger(
             registry=self._registry,
             llm=llm,
@@ -1210,14 +1333,76 @@ class AgentEngine:
         if not violation.violated:
             return None
         logger.warning("guardrail: %s", violation.reason)
-        if violation.severity == "halt":
+        # Progress-aware: while the task is still advancing (stall counter at 0),
+        # a detected repetition/domination is producing progress -> never halt,
+        # and the finalize/diversify nudge is suppressed so legitimate batch or
+        # sequential work on a long task is not cut short. Only when the task is
+        # ALSO stalled does the guardrail escalate to a halt (or emit a nudge).
+        frame = self._active_frame
+        stalled = bool(frame is not None and getattr(frame, "stalled_rounds", 0) >= 1)
+        if violation.severity == "halt" and stalled:
             messages.append(build_user_message_text(
                 f"SYSTEM GUARDRAIL: {violation.reason}. {violation.suggestion}"
             ))
             return "halt"
+        if not stalled:
+            return None  # productive: neither halt nor nudge
         messages.append(build_user_message_text(
             f"SYSTEM WARNING: {violation.reason}. {violation.suggestion}"
         ))
+        return None
+
+    def _evaluate_tool_failures(
+        self, failed_items: List[tuple[str, Dict[str, Any]]], *, turn_id: int,
+    ) -> Optional[str]:
+        """Single recovery decision point for tool-result failures.
+
+        A tool failure is an OBSERVATION for autonomous diagnosis: the failed
+        result is already in the message history and is fed back to the LLM,
+        which reasons about it and retries or changes approach on the next round.
+        There is NO blanket count-based break — a task that fails then fixes keeps
+        going; a genuinely stuck failure loop is bounded by the iteration budget,
+        progress-based stall detection, and the progress-aware guardrail.
+
+        Each failure is classified into a FailureEnvelope. The turn halts ONLY
+        for a non-recoverable failure (e.g. permission denied), routed through
+        the coordinator for the terminal decision + audit. Recoverable failures
+        are fed back and audited as a zero-cost decision so they never spend the
+        system recovery budget (reserved for infrastructure recovery). Returns a
+        halt reason when the turn must stop, else None.
+        """
+        coordinator = self._recovery_coordinator
+        if coordinator is None:
+            return None
+        session_id = getattr(self, "_current_session_id", "") or ""
+        for tool_name, result in failed_items:
+            if not isinstance(result, dict):
+                continue
+            envelope = self._unified_classifier.classify_tool_result(
+                result, tool_name=tool_name,
+                execution_policy=result.get("execution_policy", "read_only"),
+            )
+            if envelope is None:
+                continue
+            if envelope.recoverability == Recoverability.NON_RECOVERABLE:
+                decision = coordinator.evaluate(envelope)
+                self._audit_sink.record(create_audit_entry(
+                    envelope, decision, coordinator.budget,
+                    session_id=session_id, turn_id=turn_id,
+                ))
+                return decision.reason or f"Non-recoverable tool failure ({envelope.category})"
+            # Recoverable: fed back to the agent (zero-cost, no recovery budget spent).
+            feedback = RecoveryDecision.create(
+                envelope=envelope,
+                action=RecoveryAction.SKIP_AND_CONTINUE,
+                reason="Tool failure fed back to the agent for autonomous diagnosis and retry",
+                strategy_key="tool_feedback",
+                budget_cost=0,
+            )
+            self._audit_sink.record(create_audit_entry(
+                feedback.envelope, feedback, coordinator.budget,
+                session_id=session_id, turn_id=turn_id,
+            ))
         return None
 
     def set_tool_timeouts(self, timeouts: Dict[str, float]) -> None:
@@ -1280,6 +1465,24 @@ class AgentEngine:
         """Inject conversation persistence store."""
         self._conversation_store = store
         self._tool_execution_ledger.reset(store=store)
+
+    def set_research_ledger_store(self, store: Any) -> None:
+        """Inject the research-ledger persistence store (S1, optional).
+
+        Wires the ledger change-listener so each note is persisted per session
+        (durable Orient). Without a store, the ledger degrades gracefully to
+        per-turn in-memory state.
+        """
+        self._research_ledger_store = store
+        self._research_ledger.set_change_listener(self._persist_research_ledger)
+
+    def set_reentry_store(self, store: Any) -> None:
+        """Inject the re-entry store (S2, optional).
+
+        Absent => ``schedule_reentry`` reports "not configured". Registration is
+        additionally gated by ``agent_reentry_enabled`` (default off).
+        """
+        self._reentry_store = store
 
     def load_session(self, session_id: str) -> bool:
         """Resume a previous session by loading messages from DuckDB.
@@ -1357,10 +1560,24 @@ class AgentEngine:
 
     def _begin_turn_context(self, user_text: str) -> None:
         """Reset turn-scoped state and build the stable task contract."""
+        self._maybe_periodic_recalibration()
         self._memory_context_snapshot = None
         self._last_context_snapshot = {}
         self._last_disclosure_metadata = {}
         self._context_governance_controller.reset_turn_scope()
+        self._prefix_commitment.reset()
+        if self._research_ledger_store is not None and self._current_session_id:
+            self._research_ledger.load_state(
+                self._research_ledger_store.load(self._current_session_id)
+            )
+        else:
+            self._research_ledger.reset()
+        try:
+            from leapflow.tools.registry_bootstrap import set_research_ledger, set_reentry_scheduler
+            set_research_ledger(self._research_ledger)
+            set_reentry_scheduler(self._schedule_reentry)
+        except ImportError:
+            pass
         self._current_task_contract = self._build_task_contract(user_text)
         self._current_turn_id = self._current_task_contract.task_id
         self._current_command_id = self._current_task_contract.task_id
@@ -1585,7 +1802,14 @@ class AgentEngine:
         return {"tools": existing}
 
     def _build_session_summary_context(self, *, max_messages: int) -> str:
-        """Return a compact local session summary without retrieval or extra LLM calls."""
+        """Return a structured local session summary without retrieval or extra LLM calls.
+
+        Structured format preserves more signal per turn compared to a flat
+        180-char single-line preview:
+        - User turns: full first line up to 400 chars (preserves intent).
+        - Assistant turns with tool calls: tool names + brief outcome.
+        - Assistant prose turns: content preview up to 300 chars.
+        """
         messages = self._wm.as_chat_messages()
         summary_lines: list[str] = []
         for message in messages[-max(0, max_messages):]:
@@ -1600,9 +1824,23 @@ class AgentEngine:
                 )
             elif not isinstance(content, str):
                 content = str(content)
-            preview = _single_line_preview(content, limit=180)
-            if preview:
-                summary_lines.append(f"- {role}: {preview}")
+
+            if role == "user":
+                # Preserve full user intent: first meaningful line, up to 400 chars.
+                first_line = content.strip().split("\n")[0][:400]
+                if first_line:
+                    summary_lines.append(f"- [user] {first_line}")
+            elif content.startswith("[Called:"):
+                # Working-memory stores tool-calling turns as "[Called: t1, t2]"
+                # summary strings.  Extract and preserve the tool list concisely.
+                called_text = content[8:].rstrip("]").strip()[:200]
+                summary_lines.append(f"- [assistant] called: {called_text}")
+            else:
+                # Assistant prose: single-line preview up to 300 chars.
+                preview = _single_line_preview(content, limit=300)
+                if preview:
+                    summary_lines.append(f"- [assistant] {preview}")
+
         if not summary_lines:
             return ""
         return "\n## Recent Session Summary\n" + "\n".join(summary_lines) + "\n"
@@ -1653,6 +1891,15 @@ class AgentEngine:
         context_length = self._active_context_length()
         token_count = self._context_controller.estimator.estimate_messages(messages)
         prepared = self._compressor.compress(messages, token_count=token_count)
+        if (
+            getattr(self._settings, "agent_compression_writeback", False)
+            and len(prepared) < len(messages)
+        ):
+            # E-3 (CL-8): persist the structural compression so append-only frozen
+            # segments stay byte-stable across rounds -> continuous prefix-cache
+            # reuse. The volatile notices appended below are NOT written back; the
+            # recent raw tail is preserved by the compressor. Opt-in (default off).
+            messages[:] = prepared
         prepared = self._ensure_task_contract_message(prepared)
         compression_trace = self._compressor.last_trace.as_dict()
         prepared = self._compressor.preflight_check(prepared, context_length=context_length)
@@ -1672,10 +1919,17 @@ class AgentEngine:
             decision.snapshot,
             round_number=round_number,
         )
-        convergence = self._context_governance_controller.convergence_notice(round_number)
-        for notice in (warning, convergence):
+        open_questions = self._ledger_open_questions()
+        convergence = self._context_governance_controller.convergence_notice(
+            round_number, open_questions=open_questions,
+        )
+        cost_notice = self._cost_ceiling_notice()
+        for notice in (warning, convergence, cost_notice):
             if notice:
                 prepared = [*prepared, build_user_message_text(notice)]
+        ledger_block = self._research_ledger.render()
+        if ledger_block:
+            prepared = [*prepared, build_user_message_text(ledger_block)]
         prepared = self._ensure_task_contract_message(prepared)
         snapshot = self._context_controller.estimator.snapshot(
             prepared,
@@ -1685,6 +1939,7 @@ class AgentEngine:
         governance = self._context_governance_controller.snapshot(
             context_ratio=snapshot.ratio,
             round_number=round_number,
+            open_questions=open_questions,
         ).as_dict()
         compressed = decision.compressed or bool(compression_trace.get("stages_applied"))
         self._last_context_tokens = snapshot.total_tokens
@@ -1701,6 +1956,9 @@ class AgentEngine:
             "compression_savings_ratio": compression_trace.get("savings_ratio", 0.0),
             "compression_saved_tokens": compression_trace.get("saved_tokens", 0),
             "context_governance": governance,
+            "difficulty": governance.get("difficulty", 0.0),
+            "cumulative_effective_tokens": self._usage_tracker.summary().effective_prompt_tokens(),
+            "open_questions": open_questions,
             "context_posture": governance.get("posture", "baseline"),
             "context_signal": governance.get("dominant_signal", ""),
             "context_guidance": governance.get("guidance", ""),
@@ -1712,6 +1970,346 @@ class AgentEngine:
         if compressed:
             self._usage_tracker.mark_compression()
         return prepared
+
+    def recalibrate_difficulty(self, store: Any) -> Any:
+        """S3-L3: apply offline calibration (S3-L2) to the difficulty weight.
+
+        Bounded, gated, and reversible: reads recent turn signals from the
+        evolution store and — only when ``agent.calibration_enabled`` — installs a
+        clamped ``scale_k`` derived from the *baseline* weight. Default-off, so
+        budget behavior is byte-identical unless explicitly enabled. Returns the
+        ``CalibrationResult`` for observability.
+        """
+        from leapflow.learning.difficulty_calibration import (
+            CalibrationResult,
+            apply_calibration,
+            build_calibration_report_from_store,
+        )
+
+        enabled = bool(getattr(self._settings, "agent_calibration_enabled", False))
+        if not enabled or store is None:
+            return CalibrationResult(
+                self._baseline_scale_k, self._budget_config.scale_k, False,
+                "calibration disabled" if not enabled else "no evolution store",
+            )
+        try:
+            report = build_calibration_report_from_store(store)
+        except Exception:
+            logger.debug("difficulty calibration: report build failed", exc_info=True)
+            return CalibrationResult(
+                self._baseline_scale_k, self._budget_config.scale_k, False, "report build failed",
+            )
+        result = apply_calibration(
+            self._baseline_scale_k, report, enabled=True,
+            min_confidence=float(getattr(self._settings, "agent_calibration_min_confidence", 0.3)),
+        )
+        if result.applied:
+            self._budget_config = replace(self._budget_config, scale_k=result.effective_k)
+            logger.info(
+                "difficulty calibration applied: scale_k %.3f -> %.3f (%s)",
+                self._baseline_scale_k, result.effective_k, result.reason,
+            )
+        return result
+
+    def reset_calibration(self) -> None:
+        """Revert any applied difficulty calibration to the configured baseline."""
+        self._budget_config = replace(self._budget_config, scale_k=self._baseline_scale_k)
+
+    def recalibrate_thresholds(self, store: Any) -> Any:
+        """S3-L4: tune the finalize posture threshold from stored signals.
+
+        Same bounded/gated/reversible contract as :meth:`recalibrate_difficulty`,
+        applied to ``context_finalizing_ratio`` (clamped to a safe band) and
+        derived from the configured baseline. Default-off; rebuilds the governance
+        controller so subsequent frames observe the calibrated threshold.
+        """
+        from leapflow.learning.difficulty_calibration import (
+            CalibrationResult,
+            apply_calibration,
+            build_threshold_report_from_store,
+        )
+
+        baseline = self._settings.context_finalizing_ratio
+        current = self._calibrated_finalizing_ratio or baseline
+        enabled = bool(getattr(self._settings, "agent_calibration_enabled", False))
+        if not enabled or store is None:
+            return CalibrationResult(
+                baseline, current, False,
+                "calibration disabled" if not enabled else "no evolution store",
+            )
+        try:
+            report = build_threshold_report_from_store(store)
+        except Exception:
+            logger.debug("threshold calibration: report build failed", exc_info=True)
+            return CalibrationResult(baseline, current, False, "report build failed")
+        result = apply_calibration(
+            baseline, report, enabled=True,
+            min_confidence=float(getattr(self._settings, "agent_calibration_min_confidence", 0.3)),
+            k_min=0.6, k_max=0.98,
+        )
+        if result.applied:
+            self._calibrated_finalizing_ratio = result.effective_k
+            self._context_governance_controller = self._new_governance()
+            logger.info(
+                "threshold calibration applied: finalizing_ratio %.3f -> %.3f (%s)",
+                baseline, result.effective_k, result.reason,
+            )
+        return result
+
+    def reset_threshold_calibration(self) -> None:
+        """Revert any applied finalize-threshold calibration to the baseline."""
+        self._calibrated_finalizing_ratio = None
+        self._context_governance_controller = self._new_governance()
+
+    def set_calibration_store(self, store: Any) -> None:
+        """Install the evolution store used for periodic S3 re-calibration."""
+        self._calibration_store = store
+
+    def _maybe_periodic_recalibration(self) -> None:
+        """S3-L3/L4 periodic re-calibration (opt-in via agent.calibration_interval_turns).
+
+        The one-shot startup calibration already applies the learned adjustment;
+        when a positive interval is set, re-run every N *root* turns so calibration
+        tracks accumulating outcome data. Default 0 = one-shot only (no periodic).
+        Bounded/gated/reversible like the underlying recalibration; never raises.
+        """
+        if not getattr(self._settings, "agent_calibration_enabled", False):
+            return
+        interval = int(getattr(self._settings, "agent_calibration_interval_turns", 0) or 0)
+        if interval <= 0 or self._calibration_store is None:
+            return
+        self._turns_since_calibration += 1
+        if self._turns_since_calibration < interval:
+            return
+        self._turns_since_calibration = 0
+        try:
+            self.recalibrate_difficulty(self._calibration_store)
+            self.recalibrate_thresholds(self._calibration_store)
+        except Exception:
+            logger.debug("periodic recalibration failed", exc_info=True)
+
+    def _widen_budget_for_difficulty(self, budget: IterationBudget) -> None:
+        """Raise the elastic iteration cap to match the observed difficulty.
+
+        Reads the difficulty produced by the most recent ``_prepare_llm_messages``
+        governance snapshot and retargets the budget toward the difficulty-scaled
+        ceiling. No-op for fixed budgets and for difficulty 0 (baseline floor).
+        This is how a hard task earns a wider horizon while a simple task stays
+        near the floor and relies on self-stop / answer-ready convergence.
+        """
+        difficulty = float(self._last_context_snapshot.get("difficulty", 0.0) or 0.0)
+        budget.retarget(budget.elastic_max(difficulty))
+
+    def _task_progress_marker(self) -> tuple:
+        """Fingerprint of task progress for stall detection (P0).
+
+        Combines the research-ledger shape (findings / open questions /
+        decisions / next step) with governance evidence breadth (evidence count,
+        distinct sources). A change between rounds means the task advanced; an
+        unchanged marker across rounds indicates a stall. Works for ledger-using
+        tasks and, via governance signals, for tasks that never call research_note.
+        """
+        d = self._research_ledger.as_dict()
+        gov = self._last_context_snapshot.get("context_governance", {}) or {}
+        return (
+            len(d.get("findings", [])),
+            len(d.get("open_questions", [])),
+            len(d.get("decisions", [])),
+            d.get("next_step", ""),
+            int(gov.get("evidence_count", 0) or 0),
+            int(gov.get("sources_seen", 0) or 0),
+        )
+
+    def _update_progress_and_stall(self, frame: AgentLoopFrame) -> None:
+        """Advance the frame's stall counter: reset on progress, else increment."""
+        marker = self._task_progress_marker()
+        if marker == frame.progress_marker:
+            frame.stalled_rounds += 1
+        else:
+            frame.stalled_rounds = 0
+            frame.progress_marker = marker
+            # Genuine progress: re-arm content-level recovery one-shots so a long
+            # task can recover again later (e.g. multiple max_tokens continuations
+            # or force-compressions across a long turn). Storm-prone infrastructure
+            # one-shots stay strict (bounded by the RecoveryBudget instead).
+            if frame.recovery is not None:
+                frame.recovery.rearm_after_progress()
+
+    def _within_resource_limits(self) -> bool:
+        """Whether real resource budgets (cost) still allow continuation.
+
+        The absolute iteration hard cap is enforced by the budget itself; this
+        guards the *cost* ceiling when configured (0 disables). Context pressure
+        is handled separately by the finalizing posture.
+        """
+        multiple = float(getattr(self._settings, "agent_cost_ceiling_context_multiple", 0.0) or 0.0)
+        if multiple <= 0:
+            return True
+        effective = self._usage_tracker.summary().effective_prompt_tokens()
+        ceiling = multiple * float(self._active_context_length() or 0)
+        return ceiling <= 0 or effective < ceiling
+
+    def _should_extend_budget(self, frame: AgentLoopFrame) -> bool:
+        """Progress-gated continuation decision (P0).
+
+        Extend the iteration budget past the elastic ceiling only when the task
+        is *productively unfinished*: within resource limits, still making
+        progress (not stalled), and not already signalled complete by the ledger
+        (zero open questions). A stalled, complete, or resource-exhausted task is
+        allowed to converge and stop — so a productive long task continues while a
+        spinning one halts.
+        """
+        if not self._within_resource_limits():
+            return False
+        stall_rounds = int(getattr(self._settings, "agent_stall_rounds", 6) or 6)
+        if frame.stalled_rounds >= stall_rounds:
+            return False
+        open_q = self._ledger_open_questions()
+        if open_q is not None and open_q == 0:
+            return False
+        return True
+
+    def _ledger_open_questions(self) -> int | None:
+        """Ledger sufficiency signal for convergence: None when the ledger is
+        inactive/empty (fall back to the marginal heuristic), else the current
+        open-question count. A positive count suppresses early answer-ready
+        convergence so a long task with tracked open work is never cut short.
+        """
+        ledger = self._research_ledger
+        return None if ledger.is_empty else ledger.open_question_count
+
+    def orientation_view(self, *, now: Optional[float] = None) -> Any:
+        """Read-only unified orientation across immediate/working/long-term layers (S4-D1).
+
+        Observe-only aggregation of existing state: the current research ledger
+        forms the working layer (findings / open questions / next step). Changes
+        no state; usable by dashboards, diagnostics, and future autonomy phases.
+        """
+        from leapflow.world_model.orientation import build_orientation_from_ledger
+
+        return build_orientation_from_ledger(
+            self._research_ledger.to_state(),
+            now=now if now is not None else time.time(),
+        )
+
+    def _persist_research_ledger(self) -> None:
+        """Persist the ledger for the active session (best-effort; S1 durable Orient).
+
+        Fired as the ledger change-listener after each note. No-op when no store
+        is wired or no session is established yet.
+        """
+        store = self._research_ledger_store
+        session_id = self._current_session_id
+        if store is None or not session_id:
+            return
+        store.save(session_id, self._research_ledger.to_state())
+
+    def _schedule_reentry(
+        self,
+        *,
+        kind: str = "time",
+        reason: str = "",
+        delay_seconds: Any = 0.0,
+        event_match: Any = None,
+        max_reentries: Any = 1,
+        deadline_seconds: Any = 0.0,
+    ) -> Dict[str, Any]:
+        """Register a re-entry trigger seeded with the current orientation (S2 N2).
+
+        Gated by ``agent_reentry_enabled`` (default off). Only persists a trigger
+        (Orient snapshot = research-ledger state + task contract + reason); the
+        actual wake-up dispatch is a later phase (N3+).
+        """
+        if not getattr(self._settings, "agent_reentry_enabled", False):
+            return {"ok": False, "error": "re-entry is disabled (set agent.reentry_enabled=true)"}
+        if self._reentry_store is None:
+            return {"ok": False, "error": "re-entry store not configured"}
+        contract = self._current_task_contract
+        task_id = contract.task_id if contract else (self._current_session_id or "task")
+        try:
+            trigger = build_reentry_trigger(
+                task_id=task_id,
+                session_id=self._current_session_id or "",
+                ledger_state=self._research_ledger.to_state(),
+                task_contract=asdict(contract) if contract else {},
+                continuation_summary=reason,
+                kind=kind,
+                delay_seconds=float(delay_seconds or 0.0),
+                event_match=dict(event_match or {}),
+                max_reentries=int(max_reentries or 1),
+                deadline_seconds=float(deadline_seconds or 0.0),
+            )
+            self._reentry_store.save(trigger)
+        except Exception as exc:
+            return {"ok": False, "error": f"failed to schedule re-entry: {exc}"}
+        return {
+            "ok": True,
+            "trigger_id": trigger.trigger_id,
+            "kind": trigger.kind,
+            "due_at": trigger.due_at,
+            "note": "registered; wake-up dispatch activates in a later phase",
+        }
+
+    def _cost_ceiling_notice(self) -> str:
+        """Soft finalize nudge when cumulative effective cost crosses the ceiling.
+
+        Opt-in safety companion to the elastic iteration cap: bounds runaway cost
+        on large-context long tasks. Soft (a nudge, not a hard stop) so no work is
+        lost; the iteration ceiling remains the hard bound. Disabled by default
+        (``agent_cost_ceiling_context_multiple`` = 0).
+        """
+        multiple = float(getattr(self._settings, "agent_cost_ceiling_context_multiple", 0.0) or 0.0)
+        if multiple <= 0:
+            return ""
+        effective = self._usage_tracker.summary().effective_prompt_tokens()
+        if not cost_ceiling_exceeded(
+            effective_prompt_tokens=effective,
+            context_length=self._active_context_length(),
+            context_multiple=multiple,
+        ):
+            return ""
+        return (
+            "SYSTEM: Cumulative cost budget reached. Synthesize and provide the final "
+            "answer now from the evidence already gathered; do not start new exploratory "
+            "tool calls unless strictly required."
+        )
+
+    def _full_tool_schema_tokens(self) -> int:
+        """Cached token estimate of the full tool catalog schema (static per process)."""
+        if self._full_tools_tokens is None:
+            from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+            self._full_tools_tokens = self._context_controller.estimator.estimate_tools(TOOL_DEFINITIONS)
+        return self._full_tools_tokens
+
+    def _evaluate_prefix_commitment(self, budget: IterationBudget) -> None:
+        """Evaluate the adaptive prefix-commitment decision (observe-only, W2 slice 2).
+
+        Computes whether the task should commit to a stable, cacheable prefix and
+        records the decision in the context snapshot for observability. Does not
+        yet enforce (freeze disclosure / lock tools / cache-aware compression) --
+        that is W2 slice 3. Reuses the token counts already produced by
+        ``_prepare_llm_messages`` plus the post-retarget budget headroom, so it is
+        cheap (no re-estimation of the message body) and changes no behavior.
+        """
+        snap = self._last_context_snapshot
+        if not snap:
+            return
+        difficulty = float(snap.get("difficulty", 0.0) or 0.0)
+        posture = str(snap.get("context_posture") or "baseline")
+        message_tokens = int(snap.get("message_tokens", 0) or 0)
+        disclosed_tool_tokens = int(snap.get("tool_schema_tokens", 0) or 0)
+        est_full = message_tokens + self._full_tool_schema_tokens()
+        est_pcd = message_tokens + disclosed_tool_tokens
+        state = self._prefix_commitment.evaluate(
+            difficulty=difficulty,
+            posture=posture,
+            round_number=budget.used,
+            remaining_rounds=budget.remaining,
+            est_full_prefix_tokens=est_full,
+            est_pcd_prefix_tokens=est_pcd,
+        )
+        snap["prefix_commitment"] = state.as_dict()
+        snap["prefix_committed"] = state.committed
 
     def _record_provider_usage(self, model: str, usage: Dict[str, Any]) -> None:
         """Prefer provider prompt usage when available and learn observed limits."""
@@ -1850,388 +2448,212 @@ class AgentEngine:
             logger.debug("app connector prompt section unavailable", exc_info=True)
             return ""
 
-    # ── Complex Task Handling (DAG path) ─────────────────────────────
+    # ── Unified Tool Loop (chat scenarios) ───────────────────────────────
 
-    async def _handle_complex_task(self, user_goal: str) -> str:
-        """Handle complex multi-step tasks via DAG planning and execution.
+    def _new_compressor(self) -> ContextCompressor:
+        """Fresh context compressor (per engine, or per isolated child frame)."""
+        ctx_len = self._settings.llm_context_length
+        return ContextCompressor(CompressorConfig(
+            token_budget=max(1, int(ctx_len * self._settings.context_hard_limit_ratio)),
+            context_length=ctx_len,
+            threshold=self._settings.compress_threshold,
+            keep_tail=self._settings.compress_keep_tail,
+            max_output_chars=self._settings.max_tool_output_chars,
+        ))
 
-        Flow: GraphPlanner → TaskScheduler → summary report.
-        Falls back to ReAct loop on planning failure.
-        """
-        assert self._graph_planner is not None
-        assert self._scheduler is not None
-
-        try:
-            _log_progress("Building execution plan...")
-            graph = await self._graph_planner.plan(user_goal)
-            self._wm.remember_event(
-                "dag_plan", graph.summary(), {"nodes": len(graph.nodes)}
-            )
-            node_names = [n.name for n in list(graph.nodes.values())[:10]]
-            _log_progress(f"Execution plan ready: {len(graph.nodes)} steps — {', '.join(node_names)}")
-            graph = await self._scheduler.execute_graph(graph)
-            _log_progress("Plan execution complete")
-            return graph.summary()
-        except (ValueError, Exception) as e:
-            _log_progress(f"DAG planning failed ({e}), falling back to ReAct loop")
-            logger.warning("audit.dag_fallback reason=%s", e)
-            return await self._fallback_react(user_goal)
-
-    async def _fallback_react(self, user_text: str) -> str:
-        """Fallback to ReAct loop when DAG planning/execution fails."""
-        steps = await self._plan_steps(user_text)
-        self._wm.remember_event("plan", " | ".join(steps), {"steps": steps})
-        return await self._react_loop(user_text, steps)
-
-    async def _plan_steps(self, user_goal: str) -> List[str]:
-        """Generate flat step list via LLM for the ReAct loop."""
-        catalog = self._registry.describe()
-        messages = [
-            build_system_message(
-                "Return STRICT JSON: {\"steps\":[\"...\", ...]} with 3-7 steps for the goal. "
-                f"Available skills:\n{catalog}"
+    def _new_governance(self) -> ContextGovernanceController:
+        """Fresh context-governance controller (per engine, or per child frame)."""
+        ctx_len = self._settings.llm_context_length
+        return ContextGovernanceController(
+            evidence_builder=ToolEvidenceBuilder(
+                max_content_chars=self._settings.tool_evidence_max_chars,
+                context_length=ctx_len,
             ),
-            build_user_message_text(user_goal),
-        ]
-        try:
-            resp = await self._llm.achat(messages, stream=False, enable_thinking=False)
-            raw = (resp.content or "").strip()
-            start = raw.find("{")
-            end = raw.rfind("}")
-            blob = raw[start : end + 1] if start != -1 and end != -1 else raw
-            data = json.loads(blob)
-            steps = [str(x) for x in list(data.get("steps") or [])]
-            return steps[:10]
-        except Exception:
-            logger.debug("plan_steps failed", exc_info=True)
-            return [user_goal]
+            repeated_read_limit=self._settings.repeated_read_limit,
+            convergence_round=self._settings.long_task_convergence_round,
+            convergence_round_ceiling=self._settings.convergence_round_ceiling,
+            convergence_scale=self._settings.convergence_scale,
+            posture_config=ContextPostureConfig(
+                expanded_ratio=self._settings.context_expanded_ratio,
+                finalizing_ratio=(
+                    getattr(self, "_calibrated_finalizing_ratio", None)
+                    or self._settings.context_finalizing_ratio
+                ),
+                expanded_evidence_threshold=self._settings.context_expanded_evidence_threshold,
+                expanded_tool_call_threshold=self._settings.context_expanded_tool_call_threshold,
+                research_source_threshold=self._settings.context_research_source_threshold,
+                research_evidence_threshold=self._settings.context_research_evidence_threshold,
+            ),
+        )
 
-    async def _react_loop(
+    def _build_child_frame(
         self,
         user_text: str,
-        steps: List[str],
         *,
+        depth: int,
+        tool_filter: "frozenset[str] | None" = None,
+        enable_thinking: bool = False,
+        parent_session_id: Optional[str] = None,
+    ) -> AgentLoopFrame:
+        """Build an isolated child frame with fresh per-turn subsystems.
+
+        A recursive subagent runs the same ``_run_agent_loop`` on this frame; the
+        fresh budget/recovery/governance/ledger/commitment/usage/compressor keep
+        its OODA loop from contaminating the parent frame's state.
+        """
+        return AgentLoopFrame(
+            user_text=user_text,
+            depth=depth,
+            budget=IterationBudget.for_react(self._budget_config),
+            recovery=TurnRecoveryState(),
+            governance=self._new_governance(),
+            ledger=ResearchLedger(),
+            commitment=PrefixCommitmentController(),
+            usage_tracker=TurnUsageTracker(),
+            compressor=self._new_compressor(),
+            tool_filter=tool_filter,
+            enable_thinking=enable_thinking,
+            parent_session_id=parent_session_id,
+        )
+
+    def _install_frame(self, frame: AgentLoopFrame) -> Dict[str, Any]:
+        """Install a frame's per-turn subsystems as the engine's active state.
+
+        Returns the previous per-turn state for restoration. This lets a child
+        frame run the full loop on the shared engine while the parent frame's
+        subsystems stay untouched (see ``_run_child_frame``).
+        """
+        saved: Dict[str, Any] = {
+            "governance": self._context_governance_controller,
+            "ledger": self._research_ledger,
+            "commitment": self._prefix_commitment,
+            "usage": self._usage_tracker,
+            "compressor": self._compressor,
+            "coordinator": self._recovery_coordinator,
+            "snapshot": self._last_context_snapshot,
+            "categories": self._last_turn_tool_categories,
+            # Per-turn identity is turn-start-set and non-propagating, so it is
+            # scoped to the frame (a child that reassigns it must not leak to the
+            # parent). NOTE: _cancel_requested is deliberately NOT saved here — it
+            # is a cross-frame signal that must propagate into a running child.
+            "session_id": self._current_session_id,
+            "turn_id": self._current_turn_id,
+            "command_id": self._current_command_id,
+            "frame": self._active_frame,
+        }
+        self._context_governance_controller = frame.governance
+        self._research_ledger = frame.ledger
+        self._prefix_commitment = frame.commitment
+        self._usage_tracker = frame.usage_tracker
+        self._compressor = frame.compressor
+        if frame.recovery_coordinator is not None:
+            self._recovery_coordinator = frame.recovery_coordinator
+        self._last_context_snapshot = frame.last_context_snapshot
+        self._last_turn_tool_categories = frame.last_turn_tool_categories
+        self._active_frame = frame
+        return saved
+
+    def _restore_per_turn_state(self, saved: Dict[str, Any]) -> None:
+        """Restore per-turn state previously saved by ``_install_frame``."""
+        self._context_governance_controller = saved["governance"]
+        self._research_ledger = saved["ledger"]
+        self._prefix_commitment = saved["commitment"]
+        self._usage_tracker = saved["usage"]
+        self._compressor = saved["compressor"]
+        self._recovery_coordinator = saved["coordinator"]
+        self._last_context_snapshot = saved["snapshot"]
+        self._last_turn_tool_categories = saved["categories"]
+        self._current_session_id = saved["session_id"]
+        self._current_turn_id = saved["turn_id"]
+        self._current_command_id = saved["command_id"]
+        self._active_frame = saved["frame"]
+
+    async def _run_child_frame(self, frame: AgentLoopFrame) -> str:
+        """Run a recursive subagent's isolated frame through the full loop.
+
+        Swaps the engine's per-turn state to the child frame for the duration of
+        the child loop, then restores the parent's state — so recursion is fully
+        state-isolated without duplicating the loop body.
+        """
+        saved = self._install_frame(frame)
+        try:
+            return await self._run_agent_loop(frame)
+        finally:
+            self._restore_per_turn_state(saved)
+
+    async def _run_subagent_goal(
+        self,
+        goal: str,
+        *,
+        depth: int,
+        tool_filter: "frozenset[str] | None" = None,
         enable_thinking: bool = False,
     ) -> str:
-        """State-machine driven ReAct loop (async shell, sync semantics)."""
-        budget = IterationBudget.for_react(self._budget_config)
-        trace = ExecutionTrace()
-        ctx = _LoopContext(messages=self._build_loop_messages(user_text, steps))
-        state = ExecutionMode.PREPARING
+        """Run a subagent goal as an isolated child frame through the full loop.
 
-        while state != ExecutionMode.COMPLETE:
-            state = await self._loop_step(
-                state, ctx, budget, trace,
-                user_text=user_text,
-                enable_thinking=enable_thinking,
-            )
-
-        # Fire-and-forget: emit learning signal to the evolution ring
-        if trace.has_learning_signal:
-            asyncio.create_task(self._emit_execution_trace(trace))
-
-        # Sync conversation turn to long-term memory (non-blocking)
-        if self._memory_manager and self._settings.memory_integration_enabled:
-            asyncio.create_task(self._sync_turn_safe(ctx.messages))
-
-        logger.info(
-            "react_loop.complete steps=%d tokens=%d success=%s",
-            trace.step_count, trace.total_tokens, trace.success,
+        Bridge for ``EngineFrameSubagentExecutor`` (opt-in full-loop subagents):
+        the child frame's fresh subsystems + per-frame swap keep the subagent
+        from contaminating the parent turn's state.
+        """
+        frame = self._build_child_frame(
+            goal, depth=depth, tool_filter=tool_filter, enable_thinking=enable_thinking,
         )
-        return ctx.last_content or "Stopped after step budget."
+        return await self._run_child_frame(frame)
 
-    # ── State Machine Core ──────────────────────────────────────────────
+    def _build_frame(
+        self, user_text: str, enable_thinking: bool, budget: Any, recovery: Any,
+    ) -> AgentLoopFrame:
+        """Bundle per-frame state around the given budget/recovery.
 
-    async def _loop_step(  # noqa: C901 (state machine dispatch)
-        self,
-        state: ExecutionMode,
-        ctx: _LoopContext,
-        budget: IterationBudget,
-        trace: ExecutionTrace,
-        *,
-        user_text: str,
-        enable_thinking: bool,
-    ) -> ExecutionMode:
-        """Execute one state transition. Returns the next state."""
-
-        if state == ExecutionMode.PREPARING:
-            return await self._state_preparing(ctx, budget, trace, user_text=user_text)
-
-        if state == ExecutionMode.REASONING:
-            return await self._state_reasoning(ctx, trace, enable_thinking=enable_thinking)
-
-        if state == ExecutionMode.ROUTING:
-            return self._state_routing(ctx, trace)
-
-        if state == ExecutionMode.ACTING:
-            return await self._state_acting(ctx, trace, user_text=user_text)
-
-        if state == ExecutionMode.OBSERVING:
-            return self._state_observing(ctx, budget, trace)
-
-        if state == ExecutionMode.RECOVERING:
-            return await self._state_recovering(ctx, budget, trace)
-
-        # Fallback: unreachable unless enum extended
-        trace.record(ExecutionMode.COMPLETE, error="invalid_state")
-        return ExecutionMode.COMPLETE
-
-    # ── State Handlers ──────────────────────────────────────────────────
-
-    async def _state_preparing(
-        self, ctx: _LoopContext, budget: IterationBudget, trace: ExecutionTrace,
-        *, user_text: str = "",
-    ) -> ExecutionMode:
-        """Budget check + memory prefetch + message healing + compression."""
-        status = budget.consume()
-
-        if status == BudgetStatus.EXHAUSTED:
-            trace.record(ExecutionMode.COMPLETE, error="budget_exhausted")
-            ctx.last_content = self._budget_exhausted_response(ctx.messages)
-            return ExecutionMode.COMPLETE
-
-        # Prefetch memory context on first iteration (non-blocking with timeout)
-        if not ctx.prefetch_done and self._memory_manager and self._settings.memory_integration_enabled:
-            ctx.prefetch_done = True
-            try:
-                entries = await asyncio.wait_for(
-                    self._memory_manager.prefetch(
-                        user_text, limit=self._settings.memory_prefetch_limit,
-                    ),
-                    timeout=self._settings.memory_prefetch_timeout_s,
-                )
-                if entries:
-                    context_lines = [e.content for e in entries if e.content]
-                    if context_lines:
-                        memory_block = (
-                            "MEMORY_CONTEXT (relevant past experiences):\n"
-                            + "\n".join(f"- {line}" for line in context_lines)
-                        )
-                        ctx.messages.append(build_user_message_text(memory_block))
-                        logger.debug("memory.prefetch injected %d entries", len(context_lines))
-            except asyncio.TimeoutError:
-                logger.debug("memory.prefetch timed out (%.1fs)", self._settings.memory_prefetch_timeout_s)
-            except Exception:
-                logger.debug("memory.prefetch failed", exc_info=True)
-
-        # Heal and compress
-        ctx.messages = self._healer.heal(ctx.messages)
-        ctx.messages = self._compressor.compress(ctx.messages)
-
-        # Inject convergence hint near soft limit
-        if status == BudgetStatus.SOFT_LIMIT:
-            ctx.messages.append(build_user_message_text(
-                "SYSTEM: Approaching iteration limit. Please converge and provide final answer."
-            ))
-
-        remaining = budget.remaining
-        _log_progress(f"Thinking (budget {remaining} remaining)...")
-        return ExecutionMode.REASONING
-
-    async def _state_reasoning(
-        self, ctx: _LoopContext, trace: ExecutionTrace, *, enable_thinking: bool
-    ) -> ExecutionMode:
-        """LLM call — the only await in the hot path."""
-        t0 = time.perf_counter()
-        try:
-            resp = await self._llm.achat(
-                ctx.messages + self._wm.as_chat_messages(),
-                stream=False,
-                enable_thinking=enable_thinking,
-            )
-            latency = (time.perf_counter() - t0) * 1000
-            content = (resp.content or "").strip()
-            tokens = getattr(resp, "usage_tokens", 0)
-            trace.record(ExecutionMode.REASONING, tokens_used=tokens, latency_ms=latency)
-
-            if resp.thinking_content:
-                logger.debug("audit.thinking chars=%s", len(resp.thinking_content))
-
-            ctx.last_content = content
-            self._wm.remember_chat(build_assistant_message(content))
-            ctx.messages.append(build_assistant_message(content))
-            return ExecutionMode.ROUTING
-
-        except Exception as exc:
-            trace.record(ExecutionMode.RECOVERING, error=str(exc))
-            ctx.last_error = exc
-            return ExecutionMode.RECOVERING
-
-    def _state_routing(self, ctx: _LoopContext, trace: ExecutionTrace) -> ExecutionMode:
-        """Parse LLM output and decide: final answer, action, or raw text."""
-        content = ctx.last_content
-
-        try:
-            obj = _extract_json_object(content)
-        except Exception:
-            # No parseable JSON — treat as final answer
-            logger.info("audit.react_no_json; returning assistant text")
-            trace.record(ExecutionMode.COMPLETE)
-            return ExecutionMode.COMPLETE
-
-        action = obj.get("action") or {}
-        a_type = str(action.get("type", "")).strip()
-
-        # Final answer
-        if a_type == "answer" and str(action.get("name")) == "final":
-            payload = action.get("payload") or {}
-            ans = str(payload.get("text") or payload.get("content") or "").strip()
-            ctx.last_content = ans or content
-            trace.record(ExecutionMode.COMPLETE)
-            return ExecutionMode.COMPLETE
-
-        if not a_type:
-            # No action type — treat content as final answer
-            trace.record(ExecutionMode.COMPLETE)
-            return ExecutionMode.COMPLETE
-
-        # Prepare prediction loop (world model)
-        action_name = str(action.get("name", a_type)).strip()
-        predicted_effect = str(obj.get("predicted_effect", "")).strip()
-        if predicted_effect:
-            self._wm.remember_event(
-                "react_prediction",
-                f"action={action_name}, predicted={predicted_effect}",
-                {"action": action_name},
-            )
-
-        ctx.last_action = action
-        return ExecutionMode.ACTING
-
-    async def _state_acting(
-        self, ctx: _LoopContext, trace: ExecutionTrace, *, user_text: str
-    ) -> ExecutionMode:
-        """Execute the parsed action via skill/bridge."""
-        action = ctx.last_action or {}
-        action_name = str(action.get("name", action.get("type", ""))).strip()
-        action_payload = action.get("payload") or {}
-
-        payload_hint = json.dumps(action_payload, ensure_ascii=False)
-        if len(payload_hint) > 200:
-            payload_hint = payload_hint[:200] + "..."
-        _log_progress(f"Executing action: {action_name} — {payload_hint}")
-
-        # Prediction loop pre-snapshot
-        a_type = str(action.get("type", "")).strip()
-        predicted_effect = ""
-        # Extract predicted_effect from original JSON if available
-        try:
-            obj = _extract_json_object(ctx.last_content)
-            predicted_effect = str(obj.get("predicted_effect", "")).strip()
-        except Exception:
-            pass
-
-        react_prediction = None
-        pl = self._registry.prediction_loop
-        if predicted_effect and pl is not None and pl.enabled:
-            react_prediction = pl.create_from_react_prediction(
-                action_desc=f"{a_type}:{action_name}",
-                predicted_effect=predicted_effect,
-            )
-            await pl.capture_pre_snapshot()
-
-        t0 = time.perf_counter()
-        observation = await self._execute_action(action, user_text)
-        latency = (time.perf_counter() - t0) * 1000
-
-        # Prediction loop verification
-        if react_prediction is not None and pl is not None:
-            await pl.verify_prediction(react_prediction)
-
-        trace.record(
-            ExecutionMode.ACTING,
-            action=action,
-            observation=observation if isinstance(observation, dict) else {"result": str(observation)},
-            latency_ms=latency,
+        The root frame wraps the engine's (freshly reset) per-turn subsystems so
+        loop-path reads through ``self._active_frame`` are byte-equivalent to the
+        singletons; recursive subagents (later) build frames with fresh subsystems.
+        """
+        return AgentLoopFrame(
+            user_text=user_text,
+            enable_thinking=enable_thinking,
+            budget=budget,
+            recovery=recovery,
+            governance=self._context_governance_controller,
+            ledger=self._research_ledger,
+            commitment=self._prefix_commitment,
+            usage_tracker=self._usage_tracker,
+            compressor=self._compressor,
+            session_id=self._current_session_id,
+            turn_id=self._current_turn_id,
+            command_id=self._current_command_id,
         )
-        ctx.last_observation = observation
-        return ExecutionMode.OBSERVING
 
-    def _state_observing(
-        self, ctx: _LoopContext, budget: IterationBudget, trace: ExecutionTrace
-    ) -> ExecutionMode:
-        """Evaluate observation and feed back into messages."""
-        observation = ctx.last_observation
-        is_error = isinstance(observation, dict) and not observation.get("ok", True)
-
-        if is_error:
-            ctx.consecutive_failures += 1
-            error_detail = (
-                observation.get("error", "unknown error")
-                if isinstance(observation, dict)
-                else str(observation)
-            )
-            category = self._error_classifier.classify_tool_error(observation)
-            max_tool_failures = self._settings.max_consecutive_tool_failures
-
-            if category == ErrorCategory.PERMANENT or ctx.consecutive_failures >= max_tool_failures:
-                _log_progress(f"{ctx.consecutive_failures} consecutive failures — stopping")
-                trace.record(ExecutionMode.COMPLETE, error="max_tool_failures")
-                ctx.last_content = self._error_response(observation)
-                return ExecutionMode.COMPLETE
-
-            _log_progress(f"Action failed ({ctx.consecutive_failures}/3): {error_detail}")
-            budget.refund("tool_failure")
-            error_obs = json.dumps(
-                {"observation": observation, "recovery_hint": "Previous action failed. Try an alternative approach."},
-                ensure_ascii=False,
-            )
-            ctx.messages.append(build_user_message_text(error_obs))
-            self._wm.remember_event("react_error", str(error_detail)[:200], {})
-            return ExecutionMode.PREPARING
-
-        # Success
-        ctx.consecutive_failures = 0
-        obs_summary = str(observation)
-        if len(obs_summary) > 300:
-            obs_summary = obs_summary[:300] + "..."
-        _log_progress(f"Observation: {obs_summary}")
-        obs_text = json.dumps({"observation": observation}, ensure_ascii=False)
-        ctx.messages.append(build_user_message_text(obs_text))
-        self._wm.remember_event("react_observation", obs_text, {})
-        return ExecutionMode.PREPARING
-
-    async def _state_recovering(
-        self, ctx: _LoopContext, budget: IterationBudget, trace: ExecutionTrace
-    ) -> ExecutionMode:
-        """Handle LLM/network errors with classified recovery."""
-        exc = ctx.last_error
-        if exc is None:
-            trace.record(ExecutionMode.COMPLETE, error="unknown_recovery")
-            return ExecutionMode.COMPLETE
-
-        category = self._error_classifier.classify(exc)
-        recovery = self._error_classifier.get_recovery(category)
-
-        if recovery.retry and ctx.consecutive_failures < recovery.max_retries:
-            ctx.consecutive_failures += 1
-            if recovery.backoff:
-                delay = jittered_backoff(ctx.consecutive_failures, base=recovery.base_delay)
-                await asyncio.sleep(delay)
-            if recovery.compress:
-                ctx.messages = self._compressor.force_compress(ctx.messages)
-            logger.warning(
-                "react_loop.recovery category=%s attempt=%d",
-                category.value, ctx.consecutive_failures,
-            )
-            return ExecutionMode.PREPARING
-
-        # Unrecoverable
-        trace.record(ExecutionMode.COMPLETE, error=str(exc))
-        ctx.last_content = f"Error: {exc}"
-        return ExecutionMode.COMPLETE
-
-    # ── Unified Tool Loop (chat scenarios) ───────────────────────────────
+    def _build_root_frame(self, user_text: str, *, enable_thinking: bool = False) -> AgentLoopFrame:
+        """Build the top-level (depth-0) agent-loop frame for a turn."""
+        return self._build_frame(
+            user_text, enable_thinking,
+            IterationBudget.for_react(self._budget_config),
+            TurnRecoveryState(),
+        )
 
     async def _unified_tool_loop(
         self, user_text: str, *, enable_thinking: bool = False
     ) -> str:
-        """Unified chat+tool loop: LLM dynamically decides tools vs direct response.
+        """Entry adapter: build the root frame and run the unified agent loop."""
+        return await self._run_agent_loop(
+            self._build_root_frame(user_text, enable_thinking=enable_thinking)
+        )
 
-        Uses native OpenAI tool_calls when provider supports them, falls back to
-        text-based parsing. Injects working memory for multi-turn coherence.
-        Reuses IterationBudget, ErrorClassifier, ContextCompressor, MessageHealer.
+    async def _run_agent_loop(self, frame: AgentLoopFrame) -> str:
+        """Unified adaptive OODA loop over an isolated per-frame state.
+
+        Per-frame execution state (budget, recovery) lives on ``frame`` so the
+        same loop serves the top-level turn (root frame) and, in a later phase,
+        recursive subagents (deeper frames with their own budget). Capabilities
+        remain engine methods; the LLM dynamically decides tools vs direct reply.
         """
+        user_text = frame.user_text
+        enable_thinking = frame.enable_thinking
+        budget = frame.budget
+        recovery = frame.recovery
+        self._active_frame = frame
+
         # Detect slash command → inject skill context
         if user_text.startswith("/"):
             slash_name = user_text.split()[0][1:]  # Remove leading /
@@ -2243,11 +2665,23 @@ class AgentEngine:
 
         from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS, TOOL_HANDLERS
 
-        budget = IterationBudget.for_react(self._budget_config)
+        # A restricted frame (e.g. a subagent) is offered only its permitted
+        # tools; the root frame (tool_filter=None) sees the full registry.
+        tool_defs = TOOL_DEFINITIONS
+        tool_handlers = TOOL_HANDLERS
+        if frame.tool_filter is not None:
+            tool_defs = [
+                td for td in TOOL_DEFINITIONS
+                if td.get("function", {}).get("name", "") in frame.tool_filter
+            ]
+            tool_handlers = {
+                name: fn for name, fn in TOOL_HANDLERS.items() if name in frame.tool_filter
+            }
+
         trace = ExecutionTrace()
         assembly = await self._assemble_unified_prompt(
             user_text,
-            tool_definitions=TOOL_DEFINITIONS,
+            tool_definitions=tool_defs,
             enable_thinking=enable_thinking,
             slash_command=user_text.startswith("/"),
         )
@@ -2265,9 +2699,12 @@ class AgentEngine:
 
         content = ""
         fatal_error: Optional[str] = None
-        recovery = TurnRecoveryState()
         # P3: Initialize recovery coordinator for this turn
-        recovery_budget = RecoveryBudget()
+        recovery_budget = RecoveryBudget(
+            turn_deadline_s=self._settings.recovery_turn_deadline_s,
+            total_recovery_actions=self._settings.recovery_total_actions,
+            max_retry_per_category=self._settings.recovery_max_retry_per_category,
+        )
         recovery_budget.start_deadline()
         self._recovery_coordinator = RecoveryCoordinator(
             strategies=default_strategies(),
@@ -2284,7 +2721,7 @@ class AgentEngine:
         self._cancel_requested = False
         _signal_watermark = [time.time()]
 
-        session_id = self._ensure_session(user_text)
+        session_id = self._ensure_session_for_frame(frame, user_text)
 
         while not budget.exhausted:
             if self._cancel_requested:
@@ -2293,7 +2730,21 @@ class AgentEngine:
 
             status = budget.consume()
             if status == BudgetStatus.EXHAUSTED:
-                break
+                # Progress-gated continuation: a productively-unfinished task
+                # (open ledger work, still progressing, within resource limits)
+                # extends past the elastic ceiling toward the hard cap instead of
+                # terminating; a stalled/complete/over-budget task stops here.
+                if budget.can_extend and self._should_extend_budget(frame):
+                    budget.grant_extension(self._settings.agent_iter_extension_step)
+                    if budget.status() == BudgetStatus.EXHAUSTED:
+                        break  # absolute hard cap reached
+                    logger.info(
+                        "unified_loop: budget extended (progress-gated) to %d (stalled=%d)",
+                        budget.effective_max, frame.stalled_rounds,
+                    )
+                    status = budget.status()
+                else:
+                    break
 
             self._inject_live_signals(messages, _signal_watermark)
 
@@ -2303,6 +2754,9 @@ class AgentEngine:
                 tools=tools_kwarg.get("tools"),
                 round_number=budget.used,
             )
+            self._widen_budget_for_difficulty(budget)
+            self._update_progress_and_stall(frame)
+            self._evaluate_prefix_commitment(budget)
 
             try:
                 resp = await self._llm.achat(
@@ -2435,7 +2889,7 @@ class AgentEngine:
                 self._persist_message(session_id, "assistant", "", tool_calls=assistant_msg.get("tool_calls"))
 
                 results = await self._execute_tools_concurrent(
-                    native_calls, TOOL_HANDLERS, trace=trace, messages=messages,
+                    native_calls, tool_handlers, trace=trace, messages=messages,
                 )
                 self._record_tool_call_categories(native_calls)
                 tools_kwarg = self._merge_expanded_tool_schemas(tools_kwarg, results)
@@ -2459,15 +2913,21 @@ class AgentEngine:
                 )
                 if retryable_unknown and not unknown_tool_retry_used:
                     unknown_tool_retry_used = True
-                    tools_kwarg = self._expand_tools_kwarg_full(tools_kwarg, TOOL_DEFINITIONS)
+                    tools_kwarg = self._expand_tools_kwarg_full(tools_kwarg, tool_defs)
                     use_native_tools = bool(tools_kwarg)
                     messages.append(build_user_message_text(_unknown_tool_retry_prompt(retryable_unknown)))
                     continue
 
-                failures = self._count_consecutive_tool_failures(messages)
-                recovery.consecutive_tool_failures = failures
-                if failures >= self._settings.max_consecutive_tool_failures:
-                    logger.warning("unified_loop: %d consecutive tool failures, stopping", failures)
+                halt_reason = self._evaluate_tool_failures(
+                    [
+                        (item.get("name") or "", item["result"])
+                        for item in results
+                        if isinstance(item.get("result"), dict) and _tool_result_counts_as_failure(item["result"])
+                    ],
+                    turn_id=budget.used,
+                )
+                if halt_reason:
+                    fatal_error = halt_reason
                     break
 
                 # Guardrail check after tool execution
@@ -2478,7 +2938,7 @@ class AgentEngine:
                     f"[Called: {', '.join(tc.name for tc in native_calls)}]"
                 ))
 
-                if status == BudgetStatus.SOFT_LIMIT:
+                if status == BudgetStatus.SOFT_LIMIT and not self._should_extend_budget(frame):
                     messages.append(build_user_message_text(
                         "SYSTEM: Approaching limit. Provide final answer now."
                     ))
@@ -2512,7 +2972,7 @@ class AgentEngine:
             })
             _show_progress("executing", tool_name)
             result = await self._execute_tool_with_ledger(
-                normalized_tool_call, TOOL_HANDLERS, tool_call_id=f"text-{budget.used}",
+                normalized_tool_call, tool_handlers, tool_call_id=f"text-{budget.used}",
             )
             _clear_indicator()
             self._emit_chat_event("tool_result", {
@@ -2533,7 +2993,7 @@ class AgentEngine:
             else:
                 recovery.record_tool_success()
             result_payload = self._compact_tool_result(tool_name, tool_arguments, result)
-            result_text = json.dumps(result_payload, default=str, ensure_ascii=False)[:result_budget]
+            result_text = _truncate_result_for_budget(result_payload, result_budget)
             messages.append(build_user_message_text(
                 f"Tool result ({tool_name}):\n{result_text}"
             ))
@@ -2551,50 +3011,32 @@ class AgentEngine:
                 )
                 break
 
-            # Classify tool failures through coordinator for audit and decision
-            if (
-                isinstance(result, dict)
-                and not result.get("ok", True)
-                and result.get("counts_as_failure") is not False
-            ):
-                tool_envelope = self._unified_classifier.classify_tool_result(
-                    result, tool_name=tool_name,
-                    execution_policy=result.get("execution_policy", "read_only"),
-                )
-                if tool_envelope is not None:
-                    tool_decision = self._recovery_coordinator.evaluate(tool_envelope)
-                    self._audit_sink.record(create_audit_entry(
-                        tool_envelope, tool_decision, self._recovery_coordinator.budget,
-                        session_id=getattr(self, '_current_session_id', '') or '',
-                        turn_id=budget.used,
-                    ))
-                    if tool_decision.action in (RecoveryAction.HALT_CLEAN, RecoveryAction.HALT_WITH_CHECKPOINT):
-                        fatal_error = tool_decision.reason
-                        break
-                    # Other actions: let LLM handle (append result to messages as before)
-
             if _is_retryable_unknown_tool_result(result) and not unknown_tool_retry_used:
                 unknown_tool_retry_used = True
                 messages.append(build_user_message_text(_unknown_tool_retry_prompt(result)))
                 continue
 
-            if is_error and recovery.consecutive_tool_failures >= self._settings.max_consecutive_tool_failures:
-                logger.warning("unified_loop: %d consecutive tool failures, stopping",
-                               recovery.consecutive_tool_failures)
-                break
+            if is_error:
+                halt_reason = self._evaluate_tool_failures([(tool_name, result)], turn_id=budget.used)
+                if halt_reason:
+                    fatal_error = halt_reason
+                    break
 
             if self._check_guardrail(messages) == "halt":
                 break
 
-            if status == BudgetStatus.SOFT_LIMIT:
+            if status == BudgetStatus.SOFT_LIMIT and not self._should_extend_budget(self._active_frame):
                 messages.append(build_user_message_text(
                     "SYSTEM: Approaching limit. Provide final answer now."
                 ))
 
-        if self._memory_manager and self._settings.memory_integration_enabled:
+        # Turn-end learning/memory-sync are top-level-turn concerns; a recursive
+        # child frame (subagent) must not pollute the parent's evolution/memory
+        # (its result flows back via SubagentResult) nor leak background tasks.
+        if getattr(self._active_frame, "is_root", True) and self._memory_manager and self._settings.memory_integration_enabled:
             asyncio.create_task(self._sync_turn_safe(messages))
 
-        if self._evolution is not None and content:
+        if getattr(self._active_frame, "is_root", True) and self._evolution is not None and content:
             asyncio.create_task(self._post_turn_review(messages, content))
 
         llm = self._llm
@@ -2614,7 +3056,7 @@ class AgentEngine:
         fallback = (
             _app_onboarding_recovery_message(messages)
             or _last_tool_failures_recovery_message(messages)
-            or "I've reached my processing limit."
+            or self._budget_exhausted_response(messages)
         )
         self._emit_chat_event("response", {"content": fallback[:500]})
         return fallback
@@ -2660,6 +3102,7 @@ class AgentEngine:
             skill_name = tool_actions[0]["tool"] if tool_actions else "unknown"
             episode_context = {"final_content_preview": final_content[:200]}
             episode_context.update(self._usage_tracker.to_learning_signal())
+            episode_context.update(build_adaptive_learning_signal(self._last_context_snapshot or {}))
             episode = self._evolution.record_episode(
                 skill_name=f"turn_{skill_name}",
                 actions=tool_actions[:10],
@@ -2775,8 +3218,13 @@ class AgentEngine:
         content = ""
         fatal_error: Optional[str] = None
         turn_recovery = TurnRecoveryState()
+        self._active_frame = self._build_frame(user_text, enable_thinking, budget, turn_recovery)
         # Initialize recovery coordinator for stream turn
-        recovery_budget = RecoveryBudget()
+        recovery_budget = RecoveryBudget(
+            turn_deadline_s=self._settings.recovery_turn_deadline_s,
+            total_recovery_actions=self._settings.recovery_total_actions,
+            max_retry_per_category=self._settings.recovery_max_retry_per_category,
+        )
         recovery_budget.start_deadline()
         self._recovery_coordinator = RecoveryCoordinator(
             strategies=default_strategies(),
@@ -2802,7 +3250,20 @@ class AgentEngine:
 
             status = budget.consume()
             if status == BudgetStatus.EXHAUSTED:
-                break
+                # Progress-gated continuation (mirrors _run_agent_loop): extend a
+                # productively-unfinished task past the elastic ceiling toward the
+                # hard cap; a stalled/complete/over-budget task stops here.
+                if budget.can_extend and self._should_extend_budget(self._active_frame):
+                    budget.grant_extension(self._settings.agent_iter_extension_step)
+                    if budget.status() == BudgetStatus.EXHAUSTED:
+                        break  # absolute hard cap reached
+                    logger.info(
+                        "unified_loop_stream: budget extended (progress-gated) to %d",
+                        budget.effective_max,
+                    )
+                    status = budget.status()
+                else:
+                    break
 
             self._inject_live_signals(messages, _signal_watermark)
 
@@ -2812,6 +3273,9 @@ class AgentEngine:
                 tools=tools_kwarg.get("tools") if use_native_tools else None,
                 round_number=budget.used,
             )
+            self._widen_budget_for_difficulty(budget)
+            self._update_progress_and_stall(self._active_frame)
+            self._evaluate_prefix_commitment(budget)
 
             content = ""
 
@@ -2964,16 +3428,22 @@ class AgentEngine:
                         )
                         break
 
-                    failures = self._count_consecutive_tool_failures(messages)
-                    turn_recovery.consecutive_tool_failures = failures
                     if retryable_unknown and not unknown_tool_retry_used:
                         unknown_tool_retry_used = True
                         tools_kwarg = self._expand_tools_kwarg_full(tools_kwarg, TOOL_DEFINITIONS)
                         use_native_tools = bool(tools_kwarg)
                         messages.append(build_user_message_text(_unknown_tool_retry_prompt(retryable_unknown)))
                         continue
-                    if failures >= self._settings.max_consecutive_tool_failures:
-                        logger.warning("unified_loop_stream: %d consecutive tool failures, stopping", failures)
+                    halt_reason = self._evaluate_tool_failures(
+                        [
+                            (item.get("name") or "", item["result"])
+                            for item in results
+                            if isinstance(item.get("result"), dict) and _tool_result_counts_as_failure(item["result"])
+                        ],
+                        turn_id=budget.used,
+                    )
+                    if halt_reason:
+                        fatal_error = halt_reason
                         break
 
                     if self._check_guardrail(messages) == "halt":
@@ -2982,7 +3452,7 @@ class AgentEngine:
                     self._wm.remember_chat(build_assistant_message(
                         f"[Called: {', '.join(tc.name for tc in native_calls)}]"
                     ))
-                    if status == BudgetStatus.SOFT_LIMIT:
+                    if status == BudgetStatus.SOFT_LIMIT and not self._should_extend_budget(self._active_frame):
                         messages.append(build_user_message_text(
                             "SYSTEM: Approaching limit. Provide final answer now."
                         ))
@@ -3211,7 +3681,7 @@ class AgentEngine:
                 turn_recovery.record_tool_success()
 
             result_payload = self._compact_tool_result(tool_name, tool_arguments, result)
-            result_text = json.dumps(result_payload, default=str, ensure_ascii=False)[:result_budget]
+            result_text = _truncate_result_for_budget(result_payload, result_budget)
             messages.append(build_user_message_text(
                 f"Tool result ({tool_name}):\n{result_text}"
             ))
@@ -3234,23 +3704,27 @@ class AgentEngine:
                 messages.append(build_user_message_text(_unknown_tool_retry_prompt(result)))
                 continue
 
-            if is_error and turn_recovery.consecutive_tool_failures >= self._settings.max_consecutive_tool_failures:
-                logger.warning("unified_loop_stream: %d consecutive tool failures, stopping",
-                               turn_recovery.consecutive_tool_failures)
-                break
+            if is_error:
+                halt_reason = self._evaluate_tool_failures([(tool_name, result)], turn_id=budget.used)
+                if halt_reason:
+                    fatal_error = halt_reason
+                    break
 
             if self._check_guardrail(messages) == "halt":
                 break
 
-            if status == BudgetStatus.SOFT_LIMIT:
+            if status == BudgetStatus.SOFT_LIMIT and not self._should_extend_budget(self._active_frame):
                 messages.append(build_user_message_text(
                     "SYSTEM: Approaching limit. Provide final answer now."
                 ))
 
-        if self._memory_manager and self._settings.memory_integration_enabled:
+        # Turn-end learning/memory-sync are top-level-turn concerns; a recursive
+        # child frame (subagent) must not pollute the parent's evolution/memory
+        # (its result flows back via SubagentResult) nor leak background tasks.
+        if getattr(self._active_frame, "is_root", True) and self._memory_manager and self._settings.memory_integration_enabled:
             asyncio.create_task(self._sync_turn_safe(messages))
 
-        if self._evolution is not None and content:
+        if getattr(self._active_frame, "is_root", True) and self._evolution is not None and content:
             asyncio.create_task(self._post_turn_review(messages, content))
 
         llm = self._llm
@@ -3269,7 +3743,7 @@ class AgentEngine:
                 _app_onboarding_recovery_message(messages)
                 or _last_tool_failures_recovery_message(messages)
                 or fatal_error
-                or "I've reached my processing limit."
+                or self._budget_exhausted_response(messages)
             )
             self._emit_chat_event("response", {"content": fallback[:500]})
             yield StreamEvent(type="final", content=fallback)
@@ -3369,7 +3843,7 @@ class AgentEngine:
                     observation=result if isinstance(result, dict) else {"result": str(result)},
                 )
                 result_payload = self._compact_tool_result(normalized_name, tc.arguments, result)
-                result_text = json.dumps(result_payload, default=str, ensure_ascii=False)[:result_budget]
+                result_text = _truncate_result_for_budget(result_payload, result_budget)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
                 self._persist_message(
                     self._current_session_id, "tool", result_text,
@@ -3408,8 +3882,12 @@ class AgentEngine:
             len(sequential),
         )
 
-        # Execute concurrent group via asyncio.gather
+        # Execute concurrent group via asyncio.gather, bounded so a large batch
+        # does not fan out unbounded IO/subprocess load.
         if concurrent:
+            max_parallel = max(1, int(getattr(self._settings, "agent_max_parallel_tools", 8) or 8))
+            _parallel_sem = asyncio.Semaphore(max_parallel)
+
             async def _run_one(ctc: ConcurrentToolCall) -> Dict[str, Any]:
                 original_name = original_names_by_id.get(str(ctc.id), ctc.name)
                 tool_call_dict = {
@@ -3418,9 +3896,10 @@ class AgentEngine:
                     "original_tool_name": original_name,
                     "normalized_tool_name": ctc.name,
                 }
-                return await self._execute_tool_with_ledger(
-                    tool_call_dict, handlers, tool_call_id=str(ctc.id),
-                )
+                async with _parallel_sem:
+                    return await self._execute_tool_with_ledger(
+                        tool_call_dict, handlers, tool_call_id=str(ctc.id),
+                    )
 
             gather_results = await asyncio.gather(
                 *[_run_one(ctc) for ctc in concurrent],
@@ -3446,7 +3925,7 @@ class AgentEngine:
                         observation=error_result,
                     )
                     result_payload = self._compact_tool_result(ctc.name, ctc.arguments, error_result)
-                    result_text = json.dumps(result_payload, default=str, ensure_ascii=False)[:result_budget]
+                    result_text = _truncate_result_for_budget(result_payload, result_budget)
                 else:
                     _print_tool_result(ctc.name, result, enabled=self._settings.verbose_progress)
                     trace.record(
@@ -3455,7 +3934,7 @@ class AgentEngine:
                         observation=result if isinstance(result, dict) else {"result": str(result)},
                     )
                     result_payload = self._compact_tool_result(ctc.name, ctc.arguments, result)
-                    result_text = json.dumps(result_payload, default=str, ensure_ascii=False)[:result_budget]
+                    result_text = _truncate_result_for_budget(result_payload, result_budget)
                 effective_result = error_result if isinstance(result, Exception) else result
                 messages.append({"role": "tool", "tool_call_id": ctc.id, "content": result_text})
                 self._persist_message(
@@ -3506,7 +3985,7 @@ class AgentEngine:
                 observation=result if isinstance(result, dict) else {"result": str(result)},
             )
             result_payload = self._compact_tool_result(ctc.name, ctc.arguments, result)
-            result_text = json.dumps(result_payload, default=str, ensure_ascii=False)[:result_budget]
+            result_text = _truncate_result_for_budget(result_payload, result_budget)
             messages.append({"role": "tool", "tool_call_id": ctc.id, "content": result_text})
             self._persist_message(
                 self._current_session_id, "tool", result_text,
@@ -3537,6 +4016,34 @@ class AgentEngine:
                 break
         return executed
 
+    def _tool_execution_context(self) -> Any | None:
+        """Build the tool context from the current task contract, if any."""
+        contract = self._current_task_contract
+        if contract is None:
+            return None
+        from leapflow.tools.execution_context import ToolExecutionContext
+
+        return ToolExecutionContext.from_strings(
+            workspace_root=contract.workspace_root,
+            allowed_roots=contract.allowed_roots,
+            session_id=str(self._current_session_id or ""),
+            task_id=contract.task_id,
+        )
+
+    async def _execute_tool_scoped(
+        self,
+        tool_call: Dict[str, Any],
+        handlers: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Execute a tool with the current turn's workspace context installed."""
+        from leapflow.tools.execution_context import reset_tool_context, set_tool_context
+
+        token = set_tool_context(self._tool_execution_context())
+        try:
+            return await self._execute_general_tool(tool_call, handlers)
+        finally:
+            reset_tool_context(token)
+
     async def _execute_tool_with_ledger(
         self,
         tool_call: Dict[str, Any],
@@ -3551,11 +4058,16 @@ class AgentEngine:
         registry = _default_tool_registry()
         resolution = registry.resolve(proposed_name, args)
         if not resolution.auto_executable or resolution.normalized_name is None:
-            return await self._execute_general_tool(tool_call, handlers)
+            return await self._execute_tool_scoped(tool_call, handlers)
 
         tool_name = resolution.normalized_name
         spec = registry.specs.get(tool_name)
         policy = execution_policy_for(tool_name, spec)
+        if getattr(self._settings, "agent_validate_tool_args", True):
+            invalid_args = _validate_tool_arguments(spec, args)
+            if invalid_args is not None:
+                logger.info("tool_args_invalid: tool=%s missing=%s", tool_name, invalid_args.get("missing"))
+                return invalid_args
         session_id = self._current_session_id or "ephemeral"
         turn_id = self._current_turn_id or f"turn-{self._session_turn_count}"
         command_id = self._current_command_id or turn_id
@@ -3594,7 +4106,7 @@ class AgentEngine:
             return duplicate
 
         try:
-            result = await self._execute_general_tool(normalized_call, handlers)
+            result = await self._execute_tool_scoped(normalized_call, handlers)
         except Exception as exc:
             failed_result: Dict[str, Any] = {
                 "ok": False,
@@ -3741,40 +4253,27 @@ class AgentEngine:
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
-    def _build_loop_messages(self, user_text: str, steps: List[str]) -> List[Dict[str, Any]]:
-        """Build initial messages for the ReAct loop."""
-        skill_catalog = self._registry.describe_with_params()
-
-        # Append memory tool descriptions if available
-        memory_tools_desc = ""
-        if self._memory_manager and self._settings.memory_integration_enabled:
-            schemas = self._memory_manager.get_tool_schemas()
-            if schemas:
-                tool_lines = []
-                for s in schemas:
-                    tool_lines.append(f"  - {s.name}: {s.description}")
-                memory_tools_desc = (
-                    "\n\nMEMORY TOOLS (type=\"memory\"):\n"
-                    + "\n".join(tool_lines)
-                )
-
-        system_prompt = REACT_SYSTEM_TEMPLATE.format(skill_catalog=skill_catalog)
-        if memory_tools_desc:
-            system_prompt += memory_tools_desc
-
-        return [
-            build_system_message(system_prompt),
-            build_user_message_text(
-                "GOAL:\n"
-                f"{user_text}\n\n"
-                "CONTEXT:\n"
-                f"- plan_steps: {json.dumps(steps, ensure_ascii=False)}\n"
-            ),
-        ]
-
     def _budget_exhausted_response(self, messages: List[Dict[str, Any]]) -> str:
-        """Generate response when budget is exhausted."""
-        return "I've reached my reasoning step limit. Here's my best answer based on progress so far."
+        """Response when the iteration hard cap is reached.
+
+        When the research ledger shows unfinished work, surface the remaining
+        open-question count and next step so the stop is informative and
+        continuable (not a bare dead-stop); otherwise the plain notice.
+        """
+        base = "I've reached my reasoning step limit. Here's my best answer based on progress so far."
+        led = self._research_ledger
+        if led.is_empty or led.open_question_count == 0:
+            return base
+        d = led.as_dict()
+        parts = [
+            base,
+            "",
+            f"Note: {led.open_question_count} open question(s) remain — the task is not fully complete.",
+        ]
+        next_step = d.get("next_step", "")
+        if next_step:
+            parts.append(f"Suggested next step: {next_step}")
+        return "\n".join(parts)
 
     @staticmethod
     def _error_response(observation: Any) -> str:
@@ -3803,11 +4302,39 @@ class AgentEngine:
                     actions=actions,
                     outcome=outcome,
                     reward=reward,
-                    context={"steps": trace.step_count, "tokens": trace.total_tokens},
+                    context={
+                        "steps": trace.step_count,
+                        "tokens": trace.total_tokens,
+                        **build_adaptive_learning_signal(self._last_context_snapshot or {}),
+                    },
                 )
                 logger.debug("evolution.record_episode outcome=%s actions=%d", outcome, len(actions))
         except Exception:
             pass  # never fail the main loop
+
+    def _ensure_session_for_frame(self, frame: AgentLoopFrame, user_text: str) -> Optional[str]:
+        """Resolve the persistence session for a loop frame (S4-E isolation).
+
+        Root frames reuse the turn's conversation session; a recursive child
+        frame (subagent) gets its *own* isolated ``sub_`` session so its
+        transcript is persisted separately and never mixes into the parent
+        turn's conversation.
+        """
+        if frame.is_root:
+            return self._ensure_session(user_text)
+        if not self._conversation_store or not self._settings.session_persistence_enabled:
+            return None
+        try:
+            import uuid as _uuid
+            child_session = f"sub_{_uuid.uuid4().hex[:12]}"
+            title = user_text[:80].replace("\n", " ").strip() or "subagent"
+            self._conversation_store.create_session(
+                child_session, title=title, model=self._settings.llm_model, source="subagent",
+            )
+            return child_session
+        except Exception:
+            logger.debug("child session creation failed; skipping child persistence", exc_info=True)
+            return None
 
     def _ensure_session(self, user_text: str) -> Optional[str]:
         """Create or reuse a conversation session. Returns session_id or None."""
@@ -3817,10 +4344,16 @@ class AgentEngine:
             import uuid as _uuid
             if self._current_session_id is None:
                 self._current_session_id = _uuid.uuid4().hex[:16]
+            # Create the session row if it does not exist yet. This covers a
+            # freshly-minted id and a client-provided id alike (e.g. a distinct
+            # per-TUI session bound by the daemon), so persistence works no matter
+            # who chose the id.
+            if self._conversation_store.get_session(self._current_session_id) is None:
                 title = user_text[:80].replace("\n", " ").strip()
                 self._conversation_store.create_session(
                     self._current_session_id, title=title,
                     model=self._settings.llm_model, source="cli",
+                    cwd=str(getattr(self._settings, "workspace_root", "") or ""),
                 )
             self._persist_message(self._current_session_id, "user", user_text)
             return self._current_session_id
@@ -3904,12 +4437,13 @@ class AgentEngine:
                         if self._current_task_contract else ""
                     ),
                     scope_keywords=self._task_scope_keywords(user_text),
+                    session_scope=self._current_session_id or "",
                 ),
                 timeout=self._settings.memory_prefetch_timeout_s,
             )
             if entries:
                 parts.append("## Recent Context\n" + "\n".join(
-                    f"- [{e.kind.value}] {e.content[:100]}" for e in entries
+                    f"- [{e.kind.value}] {e.content[:500]}" for e in entries
                 ))
         except asyncio.TimeoutError:
             logger.debug(
@@ -3925,8 +4459,16 @@ class AgentEngine:
         """Non-blocking wrapper for MemoryManager.sync_turn."""
         try:
             assert self._memory_manager is not None
+            workspace_root = (
+                self._current_task_contract.workspace_root
+                if self._current_task_contract else ""
+            )
             await asyncio.wait_for(
-                self._memory_manager.sync_turn(messages),
+                self._memory_manager.sync_turn(
+                    messages,
+                    workspace_root=workspace_root,
+                    session_id=self._current_session_id or "",
+                ),
                 timeout=self._settings.memory_prefetch_timeout_s,
             )
             logger.debug("memory.sync_turn completed")
@@ -4453,8 +4995,14 @@ class AgentEngine:
         # Memory tool interception: route memory_* calls to MemoryManager
         if (a_type == "memory" or name.startswith("memory_")) and self._memory_manager:
             tool_name = name if name.startswith("memory_") else f"memory_{name}"
+            workspace_root = (
+                self._current_task_contract.workspace_root
+                if self._current_task_contract else ""
+            )
             try:
-                result = await self._memory_manager.handle_tool_call(tool_name, payload)
+                result = await self._memory_manager.handle_tool_call(
+                    tool_name, payload, workspace_root=workspace_root
+                )
                 logger.info("audit.memory_tool name=%s", tool_name)
                 return {"ok": True, "result": result}
             except Exception as exc:

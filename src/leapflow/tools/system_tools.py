@@ -10,6 +10,8 @@ import platform
 import time
 from typing import Any, Dict
 
+from leapflow.tools.execution_context import current_tool_context
+
 
 async def time_get(params: Dict[str, Any]) -> Dict[str, Any]:
     """Get current date and time in multiple formats."""
@@ -26,12 +28,18 @@ async def time_get(params: Dict[str, Any]) -> Dict[str, Any]:
 
 async def env_info(params: Dict[str, Any]) -> Dict[str, Any]:
     """Get system environment information."""
-    return {
+    ctx = current_tool_context()
+    cwd = str(ctx.workspace_root) if ctx is not None else os.getcwd()
+    payload = {
         "ok": True,
         "os": platform.system(),
         "version": platform.version(),
         "machine": platform.machine(),
         "python": platform.python_version(),
-        "cwd": os.getcwd(),
+        "cwd": cwd,
         "user": os.environ.get("USER", "unknown"),
     }
+    if ctx is not None:
+        payload["workspace_root"] = str(ctx.workspace_root)
+        payload["session_id"] = ctx.session_id
+    return payload

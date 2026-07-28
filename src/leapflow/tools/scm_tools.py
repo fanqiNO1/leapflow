@@ -12,10 +12,14 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Sequence
 
 from leapflow.security.redact import redact_sensitive_text
+from leapflow.tools.execution_context import resolve_workspace_path, workspace_scope_error
 
 _MAX_OUTPUT_CHARS = 10_000
 _DEFAULT_TIMEOUT_S = 120.0
 _ALLOWED_ACTIONS = frozenset({"status", "pull", "push", "pull_then_push"})
+_QUERY_ACTIONS = frozenset({"diff", "log", "status", "branch", "show"})
+_WRITE_ACTIONS = frozenset({"commit", "branch", "checkout"})
+_LOG_FORMAT = "%h%x1f%an%x1f%ad%x1f%s"  # unit-separator delimited, safe for parsing
 
 
 @dataclass(frozen=True)
@@ -38,8 +42,7 @@ def _clip_output(value: str, limit: int = _MAX_OUTPUT_CHARS) -> str:
 
 
 def _workspace(cwd: Any) -> Path:
-    raw = str(cwd or ".").strip() or "."
-    return Path(raw).expanduser().resolve()
+    return resolve_workspace_path(cwd or ".", default=".")
 
 
 def _safe_ref(value: Any, *, field: str) -> str:
@@ -160,6 +163,9 @@ async def scm_sync(params: Dict[str, Any], runner: GitRunner | None = None) -> D
         return {"ok": False, "error": f"Unsupported SCM action: {action}", "failure_code": "unsupported_scm_action"}
 
     cwd = _workspace(params.get("cwd"))
+    scope_error = workspace_scope_error(cwd, operation="scm_sync cwd")
+    if scope_error:
+        return scope_error
     if not cwd.exists():
         return {"ok": False, "error": f"Working directory does not exist: {cwd}", "failure_code": "path_not_found", "cwd": str(cwd)}
     if not cwd.is_dir():
@@ -234,6 +240,170 @@ async def scm_sync(params: Dict[str, Any], runner: GitRunner | None = None) -> D
         "pull_ref": pull_ref,
         "push_ref": push_ref,
         "current_branch": current_branch,
+        "completed": True,
+        "completed_steps": completed_steps,
+        "stdout": "\n".join(step.get("stdout", "") for step in completed_steps if step.get("stdout")),
+        "stderr": "\n".join(step.get("stderr", "") for step in completed_steps if step.get("stderr")),
+    }
+
+
+def _parse_log_entries(stdout: str) -> list[Dict[str, Any]]:
+    """Parse unit-separator delimited git log lines into structured entries."""
+    entries: list[Dict[str, Any]] = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\x1f")
+        if len(parts) >= 4:
+            entries.append({"hash": parts[0], "author": parts[1], "date": parts[2], "subject": parts[3]})
+    return entries
+
+
+def _parse_branches(stdout: str) -> tuple[str, list[str]]:
+    """Parse ``git branch -a`` output into (current, all-branches)."""
+    current = ""
+    branches: list[str] = []
+    for line in stdout.splitlines():
+        name = line.strip()
+        if not name:
+            continue
+        if name.startswith("* "):
+            name = name[2:].strip()
+            current = name
+        branches.append(name)
+    return current, branches
+
+
+async def git_query(params: Dict[str, Any], runner: GitRunner | None = None) -> Dict[str, Any]:
+    """Read-only structured git inspection: diff, log, status, branch, show.
+
+    Prefer this over shell_run for reading repository state — output is clipped,
+    secret-redacted, and (for log/branch) parsed into structured fields. Never
+    mutates the repo; use scm_sync for pull/push.
+    """
+    action = str(params.get("action") or "status").strip().lower()
+    if action not in _QUERY_ACTIONS:
+        return {"ok": False, "error": f"Unsupported git query action: {action}", "failure_code": "unsupported_git_query"}
+
+    cwd = _workspace(params.get("cwd"))
+    if not cwd.exists() or not cwd.is_dir():
+        return {"ok": False, "error": f"Working directory not found: {cwd}", "failure_code": "path_not_found", "cwd": str(cwd)}
+
+    timeout_s = min(float(params.get("timeout") or _DEFAULT_TIMEOUT_S), _DEFAULT_TIMEOUT_S)
+    run = runner or _run_git
+    ref = _safe_ref(params.get("ref") or "", field="ref")
+    path = str(params.get("path") or "").strip()
+    if path.startswith("-"):
+        return {"ok": False, "error": f"Invalid path: {path}", "failure_code": "invalid_path"}
+
+    if action == "diff":
+        args: list[str] = ["diff", "--no-color"]
+        if params.get("staged"):
+            args.append("--staged")
+        if ref:
+            args.append(ref)
+    elif action == "log":
+        try:
+            max_count = max(1, min(int(params.get("max_count", 20)), 200))
+        except (TypeError, ValueError):
+            max_count = 20
+        args = ["log", f"-n{max_count}", f"--pretty=format:{_LOG_FORMAT}", "--date=short", "--no-color"]
+        if params.get("stat"):
+            args.append("--stat")
+        if ref:
+            args.append(ref)
+    elif action == "branch":
+        args = ["branch", "-a", "--no-color"]
+    elif action == "show":
+        args = ["show", "--stat", "--no-color", ref or "HEAD"]
+    else:  # status
+        args = ["status", "--short", "--branch"]
+    if path and action in {"diff", "log"}:
+        args += ["--", path]
+
+    result = await run(tuple(args), cwd, timeout_s)
+    if result.returncode != 0:
+        return _failure_payload(action=action, cwd=cwd, step=action, args=args, result=result, completed_steps=[])
+
+    payload: Dict[str, Any] = {
+        "ok": True,
+        "tool": "git_query",
+        "scm": "git",
+        "action": action,
+        "cwd": str(cwd),
+        "command": "git " + " ".join(args),
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+    if action == "log":
+        payload["entries"] = _parse_log_entries(result.stdout)
+        payload["entry_count"] = len(payload["entries"])
+    elif action == "branch":
+        current, branches = _parse_branches(result.stdout)
+        payload["current_branch"] = current
+        payload["branches"] = branches
+    return payload
+
+
+async def git_write(params: Dict[str, Any], runner: GitRunner | None = None) -> Dict[str, Any]:
+    """Mutating git actions: commit, branch (create+switch), checkout (switch).
+
+    Mutating and approval-gated by the loop. Refs are sanitized; the commit
+    message is passed as an argv element (never through a shell) and is not echoed
+    back in the command string. Use scm_sync for pull/push and git_query for reads.
+    """
+    action = str(params.get("action") or "").strip().lower()
+    if action not in _WRITE_ACTIONS:
+        return {"ok": False, "error": f"Unsupported git write action: {action}", "failure_code": "unsupported_git_write"}
+
+    cwd = _workspace(params.get("cwd"))
+    if not cwd.exists() or not cwd.is_dir():
+        return {"ok": False, "error": f"Working directory not found: {cwd}", "failure_code": "path_not_found", "cwd": str(cwd)}
+
+    timeout_s = min(float(params.get("timeout") or _DEFAULT_TIMEOUT_S), _DEFAULT_TIMEOUT_S)
+    run = runner or _run_git
+    completed_steps: list[Dict[str, Any]] = []
+
+    if action == "commit":
+        message = str(params.get("message") or "").strip()
+        if not message:
+            return {"ok": False, "error": "commit requires a non-empty message.", "failure_code": "missing_message", "cwd": str(cwd)}
+        if params.get("stage_all", True):
+            add_args = ("add", "-A")
+            add_result = await run(add_args, cwd, timeout_s)
+            if add_result.returncode != 0:
+                return _failure_payload(action=action, cwd=cwd, step="add", args=add_args, result=add_result, completed_steps=completed_steps)
+            completed_steps.append(_step_payload("add", add_args, add_result))
+        commit_args = ("commit", "-m", message)
+        commit_result = await run(commit_args, cwd, timeout_s)
+        if commit_result.returncode != 0:
+            return _failure_payload(action=action, cwd=cwd, step="commit", args=("commit", "-m", "<message>"), result=commit_result, completed_steps=completed_steps)
+        completed_steps.append(_step_payload("commit", ("commit", "-m", "<message>"), commit_result))
+    elif action == "branch":
+        name = _safe_ref(params.get("name") or params.get("ref") or "", field="name")
+        if not name:
+            return {"ok": False, "error": "branch requires a name.", "failure_code": "missing_branch_name", "cwd": str(cwd)}
+        args = ("checkout", "-b", name)
+        result = await run(args, cwd, timeout_s)
+        if result.returncode != 0:
+            return _failure_payload(action=action, cwd=cwd, step="branch", args=args, result=result, completed_steps=completed_steps)
+        completed_steps.append(_step_payload("branch", args, result))
+    else:  # checkout
+        ref = _safe_ref(params.get("ref") or params.get("name") or "", field="ref")
+        if not ref:
+            return {"ok": False, "error": "checkout requires a ref.", "failure_code": "missing_ref", "cwd": str(cwd)}
+        args = ("checkout", "-b", ref) if params.get("create") else ("checkout", ref)
+        result = await run(args, cwd, timeout_s)
+        if result.returncode != 0:
+            return _failure_payload(action=action, cwd=cwd, step="checkout", args=args, result=result, completed_steps=completed_steps)
+        completed_steps.append(_step_payload("checkout", args, result))
+
+    return {
+        "ok": True,
+        "tool": "git_write",
+        "scm": "git",
+        "action": action,
+        "cwd": str(cwd),
         "completed": True,
         "completed_steps": completed_steps,
         "stdout": "\n".join(step.get("stdout", "") for step in completed_steps if step.get("stdout")),

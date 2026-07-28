@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import threading
 from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
 
@@ -49,10 +50,13 @@ class ConnectionHolder(Protocol):
 class LocalConnectionHolder:
     """In-process holder that lazily opens a single DuckDB connection.
 
-    Thread-safety: DuckDB's embedded connection is single-writer.
-    Within one process, all stores share this holder and access is
-    serialized by DuckDB's internal lock. For multi-process, use the
-    leapd daemon (P4).
+    Thread-safety: ``DuckDBPyConnection`` is NOT thread-safe. The root
+    connection is owned by the thread that first opens it (typically the
+    event loop thread). Any other thread that asks for ``connection`` gets
+    a thread-local ``cursor()`` — a full duplicate connection sharing the
+    same database, which is DuckDB's documented multi-threading pattern.
+    Writes across root connection and cursors are safe (DuckDB applies
+    optimistic concurrency control internally).
     """
 
     def __init__(self, db_path: Path, *, volatile_on_lock: bool = False) -> None:
@@ -61,6 +65,9 @@ class LocalConnectionHolder:
         self._volatile_on_lock = volatile_on_lock
         self._volatile_dir: tempfile.TemporaryDirectory[str] | None = None
         self._locked_error: DatabaseLockedError | None = None
+        self._owner_thread_id: Optional[int] = None
+        self._thread_local = threading.local()
+        self._open_lock = threading.Lock()
 
     @property
     def db_path(self) -> Path:
@@ -76,10 +83,27 @@ class LocalConnectionHolder:
 
     @property
     def connection(self) -> duckdb.DuckDBPyConnection:
+        # Root connection is created and owned by the first thread that
+        # opens it (normally the event loop thread). Other threads receive
+        # a thread-local cursor, DuckDB's documented multi-threaded pattern.
         if self._conn is None:
-            self._conn = self._connect()
-            logger.info("duckdb: opened %s", self._db_path.name)
-        return self._conn
+            with self._open_lock:
+                if self._conn is None:
+                    self._conn = self._connect()
+                    self._owner_thread_id = threading.get_ident()
+                    logger.info("duckdb: opened %s", self._db_path.name)
+                    return self._conn
+        if threading.get_ident() == self._owner_thread_id:
+            return self._conn
+        cursor = getattr(self._thread_local, "cursor", None)
+        if cursor is None:
+            cursor = self._conn.cursor()
+            self._thread_local.cursor = cursor
+            logger.debug(
+                "duckdb: created thread-local cursor for %s (thread=%d)",
+                self._db_path.name, threading.get_ident(),
+            )
+        return cursor
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
         try:
@@ -97,6 +121,9 @@ class LocalConnectionHolder:
             return _lock_aware_connect(self._db_path)
 
     def close(self) -> None:
+        # Only the root connection is closed here: thread-local cursors
+        # become invalid together with it. Callers must shut down worker
+        # threads (e.g. the deferred-DB executor) before invoking close().
         if self._conn is not None:
             try:
                 self._conn.close()
@@ -104,6 +131,8 @@ class LocalConnectionHolder:
             except Exception:
                 pass
             self._conn = None
+            self._owner_thread_id = None
+            self._thread_local = threading.local()
         if self._volatile_dir is not None:
             self._volatile_dir.cleanup()
             self._volatile_dir = None

@@ -146,6 +146,13 @@ class NarrativeProvider:
         return self._memory_dir / "workspaces" / self._workspace_hash
 
     async def initialize(self, **kwargs: Any) -> None:
+        """Prepare provider. Directory creation is deferred to first write."""
+        # Phase 3: directories are now lazily created on first insert() call
+        # to avoid filesystem I/O during startup when narrative is unused.
+        pass
+
+    def _ensure_dirs(self) -> None:
+        """Create storage directories on demand (idempotent)."""
         self._global_dir.mkdir(parents=True, exist_ok=True)
         index = self._global_dir / "MEMORY.md"
         if not index.exists():
@@ -167,6 +174,7 @@ class NarrativeProvider:
 
     async def insert(self, entry: MemoryEntry) -> str:
         """Append entry as a bullet point to the appropriate MEMORY.md section."""
+        self._ensure_dirs()
         section_name = _KIND_SECTION.get(entry.kind, "Notes")
         scope = entry.metadata.get("scope", "global")
         target_dir = (

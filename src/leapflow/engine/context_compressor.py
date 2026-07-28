@@ -107,10 +107,20 @@ class CompressorConfig:
     trim_budget_activation_ratio: float = _TRIM_BUDGET_ACTIVATION_RATIO
     summarize_threshold_messages: int = 16
     summarize_keep_recent: int = 6
+    summarize_append_only: bool = True
     archive_threshold_messages: int = 24
     archive_keep_recent: int = 8
     drop_threshold_messages: int = 32
     drop_keep_recent: int = 4
+    # Token-utilization triggers (fraction of ``token_budget``). Compression is
+    # driven by actual context pressure, NOT by raw message count, so a
+    # large-context model holds many messages before anything is compressed, the
+    # gentle Summarize stage always precedes the last-resort Drop, and Drop never
+    # fires on message count alone. These scale naturally with the model window
+    # because ``token_budget`` is derived from ``context_length``.
+    summarize_token_ratio: float = 0.5
+    archive_token_ratio: float = 0.75
+    drop_token_ratio: float = 0.95
     enabled_stages: List[str] = field(default_factory=lambda: ["trim", "summarize", "archive", "drop"])
 
     # Dedup: collapse identical tool results above this size
@@ -132,9 +142,12 @@ class CompressorConfig:
             self.trim_threshold_chars = self.max_output_chars
         if self.threshold != 16 or self.summarize_threshold_messages == 16:
             self.summarize_threshold_messages = self.threshold
-        if self.keep_tail != 4 or self.summarize_keep_recent == 6:
-            self.summarize_keep_recent = max(self.keep_tail, 4)
-            self.drop_keep_recent = self.keep_tail
+        # Keep a generous recent window so immediate context is never lost: honor
+        # an explicit larger ``keep_tail``, else apply a safe floor (Summarize
+        # keeps more than Drop, and Drop — the last resort — still keeps several
+        # recent turns rather than nuking to a handful).
+        self.summarize_keep_recent = max(self.keep_tail, 8)
+        self.drop_keep_recent = max(self.keep_tail, 6)
 
         self._base_trim_threshold = self.trim_threshold_chars
         self._apply_adaptive_scaling()
@@ -382,11 +395,15 @@ class SummarizeStage:
         keep_recent: int = 6,
         summarize_fn: Optional[SummarizeFn] = None,
         summary_target_ratio: float = 0.2,
+        append_only: bool = True,
+        token_ratio: float = 0.5,
     ) -> None:
         self._threshold = threshold_messages
         self._keep_recent = keep_recent
         self._summarize_fn = summarize_fn
         self._summary_target_ratio = summary_target_ratio
+        self._append_only = append_only
+        self._token_ratio = token_ratio
         self._previous_summary: Optional[str] = None
         self._compression_count: int = 0
         self._last_savings_ratio: float = 1.0
@@ -396,15 +413,20 @@ class SummarizeStage:
         return "summarize"
 
     def should_apply(self, messages: List[Dict[str, Any]], token_count: int, budget: int) -> bool:
+        # Need enough messages to have a compressible middle at all.
         if len(messages) <= self._threshold:
             return False
-        if token_count <= budget * 0.5:
-            return False
+        # Anti-thrashing: skip if recent compressions barely helped.
         if self._compression_count >= 2 and self._last_savings_ratio < 0.10:
             logger.debug("SummarizeStage: skipped (anti-thrashing, last savings %.1f%%)",
                          self._last_savings_ratio * 100)
             return False
-        return True
+        # Token-utilization driven: summarize once the context is genuinely large
+        # relative to the budget (which scales with the model window). This is the
+        # *primary* compression and fires well before the last-resort Drop.
+        if budget <= 0:
+            return True
+        return token_count > budget * self._token_ratio
 
     def apply(self, messages: List[Dict[str, Any]], budget: int) -> List[Dict[str, Any]]:
         if len(messages) <= self._keep_recent + 2:
@@ -435,23 +457,37 @@ class SummarizeStage:
     def _partition(
         self, messages: List[Dict[str, Any]]
     ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Split messages into head (system), tail (recent), middle (compressible)."""
+        """Split messages into head (system), tail (recent), middle (compressible).
+
+        Append-only mode freezes already-produced summary segments into the head
+        so each history window is summarized exactly once (no summary-of-summary
+        drift; frozen segments stay byte-stable and cacheable). Only newly
+        accumulated turns become the compressible middle.
+        """
         head = [m for m in messages[:2] if m.get("role") == "system"] or messages[:1]
         head_count = len(head)
 
-        tail_start = max(head_count, len(messages) - self._keep_recent)
+        frozen_count = 0
+        if self._append_only:
+            idx = head_count
+            while idx < len(messages) and messages[idx].get("_compressed_summary"):
+                frozen_count += 1
+                idx += 1
+        stable_count = head_count + frozen_count
+
+        tail_start = max(stable_count, len(messages) - self._keep_recent)
         tail_start = self._align_boundary_backward(messages, tail_start)
 
-        if self._compression_count > 0:
+        if self._append_only or self._compression_count > 0:
             protect_first_n = 0
         else:
             protect_first_n = min(2, len(messages) - head_count)
 
-        middle_start = head_count + protect_first_n
+        middle_start = stable_count + protect_first_n
         middle_start = self._align_boundary_forward(messages, middle_start)
 
         if middle_start >= tail_start:
-            return head, messages[head_count:], []
+            return head + messages[head_count:stable_count], messages[stable_count:], []
 
         middle = messages[middle_start:tail_start]
         tail = messages[tail_start:]
@@ -463,7 +499,7 @@ class SummarizeStage:
         if self._summarize_fn is not None:
             try:
                 turns_text = self._format_turns_for_summary(middle)
-                if self._previous_summary:
+                if self._previous_summary and not self._append_only:
                     prompt = _ITERATIVE_PROMPT.format(
                         previous_summary=self._previous_summary,
                         new_turns=turns_text,
@@ -607,17 +643,23 @@ class ArchiveStage:
         threshold_messages: int = 24,
         keep_recent: int = 8,
         archive_fn: Optional[ArchiveFn] = None,
+        token_ratio: float = 0.75,
     ) -> None:
         self._threshold = threshold_messages
         self._keep_recent = keep_recent
         self._archive_fn = archive_fn
+        self._token_ratio = token_ratio
 
     @property
     def name(self) -> str:
         return "archive"
 
     def should_apply(self, messages: List[Dict[str, Any]], token_count: int, budget: int) -> bool:
-        return len(messages) > self._threshold and token_count > budget * 0.8
+        if len(messages) <= self._threshold:
+            return False
+        if budget <= 0:
+            return False
+        return token_count > budget * self._token_ratio
 
     def apply(self, messages: List[Dict[str, Any]], budget: int) -> List[Dict[str, Any]]:
         if len(messages) <= self._keep_recent + 2:
@@ -656,37 +698,65 @@ class ArchiveStage:
 
 
 class DropStage:
-    """Stage 4: Force-drop oldest turns (last resort).
+    """Stage 4: last-resort drop of the oldest *middle* turns (token-overflow only).
 
-    Only keeps system prompt + most recent N turns.
-    Information IS lost — this is the nuclear option.
+    Fires ONLY when the token count approaches the hard budget — never on message
+    count alone, so a large-context model can hold many messages. Preserves the
+    system prefix, any frozen (append-only) summary segments, and the recent
+    tail, dropping only the uncompressed middle. Structured history therefore
+    survives even this nuclear option.
     """
 
-    def __init__(self, *, threshold_messages: int = 32, keep_recent: int = 4) -> None:
+    def __init__(
+        self,
+        *,
+        threshold_messages: int = 32,
+        keep_recent: int = 4,
+        token_ratio: float = 0.95,
+    ) -> None:
         self._threshold = threshold_messages
         self._keep_recent = keep_recent
+        self._token_ratio = token_ratio
 
     @property
     def name(self) -> str:
         return "drop"
 
     def should_apply(self, messages: List[Dict[str, Any]], token_count: int, budget: int) -> bool:
-        return len(messages) > self._threshold or token_count > budget
+        # Token-driven last resort ONLY. Never drop on message count while the
+        # context window still has room — message-count dropping was the cause of
+        # catastrophic context loss on large-context models.
+        if budget <= 0:
+            return len(messages) > self._threshold
+        return token_count > budget * self._token_ratio
 
     def apply(self, messages: List[Dict[str, Any]], budget: int) -> List[Dict[str, Any]]:
         if len(messages) <= self._keep_recent + 1:
             return messages
 
-        head = messages[:1] if messages and messages[0].get("role") == "system" else []
-        tail = messages[-self._keep_recent:]
-        dropped = len(messages) - len(head) - len(tail)
+        head_end = 1 if messages and messages[0].get("role") == "system" else 0
+        # Preserve contiguous frozen (append-only) summary segments after the head.
+        frozen_end = head_end
+        while frozen_end < len(messages) and messages[frozen_end].get("_compressed_summary"):
+            frozen_end += 1
+        tail_start = max(frozen_end, len(messages) - self._keep_recent)
+        dropped = tail_start - frozen_end
+        if dropped <= 0:
+            return messages  # nothing between the preserved head and the recent tail
 
+        head = messages[:frozen_end]  # system + frozen summaries
+        tail = messages[tail_start:]
         drop_notice = {
             "role": "system",
-            "content": f"[Context overflow: {dropped} messages dropped. Only recent context available.]",
+            "content": (
+                f"[Context overflow: {dropped} older messages dropped; "
+                f"structured summary + {len(tail)} recent messages retained.]"
+            ),
         }
-
-        logger.warning("DropStage: force-dropped %d messages (context overflow)", dropped)
+        logger.warning(
+            "DropStage: dropped %d middle messages (token overflow); kept summary + %d recent",
+            dropped, len(tail),
+        )
         return head + [drop_notice] + tail
 
 
@@ -791,15 +861,19 @@ class ContextCompressor:
                 threshold_messages=config.summarize_threshold_messages,
                 keep_recent=config.summarize_keep_recent,
                 summarize_fn=config.summarize_fn,
+                append_only=config.summarize_append_only,
+                token_ratio=config.summarize_token_ratio,
             ),
             "archive": ArchiveStage(
                 threshold_messages=config.archive_threshold_messages,
                 keep_recent=config.archive_keep_recent,
                 archive_fn=config.archive_fn,
+                token_ratio=config.archive_token_ratio,
             ),
             "drop": DropStage(
                 threshold_messages=config.drop_threshold_messages,
                 keep_recent=config.drop_keep_recent,
+                token_ratio=config.drop_token_ratio,
             ),
         }
         return [stage_map[name] for name in config.enabled_stages if name in stage_map]

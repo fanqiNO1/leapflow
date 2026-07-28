@@ -125,7 +125,7 @@ class _StdinEchoGuard:
 
 async def _async_daemon_main(args: argparse.Namespace) -> int:
     """Run chat/interactive through a shared leapd daemon."""
-    from leapflow.daemon.client import DaemonUnavailableError, ensure_daemon_client
+    from leapflow.daemon.client import DaemonUnavailableError, recover_daemon_client
 
     settings = load_config()
     mock_host = getattr(args, "mock_host", False)
@@ -136,7 +136,7 @@ async def _async_daemon_main(args: argparse.Namespace) -> int:
 
     try:
         with _StdinEchoGuard():
-            client = await ensure_daemon_client(
+            client = await recover_daemon_client(
                 settings,
                 mock_host=mock_host,
                 status_callback=_status,

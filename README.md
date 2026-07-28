@@ -76,6 +76,57 @@ The **Execution Layer** provides native OS interactions — screen capture, acce
 
 ---
 
+## Adaptive-Depth Execution (Toward Infinite OODA)
+
+LeapFlow's agent loop adapts its **depth** to each task's difficulty and can — under strict governance — extend beyond a single turn. Rather than a fixed iteration cap, the loop treats depth and autonomy as *signal-driven, bounded gradients*: a hard task earns a wider budget and a research posture while a simple one stays short; long tasks keep a persistent research ledger; recursive subagents run the *same* adaptive loop on isolated frames; and outcome data can self-calibrate the difficulty thresholds. "Infinite" capability comes from **composing bounded OODA frames**, never from removing a frame's bounds — so every step stays accountable, inspectable, and safe.
+
+Defaults benefit every session automatically (adaptive depth); the rest is **opt-in and off by default**:
+
+| Capability | Config key (`leap config set …`) |
+|---|---|
+| Full adaptive loop for delegated subagents | `agent.subagent_full_loop` |
+| Event-driven re-entry (resume on time/event) | `agent.reentry_enabled` |
+| Online difficulty/threshold self-calibration | `agent.calibration_enabled` (+ `agent.calibration_interval_turns`) |
+| Governed proactive outbound (trust + approval) | `agent.reentry_send_enabled` |
+| Cache-stable compression write-back | `agent.compression_writeback` |
+
+Inspect the agent's layered orientation and pending re-entries anytime with the read-only **`/orient`** command. Design methodology: [`docs/design/adaptive_depth_ooda.md`](docs/design/adaptive_depth_ooda.md).
+
+---
+
+## Built-in Coding Tools
+
+LeapFlow ships a first-class coding toolset so the agent can *locate → read → edit → verify* code precisely instead of rewriting whole files or shelling out blindly. Every tool is registered with governance metadata (`x_leapflow`) so it flows through the existing idempotency, approval, redaction, path-sensitivity, and audit paths.
+
+| Tool | Purpose | Governance |
+|---|---|---|
+| `repo_map` | Compact project orientation: languages, detected test/lint commands, top-level structure, entry points, VCS branch | read-only |
+| `code_search` | Regex search across a tree (ripgrep-backed, structured `path:line:col`, optional `context_lines`); skips VCS/dep/build dirs | read-only |
+| `file_find` | Locate files by recursive glob (e.g. `**/test_*.py`) | read-only |
+| `edit_file` | Targeted **anchored** search-replace (unique-anchor or `replace_all`, `dry_run`) or apply a unified **`diff`** — a missing/ambiguous anchor is rejected, never a partial write | mutating · approval + path gate |
+| `code_intel` | Document symbols (outline): Python via exact **AST**, other languages via heuristic | read-only |
+| `git_query` | Structured read-only git: `diff` / `log` / `status` / `branch` / `show` | read-only |
+| `git_write` | Mutating git: `commit` / `branch` / `checkout` | mutating · approval |
+| `test_run` | Run the test suite (auto-detect pytest/npm/go/cargo); structured pass/fail | verify (via governed shell) |
+| `lint_check` | Run the linter (auto-detect ruff/eslint/go vet/clippy); structured issues | verify (via governed shell) |
+| `terminal_session` | Persistent shell sessions (`open`/`send`/`read`/`close`/`list`) for REPLs/dev servers | **off by default** · opt-in · approval |
+
+**Notes**
+
+- **Seamless search:** `code_search` always works with zero install via a pure-Python fallback; when [ripgrep](https://github.com/BurntSushi/ripgrep) is present it is used for speed, and a best-effort background install (macOS/Homebrew, no sudo) is attempted otherwise. A manual-install hint is surfaced if it stays unavailable.
+- **`test_run`/`lint_check` semantics:** `ok=true` means the *runner executed* — a failing suite is informative feedback (`success`/`clean`), not a tool error.
+- **Persistent terminals** are long-lived resources kept separate from one-shot execution (Transport-Lifecycle Separation); enabling is the operator opt-in and sessions are bounded with process-group cleanup.
+
+Config keys (all via `leap config set …` / TUI `/config`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `tools.ripgrep_autoinstall` | `true` | Best-effort seamless ripgrep provisioning (fallback + manual hint regardless) |
+| `tools.test_command` / `tools.lint_command` | *(auto-detect)* | Override the test/lint command |
+| `tools.terminal_session_enabled` | `false` | Enable persistent terminal sessions (high-risk, opt-in) |
+
+---
+
 ## Prerequisites
 
 | Component | Version | Purpose |
@@ -210,6 +261,27 @@ Inside the TUI, the same control plane is available as `/config`. It supports ho
 | `scheduler.tick_seconds` | `1.0` | Scheduler polling interval |
 
 `leap config list` is the authoritative source for all writable keys and generated metadata for less common runtime, perception, learning, gateway, hub, safety, and scheduler settings; use `leap config show <key>` or `/config show <key>` when you need one field's details. LeapFlow does not load `.env` files; durable settings belong in the config control plane and secrets belong in the vault.
+
+---
+
+## Multi-Profile
+
+LeapFlow supports multiple **profiles** — isolated runtime environments that can run in parallel. Each profile owns its own daemon process, databases, configuration, and credential vault.
+
+Select a profile via the `LEAPFLOW_PROFILE` environment variable (defaults to `default`):
+
+```bash
+# Run with the default profile
+leap
+
+# Run a separate instance under a different profile
+LEAPFLOW_PROFILE=work leap
+
+# Check daemon status for a specific profile
+LEAPFLOW_PROFILE=work leap daemon status
+```
+
+Profiles are stored under `~/.leapflow/profiles/<name>/`. Multiple profiles can run simultaneously without interference — useful for separating personal and work contexts, or running parallel experiments.
 
 ---
 

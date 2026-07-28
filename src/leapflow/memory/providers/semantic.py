@@ -128,18 +128,24 @@ class SemanticMemoryProvider:
         # Semantic tier accepts everything — it's the final store
         return True
 
-    async def insert(self, entry: MemoryEntry) -> str:
-        """Persist an entry to DuckDB. Returns entry_id."""
+    async def insert(self, entry: MemoryEntry, *, session_id: str = "") -> str:
+        """Persist an entry to DuckDB. Returns entry_id.
+
+        When *session_id* is provided, the entry is stored with that session
+        tag so session-scoped queries can isolate it.
+        """
         from leapflow.storage.write_buffer import execute_with_retry
         con = self._connection()
         now = time.time()
+        if session_id:
+            entry.metadata = {**(entry.metadata or {}), "_session_id": session_id}
         meta_json = json.dumps(entry.metadata, ensure_ascii=False)
         path = entry.metadata.get("path")
         execute_with_retry(
             con,
             """
-            INSERT INTO leap_memory (id, kind, domain, content, path, metadata, created_at, accessed_at, access_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO leap_memory (id, kind, domain, content, path, metadata, created_at, accessed_at, access_count, session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 entry.entry_id,
@@ -151,6 +157,7 @@ class SemanticMemoryProvider:
                 entry.timestamp,
                 now,
                 1,
+                session_id,
             ],
         )
         return entry.entry_id
@@ -163,6 +170,11 @@ class SemanticMemoryProvider:
         # Build WHERE clauses dynamically
         conditions: List[str] = []
         params: List[Any] = []
+
+        # Session scope gate: restrict to entries from the given session
+        if query.session_scope:
+            conditions.append("session_id = ?")
+            params.append(query.session_scope)
 
         # Keyword filter (AND semantics)
         keywords = [k.strip() for k in query.keywords if k.strip()] if query.keywords else []
@@ -606,6 +618,7 @@ class SemanticMemoryProvider:
                         "keywords": {"type": "string", "description": "Search keywords"},
                         "domain": {"type": "string", "enum": [d.value for d in SignalDomain]},
                         "limit": {"type": "integer", "default": 10},
+                        "session_id": {"type": "string", "description": "Optional session ID to scope search"},
                     },
                     "required": ["keywords"],
                 },
@@ -620,8 +633,14 @@ class SemanticMemoryProvider:
             keywords = args.get("keywords", "").split()
             domain_str = args.get("domain")
             limit = int(args.get("limit", 10))
+            session_id = args.get("session_id") or ""
             domains = [SignalDomain(domain_str)] if domain_str else None
-            mq = MemoryQuery(keywords=keywords, domains=domains, limit=limit)
+            mq = MemoryQuery(
+                keywords=keywords,
+                domains=domains,
+                limit=limit,
+                session_scope=session_id if session_id else None,
+            )
             try:
                 loop = asyncio.get_running_loop()
                 import concurrent.futures
@@ -656,7 +675,7 @@ class SemanticMemoryProvider:
         return self._con
 
     def _init_schema(self) -> None:
-        """Create or migrate the schema with domain + path columns."""
+        """Create or migrate the schema with domain + path + session_id columns."""
         con = self._connection()
         con.execute(
             """
@@ -669,17 +688,27 @@ class SemanticMemoryProvider:
                 metadata TEXT,
                 created_at DOUBLE NOT NULL,
                 accessed_at DOUBLE NOT NULL,
-                access_count INTEGER NOT NULL DEFAULT 1
+                access_count INTEGER NOT NULL DEFAULT 1,
+                session_id TEXT NOT NULL DEFAULT ''
             );
             """
         )
         con.execute("CREATE INDEX IF NOT EXISTS idx_lm_created ON leap_memory(created_at);")
         con.execute("CREATE INDEX IF NOT EXISTS idx_lm_kind ON leap_memory(kind);")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_lm_domain ON leap_memory(domain);")
 
         # Migrations: add columns if table existed without them
-        for col in ["domain", "path"]:
+        for col, default in [("domain", "'system'"), ("path", None), ("session_id", "''")]:
             try:
-                con.execute(f"ALTER TABLE leap_memory ADD COLUMN {col} TEXT DEFAULT 'system'" if col == "domain" else f"ALTER TABLE leap_memory ADD COLUMN {col} TEXT")
+                ddl = f"ALTER TABLE leap_memory ADD COLUMN {col} TEXT"
+                if default is not None:
+                    ddl += f" DEFAULT {default}"
+                con.execute(ddl)
             except duckdb.CatalogException:
                 pass  # Column already exists
+
+        # Indexes on migrated columns MUST be created after the ALTER TABLE
+        # loop above: on legacy databases the columns do not exist yet, and
+        # creating the index first fails with a Binder Error, aborting the
+        # whole provider initialization.
+        con.execute("CREATE INDEX IF NOT EXISTS idx_lm_domain ON leap_memory(domain);")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_lm_session ON leap_memory(session_id);")

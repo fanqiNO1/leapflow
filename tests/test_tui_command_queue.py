@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from contextlib import suppress
+from os import terminal_size
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,12 +15,105 @@ from prompt_toolkit.auto_suggest import Suggestion
 from prompt_toolkit.completion import Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import to_plain_text
-from leapflow.cli.tui_app.app import LeapApp, _DynamicPlaceholderProcessor
+from leapflow.cli.tui_app.app import (
+    LeapApp,
+    _DynamicPlaceholderProcessor,
+    _compute_input_cap,
+    _estimate_input_rows,
+)
 from leapflow.cli.tui_app.console import LeapConsole
 from leapflow.cli.tui_app.command import TuiCommand, TuiCommandStatus
 from leapflow.cli.tui_app.input import SlashCommandCompleter
 from leapflow.cli.tui_app.stream import StreamRenderer, _sanitize_final_response
 from leapflow.cli.tui_app.theme import _LIGHT, resolve_theme
+
+
+def test_compute_input_cap_scales_with_terminal_and_floors_at_four() -> None:
+    # Grows to ~45% of the terminal, reserves room for chrome, never below 4.
+    assert _compute_input_cap(24) == 10
+    assert _compute_input_cap(60) == 27
+    assert _compute_input_cap(10) == 4
+    assert _compute_input_cap(8) == 4
+
+
+def test_estimate_input_rows_uses_display_cells_and_prompt_prefix() -> None:
+    assert _estimate_input_rows("", 80, prompt_width=2) == 1
+    assert _estimate_input_rows("abcd", 6, prompt_width=2) == 1
+    assert _estimate_input_rows("abcde", 6, prompt_width=2) == 2
+    # CJK wide characters take two display cells; first row also loses prompt width.
+    assert _estimate_input_rows("测" * 5, 10, prompt_width=2) == 2
+    assert _estimate_input_rows("hello\n" + "测" * 5, 10, prompt_width=2) == 2
+
+
+def test_input_height_preferred_tracks_wrapped_content(monkeypatch) -> None:
+    app, _console, _status = _make_app()
+    monkeypatch.setattr(
+        app_module.shutil,
+        "get_terminal_size",
+        lambda _fallback=(80, 24): terminal_size((20, 24)),
+    )
+    app._input_area.buffer.text = "测" * 20
+
+    height = app._input_area.window.height
+    resolved = height() if callable(height) else height
+
+    assert resolved.min == 1
+    assert resolved.max == _compute_input_cap(24)
+    assert resolved.preferred > 1
+
+
+def test_input_overflow_hint_reports_hidden_rows(monkeypatch) -> None:
+    app, _console, _status = _make_app()
+    monkeypatch.setattr(
+        app_module.shutil,
+        "get_terminal_size",
+        lambda _fallback=(80, 24): terminal_size((10, 10)),
+    )
+    app._input_area.buffer.text = "测" * 30
+
+    hint = to_plain_text(app._input_overflow_hint())
+
+    assert "more input" in hint
+    assert "hidden" in hint
+    assert "Ctrl+X Ctrl+E" in hint
+
+
+def test_input_height_pinned_small_while_agent_running(monkeypatch) -> None:
+    """While a task streams, the input area holds a stable small region so the
+    reserved bottom area does not thrash the scroll region under patch_stdout
+    (the terminal-crash cause). Adaptive sizing is idle-only.
+    """
+    app, _console, _status = _make_app()
+    monkeypatch.setattr(
+        app_module.shutil,
+        "get_terminal_size",
+        lambda _fallback=(80, 24): terminal_size((20, 24)),
+    )
+    app._input_area.buffer.text = "测" * 40   # long input that would grow the area when idle
+    app.agent_running = True                    # streaming -> pin to a stable footprint
+
+    height = app._input_area.window.height
+    resolved = height() if callable(height) else height
+
+    assert resolved.max == 4            # pre-regression stable cap, not the adaptive 45%
+    assert resolved.preferred == 1      # no scroll-region reshaping mid-stream
+
+
+def test_input_overflow_hint_omits_editor_while_running(monkeypatch) -> None:
+    app, _console, _status = _make_app()
+    monkeypatch.setattr(
+        app_module.shutil,
+        "get_terminal_size",
+        lambda _fallback=(80, 24): terminal_size((10, 10)),
+    )
+    app._input_area.buffer.text = "测" * 30
+    app.agent_running = True
+
+    hint = to_plain_text(app._input_overflow_hint())
+
+    assert "more input" in hint and "hidden" in hint
+    assert "Ctrl+X Ctrl+E" not in hint   # editor disabled while streaming -> not advertised
+    assert "idle" in hint
 
 
 class _FakeConsole:

@@ -118,6 +118,7 @@ class EpisodicMemoryProvider:
         self._entries: Dict[str, MemoryEntry] = {}
         self._access_counts: Dict[str, int] = {}
         self._gc_task: Optional[asyncio.Task[None]] = None
+        self._gc_started: bool = False
         self._counter: int = 0
 
     # ── Protocol properties ───────────────────────────────────────────
@@ -129,8 +130,10 @@ class EpisodicMemoryProvider:
     # ── Protocol methods ──────────────────────────────────────────────
 
     async def initialize(self, **kwargs: Any) -> None:
-        """Start background GC loop."""
-        self._start_gc()
+        """Prepare provider. GC loop is deferred to first insert (lazy warmup)."""
+        # GC is now lazily started on first insert/ingest to avoid background
+        # tasks when the provider sees no traffic.
+        pass
 
     async def shutdown(self) -> None:
         """Stop GC and clear state."""
@@ -141,14 +144,21 @@ class EpisodicMemoryProvider:
     def accepts(self, entry: MemoryEntry) -> bool:
         return entry.kind in self._ACCEPTED_KINDS
 
-    async def insert(self, entry: MemoryEntry) -> str:
-        """Ingest a new episodic entry."""
+    async def insert(self, entry: MemoryEntry, *, session_id: str = "") -> str:
+        """Ingest a new episodic entry.
+
+        When *session_id* is provided, the entry is tagged so that
+        session-scoped searches can isolate it later.
+        """
+        self._ensure_gc_started()
+        if session_id:
+            entry.metadata = {**(entry.metadata or {}), "_session_id": session_id}
         self._entries[entry.entry_id] = entry
         self._access_counts.setdefault(entry.entry_id, 1)
         self._evict_overflow()
         logger.debug(
-            "episodic.insert id=%s kind=%s domain=%s",
-            entry.entry_id, entry.kind.value, entry.domain.value,
+            "episodic.insert id=%s kind=%s domain=%s session=%s",
+            entry.entry_id, entry.kind.value, entry.domain.value, session_id or "-",
         )
         return entry.entry_id
 
@@ -156,12 +166,19 @@ class EpisodicMemoryProvider:
         """Search with keyword + domain + time_range filters, scored by decay."""
         now = time.time()
         keywords_lower = [k.lower() for k in query.keywords] if query.keywords else []
+        session_scope = query.session_scope
         results: List[MemoryEntry] = []
 
         for entry in self._entries.values():
             # TTL check
             if now - entry.timestamp > self._ttl:
                 continue
+
+            # Session scope gate: when active, only return entries from this session
+            if session_scope:
+                entry_session = (entry.metadata or {}).get("_session_id", "")
+                if entry_session != session_scope:
+                    continue
 
             # Kind filter
             if query.kinds and entry.kind not in query.kinds:
@@ -287,6 +304,7 @@ class EpisodicMemoryProvider:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> MemoryFragment:
         """Insert a new fragment from an incoming system event (legacy API)."""
+        self._ensure_gc_started()
         self._counter += 1
         entry_id = f"imm_{self._counter}_{int(time.time() * 1000)}"
         now = time.time()
@@ -344,7 +362,7 @@ class EpisodicMemoryProvider:
 
     def start_gc(self) -> None:
         """Start GC loop (legacy compatibility)."""
-        self._start_gc()
+        self._ensure_gc_started()
 
     def stop_gc(self) -> None:
         """Stop GC loop (legacy compatibility)."""
@@ -367,6 +385,24 @@ class EpisodicMemoryProvider:
             oldest_id = min(self._entries, key=lambda eid: self._entries[eid].timestamp)
             del self._entries[oldest_id]
             self._access_counts.pop(oldest_id, None)
+
+    def _ensure_gc_started(self) -> None:
+        """Lazily start the GC loop on first write operation.
+
+        Safe to call from sync contexts: if no event loop is running, the GC
+        task creation is silently skipped (GC sweep still runs on turn
+        boundaries via on_turn_start).
+        """
+        if self._gc_started and self._gc_task is not None and not self._gc_task.done():
+            return
+        self._gc_started = True
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No running event loop (sync caller). GC still runs on turn
+            # boundaries via on_turn_start -> _gc_sweep.
+            return
+        self._start_gc()
 
     def _start_gc(self) -> None:
         if self._gc_task is None or self._gc_task.done():

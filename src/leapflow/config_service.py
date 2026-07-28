@@ -126,6 +126,46 @@ _FIELD_DESCRIPTIONS = {
     "dashboard.token_ref": "Secret ref for the local dashboard access token.",
     "stream.output": "Stream assistant tokens and progress in interactive sessions.",
     "verbose.progress": "Show inline execution progress for tools and runtime steps.",
+    "agent.iter_floor": "Baseline iteration cap per task; the adaptive loop starts here and widens with difficulty.",
+    "agent.iter_ceiling": "Maximum iterations a hard task can earn via adaptive-depth (difficulty-scaled) budget widening, before any progress-gated extension.",
+    "agent.budget_scale_k": "Slope mapping task difficulty [0,1] to iterations between the floor and ceiling.",
+    "agent.iter_hard_cap": "Absolute iteration backstop. A productively-unfinished task (open ledger questions + ongoing progress, within resource limits) extends past the elastic ceiling toward this cap, so long tasks are bounded by progress/resources rather than a fixed count.",
+    "agent.iter_extension_step": "Iterations granted per progress-gated extension when the elastic ceiling is reached and the task is still productively unfinished.",
+    "agent.stall_rounds": "Consecutive no-progress rounds (no new ledger findings/questions or evidence) after which budget extension stops and the loop is allowed to converge.",
+    "recovery.turn_deadline_s": "Wall-clock deadline (seconds) for recovery attempts within one agent turn; 0 = unlimited so a long-running task is never denied recovery for a late transient error (the action-count budget remains the bound).",
+    "recovery.total_actions": "Maximum total recovery actions (retries/transforms/failovers) within one agent turn before recovery halts.",
+    "recovery.max_retry_per_category": "Maximum recovery retries per error category within one agent turn.",
+    "guardrail.enabled": "Enable tool-loop guardrails (repetition / stagnation / single-tool domination). Progress-aware: halts and finalize nudges are suppressed while the task is still making progress, so long productive tasks are not cut short.",
+    "guardrail.max_repeats": "Consecutive identical tool calls (same name + arguments) that trigger a loop halt — only when the task is also stalled.",
+    "guardrail.max_consecutive_same": "Consecutive uses of the same tool that trigger a diversify nudge (suppressed while progressing, so batch/sequential work is not penalized).",
+    "guardrail.stagnation_window": "Window of recent genuine tool results over which the low-success-rate stagnation warning is computed.",
+    "guardrail.min_success_rate": "Minimum tool success rate within the stagnation window before a stagnation warning is emitted.",
+    "tools.ripgrep_autoinstall": "Best-effort seamless ripgrep auto-install for code_search when missing (macOS/Homebrew, no sudo, background, non-fatal). code_search always works via the pure-Python fallback regardless; disabling this just skips the accelerator install and shows a manual hint.",
+    "tools.test_command": "Explicit command for the test_run tool (empty => auto-detect pytest/npm/go/cargo from project markers).",
+    "tools.lint_command": "Explicit command for the lint_check tool (empty => auto-detect ruff/eslint/go vet/clippy from project markers).",
+    "tools.terminal_session_enabled": "Enable persistent terminal sessions (terminal_open/send/read/close/list). Off by default: a persistent shell runs arbitrary interactive input; enabling is the operator opt-in. Sessions are bounded (max count, idle TTL) with process-group cleanup.",
+    "tools.verify_edits": "After edit_file/file_write, run an advisory syntax check on the written file (Python via AST) and attach syntax_ok/syntax_error to the result. Advisory only — it never blocks the write; the model sees a broken edit immediately and can fix it.",
+    "agent.validate_tool_args": "Validate a tool call's required arguments before execution; a missing required parameter returns a structured invalid_arguments result (with the accepted schema) for in-turn self-repair instead of an opaque handler error. Does not count as a failure and never trips the batch-stop gate.",
+    "daemon.max_concurrent_turns": "Maximum agent turns the daemon runs concurrently across sessions (Stage 3). 3 (default) lets several fresh TUI sessions run in parallel on isolated per-session engines; set to 1 for strict serialized fallback. Changes require `leap daemon restart`.",
+    "daemon.max_live_sessions": "Maximum per-session execution contexts the daemon keeps live (bounds memory); the least-recently-active non-primary session is evicted beyond this.",
+    "daemon.session_idle_ttl_s": "Idle seconds after which a non-primary session execution context is evicted (0 disables idle eviction).",
+    "agent.cost_ceiling_context_multiple": "Optional cumulative effective-cost ceiling as a multiple of context length (0 disables; a soft finalize nudge, the iteration cap stays the hard bound).",
+    "agent.subagent_max_depth": "Maximum delegation depth for subagents (governs recursive task decomposition).",
+    "agent.max_parallel_tools": "Maximum tool calls executed in parallel within a single LLM response's batch (metadata-classified read-only / non-overlapping idempotent tools). Bounds the asyncio.gather fan-out so a large batch does not overwhelm IO; 1 forces sequential execution.",
+    "agent.subagent_max_concurrent": "Maximum concurrent child subagents per delegation batch.",
+    "agent.subagent_max_iterations": "Iteration budget for each delegated subagent's tool loop.",
+    "agent.subagent_full_loop": "Run delegated subagents through the engine's full adaptive OODA loop on an isolated child frame (progressive disclosure, compression, recovery, research ledger) instead of the lightweight loop; state-isolated and depth-gated (default off).",
+    "agent.calibration_enabled": "Enable S3-L3 online difficulty calibration: apply the offline S3-L2 report's bounded suggested weight scale to the difficulty->budget sensitivity (scale_k), derived from the baseline and clamped/reversible (default off).",
+    "agent.calibration_min_confidence": "Minimum calibration-report confidence required before an online difficulty-weight adjustment is applied (guards against acting on thin data).",
+    "agent.calibration_interval_turns": "Re-run online difficulty/threshold calibration every N root turns as outcome data accumulates (0 = one-shot at startup only; requires calibration enabled).",
+    "agent.compression_writeback": "Persist structural context compression back into the loop's message history so append-only frozen segments stay byte-stable across rounds (continuous prefix-cache reuse). Opt-in; the recent raw tail is preserved (default off).",
+    "agent.reentry_enabled": "Enable event-driven re-entry: allow tasks to register a resume trigger (schedule_reentry) that seeds a future run from the saved orientation (default off).",
+    "agent.reentry_tick_seconds": "How often (seconds) the daemon dispatches due re-entry triggers as isolated subagents (only when reentry is enabled).",
+    "agent.reentry_global_budget": "Lifetime cap on total autonomous re-entries per daemon (backstops runaway loops across all triggers; 0 = unlimited).",
+    "agent.reentry_send_enabled": "Enable governed autonomous outbound delivery from re-entry: allow a completed re-entry to reply to its originating chat, gated by send-scope Progressive Trust + ApprovalGate (default off; deny-by-default without trust or an approver).",
+    "agent.reentry_send_rate_per_hour": "Max autonomous outbound sends per originating chat per hour (0 = unlimited); backstops send storms.",
+    "agent.reentry_send_global_budget": "Lifetime cap on total autonomous outbound sends per daemon (0 = unlimited).",
+    "agent.reentry_send_verified_at": "Number of human approvals in a send scope before it reaches VERIFIED trust and may be auto-approved (non-destructive replies only).",
 }
 
 _SECTION_CATEGORIES = {
@@ -157,6 +197,7 @@ _SECTION_CATEGORIES = {
     "react": "Execution Loop",
     "tool": "Execution Loop",
     "context": "Execution Loop",
+    "agent": "Execution Loop",
     "stream": "Interactive UX",
     "verbose": "Interactive UX",
     "signal": "Signal Fusion",
@@ -174,6 +215,7 @@ _VALUE_HINTS = {
 }
 
 _PARTIAL_RELOAD_SECTIONS = frozenset({"runtime", "mock", "gateway", "hub", "scheduler", "observer", "cua", "use", "dashboard"})
+_RESTART_REQUIRED_SECTIONS = frozenset({"daemon"})
 
 _PROFILE_FILE_BY_SECTION = {
     "llm": "llm.yaml",
@@ -360,7 +402,13 @@ class ConfigService:
         section[spec.name] = coerced
         data[spec.section] = section
         _write_yaml_atomic(path, data)
-        return ConfigMutationResult(True, f"Updated {normalized}", (normalized,), path)
+        return ConfigMutationResult(
+            True,
+            f"Updated {normalized}",
+            (normalized,),
+            path,
+            _restart_warnings(spec),
+        )
 
     def unset(self, key: str, *, scope: ConfigScope = "profile") -> ConfigMutationResult:
         normalized = _normalize_key(key)
@@ -375,7 +423,13 @@ class ConfigService:
         section.pop(spec.name, None)
         data[spec.section] = section
         _write_yaml_atomic(path, data)
-        return ConfigMutationResult(True, f"Unset {normalized}", (normalized,), path)
+        return ConfigMutationResult(
+            True,
+            f"Unset {normalized}",
+            (normalized,),
+            path,
+            _restart_warnings(spec),
+        )
 
     def configure_llm(
         self,
@@ -484,13 +538,28 @@ class ConfigService:
 
 
 def _with_metadata(spec: ConfigFieldSpec) -> ConfigFieldSpec:
+    if spec.section in _RESTART_REQUIRED_SECTIONS:
+        reload_semantics = "restart-required"
+    elif spec.section in _PARTIAL_RELOAD_SECTIONS:
+        reload_semantics = "partial"
+    else:
+        reload_semantics = "yes"
     return replace(
         spec,
         category=_category_for_spec(spec),
         description=_FIELD_DESCRIPTIONS.get(spec.key, _default_description(spec.key)),
         value_hint=_VALUE_HINTS.get(spec.key, _default_value_hint(spec)),
-        hot_reload="partial" if spec.section in _PARTIAL_RELOAD_SECTIONS else "yes",
+        hot_reload=reload_semantics,
         examples=_examples_for_key(spec.key),
+    )
+
+
+def _restart_warnings(spec: ConfigFieldSpec) -> tuple[str, ...]:
+    if spec.hot_reload != "restart-required":
+        return ()
+    return (
+        f"{spec.key} requires `leap daemon restart` to take effect; "
+        "the running leapd keeps its previous value until restarted.",
     )
 
 

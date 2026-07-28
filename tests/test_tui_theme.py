@@ -140,8 +140,16 @@ def test_leap_app_style_builder_accepts_resolved_theme(tmp_path) -> None:
     )
 
     assert app._build_style() is not None
-    assert app._input_area.window.height.max == 4
+    # Input height is adaptive (a callable), floored at the original 4 rows and
+    # capped to a fraction of the terminal; it stays content-sized.
+    height = app._input_area.window.height
+    resolved = height() if callable(height) else height
+    assert resolved.min == 1
+    assert resolved.max >= 4
     assert app._input_area.window.dont_extend_height() is True
+    app._input_area.buffer.text = "x" * 200
+    grown = height() if callable(height) else height
+    assert grown.preferred >= resolved.preferred
 
 
 def test_leap_app_layout_keeps_status_breathing_gap(tmp_path) -> None:
@@ -157,14 +165,17 @@ def test_leap_app_layout_keeps_status_breathing_gap(tmp_path) -> None:
     root = app._app.layout.container.content
     children = root.children
 
-    assert len(children) == 5
+    assert len(children) == 6
     status_gap = children[2].content
     status_bar = children[3]
-    input_area = children[4].content
+    input_hint = children[4].content
+    input_area = children[5].content
     assert status_gap.style == "class:status-gap"
     assert status_gap.height == 1
     assert app._build_style().get_attrs_for_style_str("class:status-gap").bgcolor == ""
     assert status_bar.style == "class:status-bar"
+    assert input_hint.style == "class:hint"
+    assert input_hint.height == 1
     assert input_area is app._input_area.window
 
 
@@ -365,3 +376,22 @@ def test_status_bar_shows_adaptive_context_state(monkeypatch) -> None:
     rendered = "".join(text for _, text in status())
     assert "80%" in rendered
     assert "research" in rendered
+
+
+def test_status_bar_shows_daemon_turn_admission(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "leapflow.cli.tui_app.status.shutil.get_terminal_size",
+        lambda: terminal_size((120, 24)),
+    )
+    status = StatusBar(resolve_theme(_LIGHT, terminal_bg="#FFFFFF"))
+    status.update(
+        daemon_turn_active=3,
+        daemon_turn_max=4,
+        daemon_turn_waiting=1,
+        running_tasks=1,
+        queued_tasks=0,
+    )
+
+    rendered = "".join(text for _, text in status())
+    assert "local:1/1" in rendered
+    assert "daemon:3/4 waiting:1" in rendered

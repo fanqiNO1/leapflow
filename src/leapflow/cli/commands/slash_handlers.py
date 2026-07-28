@@ -374,6 +374,9 @@ def render_config_payload(console: "LeapConsole", payload: dict[str, Any]) -> No
         console.success(str(payload.get("message") or "Config updated."))
         for key in payload.get("changed_keys") or []:
             console.system(f"  {key}")
+        warnings = payload.get("warnings") or []
+        for warning in warnings:
+            console.warning(str(warning))
         if payload.get("reloaded"):
             console.system("Configuration reloaded for this session.")
         return
@@ -469,6 +472,7 @@ def _config_mutation_payload(ctx: "Context", service: Any, result: Any) -> dict[
         "mode": "mutation",
         "message": result.message,
         "changed_keys": list(result.changed_keys),
+        "warnings": list(getattr(result, "warnings", ()) or ()),
         "reloaded": reloaded,
         "model": ctx.settings.llm_model,
     }
@@ -1077,6 +1081,42 @@ def handle_clear(ctx: "Context", console: "LeapConsole", args: str) -> None:
 # ══════════════════════════════════════════════════════════════════════
 
 
+def build_orient_payload(ctx: "Context") -> dict[str, Any]:
+    """Read-only unified orientation view (S4-D1) + pending re-entry status.
+
+    Surfaces what the agent is currently oriented on (immediate / working /
+    long-term layers, weight-ranked) plus any armed/due re-entry triggers.
+    Observe-only; changes no state.
+    """
+    engine = ctx.engine
+    if engine is None:
+        return {"ok": False, "error": "No active engine — send a message first."}
+    view_fn = getattr(engine, "orientation_view", None)
+    if view_fn is None:
+        return {"ok": False, "error": "Orientation view not available."}
+    orientation = view_fn()
+    lines = ["Orientation (immediate / working / long-term):"]
+    items = orientation.top(12)
+    if not items:
+        lines.append("  (empty — no active findings or open questions yet)")
+    else:
+        lines.extend(f"  - ({it.layer}) {it.text}" for it in items)
+    store = getattr(ctx, "_reentry_store", None)
+    if store is not None:
+        try:
+            import time as _time
+            armed = store.list_armed_events()
+            due = store.list_due(_time.time())
+            lines.append(f"Re-entry: {len(armed)} armed event trigger(s), {len(due)} due now.")
+        except Exception:
+            pass
+    return {
+        "ok": True,
+        "message": "\n".join(lines),
+        "orientation": orientation.summary(),
+    }
+
+
 async def command_execute(ctx: "Context", name: str, args: str = "") -> dict[str, Any]:
     """Execute a slash command and return a serializable result payload.
 
@@ -1086,6 +1126,8 @@ async def command_execute(ctx: "Context", name: str, args: str = "") -> dict[str
     """
     if name == "status":
         return build_status_payload(ctx)
+    if name == "orient":
+        return build_orient_payload(ctx)
     if name == "tool":
         return build_tool_payload(ctx)
     if name == "usage":

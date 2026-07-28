@@ -308,6 +308,36 @@ class Settings:
     react_max_iterations: int = 20
     react_soft_limit: int = 14
     react_warning_threshold: int = 10
+    # Adaptive-depth elastic budget: baseline floor -> difficulty-scaled ceiling.
+    agent_iter_floor: int = 12
+    agent_iter_ceiling: int = 200
+    agent_budget_scale_k: float = 1.0
+    # Progress-gated continuation: when a task is productively unfinished (open
+    # ledger questions + still surfacing progress) and within resource limits,
+    # the effective cap extends past the elastic ceiling toward this hard cap in
+    # steps of ``agent_iter_extension_step``. Stall (no progress for
+    # ``agent_stall_rounds`` rounds) stops extension. The hard cap is the true
+    # backstop so a long task is bounded by progress/resources, not a fixed count.
+    agent_iter_hard_cap: int = 500
+    agent_iter_extension_step: int = 25
+    agent_stall_rounds: int = 6
+    agent_cost_ceiling_context_multiple: float = 0.0
+    agent_subagent_max_depth: int = 2
+    agent_subagent_max_concurrent: int = 3
+    agent_subagent_max_iterations: int = 15
+    agent_max_parallel_tools: int = 8  # Max tool calls run in parallel within one response's batch
+    agent_subagent_full_loop: bool = False
+    agent_calibration_enabled: bool = False
+    agent_calibration_min_confidence: float = 0.3
+    agent_calibration_interval_turns: int = 0
+    agent_compression_writeback: bool = False
+    agent_reentry_enabled: bool = False
+    agent_reentry_tick_seconds: float = 30.0
+    agent_reentry_global_budget: int = 100
+    agent_reentry_send_enabled: bool = False
+    agent_reentry_send_rate_per_hour: int = 4
+    agent_reentry_send_global_budget: int = 50
+    agent_reentry_send_verified_at: int = 3
     tool_max_iterations: int = 30
     native_tool_calling_enabled: bool = True   # Use native OpenAI tool_calls when available
     stream_output: bool = True                   # Enable LLM streaming in interactive mode
@@ -316,13 +346,31 @@ class Settings:
     # Context Compression
     compress_threshold: int = 16
     compress_keep_tail: int = 4
-    max_tool_output_chars: int = 2000
+    max_tool_output_chars: int = 3000
     max_tool_result_chars: int = 3000  # Per-tool result truncation for LLM context
+    # code_search: best-effort seamless ripgrep auto-install (macOS/Homebrew, no
+    # sudo) when missing; always falls back to the pure-Python search + a manual
+    # install hint, so search works with zero install regardless.
+    tools_ripgrep_autoinstall: bool = True
+    tools_test_command: str = ""  # empty => auto-detect (pytest/npm/go/cargo)
+    tools_lint_command: str = ""  # empty => auto-detect (ruff/eslint/go vet/clippy)
+    tools_terminal_session_enabled: bool = False  # persistent shell sessions (opt-in, high risk)
+    tools_verify_edits: bool = True  # post-edit syntax check (advisory) for edit_file/file_write
+    agent_validate_tool_args: bool = True  # pre-execution required-argument validation + self-repair
     context_hard_limit_ratio: float = 0.92
     context_warning_ratio: float = 0.75
     tool_evidence_max_chars: int = 1200
     repeated_read_limit: int = 2
     long_task_convergence_round: int = 12
+    # Adaptive convergence ceiling: on high-difficulty tasks the effective
+    # convergence round scales up (convergence_round * (1 + difficulty *
+    # convergence_scale)), bounded by this ceiling so genuinely stuck tasks
+    # still eventually converge.
+    convergence_round_ceiling: int = 40
+    convergence_scale: float = 2.0
+    # Shell safety ceiling: the internal shell-run process timeout is clamped
+    # here so individual shell calls can safely run beyond 2 minutes.
+    max_shell_timeout_s: float = 300.0
     context_expanded_ratio: float = 0.60
     context_finalizing_ratio: float = 0.90
     context_expanded_evidence_threshold: int = 2
@@ -334,6 +382,24 @@ class Settings:
     error_transient_max_retries: int = 3
     error_rate_limit_base_delay: float = 5.0
     max_consecutive_tool_failures: int = 3
+    # Per-turn recovery budget (bounds recovery attempts within one agent turn).
+    # A non-positive deadline means unlimited wall-clock time so a long-running
+    # task is never denied recovery for a late transient error; the action-count
+    # budget remains the real bound and scales for long tasks.
+    recovery_turn_deadline_s: float = 0.0
+    recovery_total_actions: int = 24
+    recovery_max_retry_per_category: int = 4
+
+    # ── Tool-loop Guardrails ──
+    # Progress-aware loop guards (repetition / stagnation / single-tool
+    # domination). Halts and finalize nudges are suppressed while the task is
+    # still making progress, so legitimate batch/sequential work on a long task
+    # is not cut short. Thresholds are configurable; the guard can be disabled.
+    guardrail_enabled: bool = True
+    guardrail_max_repeats: int = 3
+    guardrail_max_consecutive_same: int = 8
+    guardrail_stagnation_window: int = 10
+    guardrail_min_success_rate: float = 0.2
 
     # ── Session Persistence ──
     session_persistence_enabled: bool = True
@@ -351,6 +417,12 @@ class Settings:
     default_tool_timeout_s: float = 120.0  # Default per-tool execution timeout
     daemon_request_ledger_ttl_s: float = 600.0  # Replay cache retention for completed engine requests
     daemon_request_ledger_max_entries: int = 128  # Maximum completed engine requests kept for replay
+    # Concurrent turn execution (Stage 3). N=3 lets several fresh TUI sessions
+    # run concurrently by default on isolated per-session engines (turns within
+    # one session stay serialized). Set to 1 for strict serialized fallback.
+    daemon_max_concurrent_turns: int = 3
+    daemon_max_live_sessions: int = 16
+    daemon_session_idle_ttl_s: float = 1800.0
     circuit_breaker_threshold: int = 5  # Consecutive failures before circuit opens
     circuit_breaker_cooldown_s: float = 60.0  # Circuit breaker cooldown period
 
@@ -731,6 +803,29 @@ def _build_settings_from_env(
     react_max_iterations = int(os.getenv("LEAPFLOW_REACT_MAX_ITERATIONS", "20"))
     react_soft_limit = int(os.getenv("LEAPFLOW_REACT_SOFT_LIMIT", "14"))
     react_warning_threshold = int(os.getenv("LEAPFLOW_REACT_WARNING_THRESHOLD", "10"))
+    agent_iter_floor = int(os.getenv("LEAPFLOW_AGENT_ITER_FLOOR", "12"))
+    agent_iter_ceiling = int(os.getenv("LEAPFLOW_AGENT_ITER_CEILING", "200"))
+    agent_budget_scale_k = float(os.getenv("LEAPFLOW_AGENT_BUDGET_SCALE_K", "1.0"))
+    agent_iter_hard_cap = int(os.getenv("LEAPFLOW_AGENT_ITER_HARD_CAP", "500"))
+    agent_iter_extension_step = int(os.getenv("LEAPFLOW_AGENT_ITER_EXTENSION_STEP", "25"))
+    agent_stall_rounds = int(os.getenv("LEAPFLOW_AGENT_STALL_ROUNDS", "6"))
+    agent_cost_ceiling_context_multiple = float(os.getenv("LEAPFLOW_AGENT_COST_CEILING_CONTEXT_MULTIPLE", "0.0"))
+    agent_subagent_max_depth = int(os.getenv("LEAPFLOW_AGENT_SUBAGENT_MAX_DEPTH", "2"))
+    agent_subagent_max_concurrent = int(os.getenv("LEAPFLOW_AGENT_SUBAGENT_MAX_CONCURRENT", "3"))
+    agent_subagent_max_iterations = int(os.getenv("LEAPFLOW_AGENT_SUBAGENT_MAX_ITERATIONS", "15"))
+    agent_max_parallel_tools = int(os.getenv("LEAPFLOW_AGENT_MAX_PARALLEL_TOOLS", "8"))
+    agent_subagent_full_loop = os.getenv("LEAPFLOW_AGENT_SUBAGENT_FULL_LOOP", "0").strip().lower() in ("1", "true", "yes")
+    agent_calibration_enabled = os.getenv("LEAPFLOW_AGENT_CALIBRATION_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+    agent_calibration_min_confidence = float(os.getenv("LEAPFLOW_AGENT_CALIBRATION_MIN_CONFIDENCE", "0.3"))
+    agent_calibration_interval_turns = int(os.getenv("LEAPFLOW_AGENT_CALIBRATION_INTERVAL_TURNS", "0"))
+    agent_compression_writeback = os.getenv("LEAPFLOW_AGENT_COMPRESSION_WRITEBACK", "0").strip().lower() in ("1", "true", "yes")
+    agent_reentry_enabled = os.getenv("LEAPFLOW_AGENT_REENTRY_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+    agent_reentry_tick_seconds = float(os.getenv("LEAPFLOW_AGENT_REENTRY_TICK_SECONDS", "30"))
+    agent_reentry_global_budget = int(os.getenv("LEAPFLOW_AGENT_REENTRY_GLOBAL_BUDGET", "100"))
+    agent_reentry_send_enabled = os.getenv("LEAPFLOW_AGENT_REENTRY_SEND_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+    agent_reentry_send_rate_per_hour = int(os.getenv("LEAPFLOW_AGENT_REENTRY_SEND_RATE_PER_HOUR", "4"))
+    agent_reentry_send_global_budget = int(os.getenv("LEAPFLOW_AGENT_REENTRY_SEND_GLOBAL_BUDGET", "50"))
+    agent_reentry_send_verified_at = int(os.getenv("LEAPFLOW_AGENT_REENTRY_SEND_VERIFIED_AT", "3"))
     tool_max_iterations = int(os.getenv("LEAPFLOW_TOOL_MAX_ITERATIONS", "30"))
     native_tool_calling_enabled = os.getenv("LEAPFLOW_NATIVE_TOOL_CALLING_ENABLED", "1").strip().lower() in ("1", "true", "yes")
     stream_output = os.getenv("LEAPFLOW_STREAM_OUTPUT", "1").strip().lower() in ("1", "true", "yes")
@@ -739,13 +834,22 @@ def _build_settings_from_env(
     # Context Compression
     compress_threshold = int(os.getenv("LEAPFLOW_COMPRESS_THRESHOLD", "16"))
     compress_keep_tail = int(os.getenv("LEAPFLOW_COMPRESS_KEEP_TAIL", "4"))
-    max_tool_output_chars = int(os.getenv("LEAPFLOW_MAX_TOOL_OUTPUT_CHARS", "2000"))
+    max_tool_output_chars = int(os.getenv("LEAPFLOW_MAX_TOOL_OUTPUT_CHARS", "3000"))
     max_tool_result_chars = int(os.getenv("LEAPFLOW_MAX_TOOL_RESULT_CHARS", "3000"))
+    tools_ripgrep_autoinstall = os.getenv("LEAPFLOW_TOOLS_RIPGREP_AUTOINSTALL", "1").strip().lower() in ("1", "true", "yes")
+    tools_test_command = os.getenv("LEAPFLOW_TOOLS_TEST_COMMAND", "").strip()
+    tools_lint_command = os.getenv("LEAPFLOW_TOOLS_LINT_COMMAND", "").strip()
+    tools_terminal_session_enabled = os.getenv("LEAPFLOW_TOOLS_TERMINAL_SESSION_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+    tools_verify_edits = os.getenv("LEAPFLOW_TOOLS_VERIFY_EDITS", "1").strip().lower() in ("1", "true", "yes")
+    agent_validate_tool_args = os.getenv("LEAPFLOW_AGENT_VALIDATE_TOOL_ARGS", "1").strip().lower() in ("1", "true", "yes")
     context_hard_limit_ratio = float(os.getenv("LEAPFLOW_CONTEXT_HARD_LIMIT_RATIO", "0.92"))
     context_warning_ratio = float(os.getenv("LEAPFLOW_CONTEXT_WARNING_RATIO", "0.75"))
     tool_evidence_max_chars = int(os.getenv("LEAPFLOW_TOOL_EVIDENCE_MAX_CHARS", "1200"))
     repeated_read_limit = int(os.getenv("LEAPFLOW_REPEATED_READ_LIMIT", "2"))
     long_task_convergence_round = int(os.getenv("LEAPFLOW_LONG_TASK_CONVERGENCE_ROUND", "12"))
+    convergence_round_ceiling = int(os.getenv("LEAPFLOW_CONVERGENCE_ROUND_CEILING", "40"))
+    convergence_scale = float(os.getenv("LEAPFLOW_CONVERGENCE_SCALE", "2.0"))
+    max_shell_timeout_s = float(os.getenv("LEAPFLOW_MAX_SHELL_TIMEOUT_S", "300.0"))
     context_expanded_ratio = float(os.getenv("LEAPFLOW_CONTEXT_EXPANDED_RATIO", "0.60"))
     context_finalizing_ratio = float(os.getenv("LEAPFLOW_CONTEXT_FINALIZING_RATIO", "0.90"))
     context_expanded_evidence_threshold = int(os.getenv("LEAPFLOW_CONTEXT_EXPANDED_EVIDENCE_THRESHOLD", "2"))
@@ -757,6 +861,14 @@ def _build_settings_from_env(
     error_transient_max_retries = int(os.getenv("LEAPFLOW_ERROR_TRANSIENT_MAX_RETRIES", "3"))
     error_rate_limit_base_delay = float(os.getenv("LEAPFLOW_ERROR_RATE_LIMIT_BASE_DELAY", "5.0"))
     max_consecutive_tool_failures = int(os.getenv("LEAPFLOW_MAX_CONSECUTIVE_TOOL_FAILURES", "3"))
+    recovery_turn_deadline_s = float(os.getenv("LEAPFLOW_RECOVERY_TURN_DEADLINE_S", "0"))
+    recovery_total_actions = int(os.getenv("LEAPFLOW_RECOVERY_TOTAL_ACTIONS", "24"))
+    recovery_max_retry_per_category = int(os.getenv("LEAPFLOW_RECOVERY_MAX_RETRY_PER_CATEGORY", "4"))
+    guardrail_enabled = os.getenv("LEAPFLOW_GUARDRAIL_ENABLED", "1").strip().lower() in ("1", "true", "yes")
+    guardrail_max_repeats = int(os.getenv("LEAPFLOW_GUARDRAIL_MAX_REPEATS", "3"))
+    guardrail_max_consecutive_same = int(os.getenv("LEAPFLOW_GUARDRAIL_MAX_CONSECUTIVE_SAME", "8"))
+    guardrail_stagnation_window = int(os.getenv("LEAPFLOW_GUARDRAIL_STAGNATION_WINDOW", "10"))
+    guardrail_min_success_rate = float(os.getenv("LEAPFLOW_GUARDRAIL_MIN_SUCCESS_RATE", "0.2"))
 
     # Session Persistence
     session_persistence_enabled = _bool("LEAPFLOW_SESSION_PERSISTENCE_ENABLED", "true")
@@ -774,6 +886,9 @@ def _build_settings_from_env(
     default_tool_timeout_s = float(os.getenv("LEAPFLOW_DEFAULT_TOOL_TIMEOUT_S", "120.0"))
     daemon_request_ledger_ttl_s = float(os.getenv("LEAPFLOW_DAEMON_REQUEST_LEDGER_TTL_S", "600.0"))
     daemon_request_ledger_max_entries = int(os.getenv("LEAPFLOW_DAEMON_REQUEST_LEDGER_MAX_ENTRIES", "128"))
+    daemon_max_concurrent_turns = int(os.getenv("LEAPFLOW_DAEMON_MAX_CONCURRENT_TURNS", "3"))
+    daemon_max_live_sessions = int(os.getenv("LEAPFLOW_DAEMON_MAX_LIVE_SESSIONS", "16"))
+    daemon_session_idle_ttl_s = float(os.getenv("LEAPFLOW_DAEMON_SESSION_IDLE_TTL_S", "1800.0"))
     circuit_breaker_threshold = int(os.getenv("LEAPFLOW_CIRCUIT_BREAKER_THRESHOLD", "5"))
     circuit_breaker_cooldown_s = float(os.getenv("LEAPFLOW_CIRCUIT_BREAKER_COOLDOWN_S", "60.0"))
 
@@ -1014,6 +1129,29 @@ def _build_settings_from_env(
         react_max_iterations=react_max_iterations,
         react_soft_limit=react_soft_limit,
         react_warning_threshold=react_warning_threshold,
+        agent_iter_floor=agent_iter_floor,
+        agent_iter_ceiling=agent_iter_ceiling,
+        agent_budget_scale_k=agent_budget_scale_k,
+        agent_iter_hard_cap=agent_iter_hard_cap,
+        agent_iter_extension_step=agent_iter_extension_step,
+        agent_stall_rounds=agent_stall_rounds,
+        agent_cost_ceiling_context_multiple=agent_cost_ceiling_context_multiple,
+        agent_subagent_max_depth=agent_subagent_max_depth,
+        agent_subagent_max_concurrent=agent_subagent_max_concurrent,
+        agent_subagent_max_iterations=agent_subagent_max_iterations,
+        agent_max_parallel_tools=agent_max_parallel_tools,
+        agent_subagent_full_loop=agent_subagent_full_loop,
+        agent_calibration_enabled=agent_calibration_enabled,
+        agent_calibration_min_confidence=agent_calibration_min_confidence,
+        agent_calibration_interval_turns=agent_calibration_interval_turns,
+        agent_compression_writeback=agent_compression_writeback,
+        agent_reentry_enabled=agent_reentry_enabled,
+        agent_reentry_tick_seconds=agent_reentry_tick_seconds,
+        agent_reentry_global_budget=agent_reentry_global_budget,
+        agent_reentry_send_enabled=agent_reentry_send_enabled,
+        agent_reentry_send_rate_per_hour=agent_reentry_send_rate_per_hour,
+        agent_reentry_send_global_budget=agent_reentry_send_global_budget,
+        agent_reentry_send_verified_at=agent_reentry_send_verified_at,
         tool_max_iterations=tool_max_iterations,
         native_tool_calling_enabled=native_tool_calling_enabled,
         stream_output=stream_output,
@@ -1023,11 +1161,20 @@ def _build_settings_from_env(
         compress_keep_tail=compress_keep_tail,
         max_tool_output_chars=max_tool_output_chars,
         max_tool_result_chars=max_tool_result_chars,
+        tools_ripgrep_autoinstall=tools_ripgrep_autoinstall,
+        tools_test_command=tools_test_command,
+        tools_lint_command=tools_lint_command,
+        tools_terminal_session_enabled=tools_terminal_session_enabled,
+        tools_verify_edits=tools_verify_edits,
+        agent_validate_tool_args=agent_validate_tool_args,
         context_hard_limit_ratio=context_hard_limit_ratio,
         context_warning_ratio=context_warning_ratio,
         tool_evidence_max_chars=tool_evidence_max_chars,
         repeated_read_limit=repeated_read_limit,
         long_task_convergence_round=long_task_convergence_round,
+        convergence_round_ceiling=convergence_round_ceiling,
+        convergence_scale=convergence_scale,
+        max_shell_timeout_s=max_shell_timeout_s,
         context_expanded_ratio=context_expanded_ratio,
         context_finalizing_ratio=context_finalizing_ratio,
         context_expanded_evidence_threshold=context_expanded_evidence_threshold,
@@ -1038,6 +1185,14 @@ def _build_settings_from_env(
         error_transient_max_retries=error_transient_max_retries,
         error_rate_limit_base_delay=error_rate_limit_base_delay,
         max_consecutive_tool_failures=max_consecutive_tool_failures,
+        recovery_turn_deadline_s=recovery_turn_deadline_s,
+        recovery_total_actions=recovery_total_actions,
+        recovery_max_retry_per_category=recovery_max_retry_per_category,
+        guardrail_enabled=guardrail_enabled,
+        guardrail_max_repeats=guardrail_max_repeats,
+        guardrail_max_consecutive_same=guardrail_max_consecutive_same,
+        guardrail_stagnation_window=guardrail_stagnation_window,
+        guardrail_min_success_rate=guardrail_min_success_rate,
         # Session Persistence
         session_persistence_enabled=session_persistence_enabled,
         # Multi-Provider LLM
@@ -1052,6 +1207,9 @@ def _build_settings_from_env(
         default_tool_timeout_s=default_tool_timeout_s,
         daemon_request_ledger_ttl_s=daemon_request_ledger_ttl_s,
         daemon_request_ledger_max_entries=daemon_request_ledger_max_entries,
+        daemon_max_concurrent_turns=daemon_max_concurrent_turns,
+        daemon_max_live_sessions=daemon_max_live_sessions,
+        daemon_session_idle_ttl_s=daemon_session_idle_ttl_s,
         circuit_breaker_threshold=circuit_breaker_threshold,
         circuit_breaker_cooldown_s=circuit_breaker_cooldown_s,
         # Signal Fusion

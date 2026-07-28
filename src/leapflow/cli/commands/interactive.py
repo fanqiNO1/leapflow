@@ -12,6 +12,8 @@ import logging
 import os
 import sys
 import time
+import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from leapflow.cli.commands.run import _print_execution_result
@@ -965,7 +967,11 @@ async def cmd_interactive_daemon(
     status = StatusBar(theme)
     exit_stats = SessionExitStats()
     command_router = CommandRouter("daemon")
-    active_session_id = str(resume_id or "")
+    # A fresh TUI (no --resume) gets its own distinct session id so that two
+    # concurrent TUI clients route to isolated per-session engines on the daemon
+    # (bounded by daemon.max_concurrent_turns) instead of converging on one
+    # shared session and serializing. --resume keeps the requested id.
+    active_session_id = str(resume_id or "") or uuid.uuid4().hex[:16]
     turn_count = 0
     runtime_model_name = str(getattr(settings, "llm_model", ""))
     runtime_context_length = int(getattr(settings, "llm_context_length", 0) or 0)
@@ -973,6 +979,9 @@ async def cmd_interactive_daemon(
     runtime_context_state = "baseline"
     runtime_daemon_pid = ""
     runtime_host_online = False
+    runtime_turn_active = 0
+    runtime_turn_max = 0
+    runtime_turn_waiting = 0
     client_lease = ClientLease(
         settings.runtime_dir,
         kind="tui",
@@ -982,6 +991,7 @@ async def cmd_interactive_daemon(
     def _apply_daemon_runtime_metadata(metadata: dict[str, Any]) -> None:
         nonlocal active_session_id, runtime_model_name, runtime_context_length
         nonlocal runtime_context_used, runtime_context_state, runtime_daemon_pid, runtime_host_online
+        nonlocal runtime_turn_active, runtime_turn_max, runtime_turn_waiting
         if metadata.get("pid"):
             runtime_daemon_pid = str(metadata["pid"])
         if metadata.get("session_id"):
@@ -1008,6 +1018,14 @@ async def cmd_interactive_daemon(
         host = metadata.get("host_backend")
         if isinstance(host, dict):
             runtime_host_online = _host_started(host)
+        admission = metadata.get("turn_admission")
+        if isinstance(admission, dict):
+            try:
+                runtime_turn_active = max(0, int(admission.get("active", 0) or 0))
+                runtime_turn_max = max(0, int(admission.get("max_concurrent", 0) or 0))
+                runtime_turn_waiting = max(0, int(admission.get("waiting", 0) or 0))
+            except (TypeError, ValueError):
+                pass
 
     def _set_active_session_id(session_id: str) -> None:
         nonlocal active_session_id
@@ -1035,6 +1053,9 @@ async def cmd_interactive_daemon(
             context_used=runtime_context_used,
             context_max=runtime_context_length,
             context_state=runtime_context_state,
+            daemon_turn_active=runtime_turn_active,
+            daemon_turn_max=runtime_turn_max,
+            daemon_turn_waiting=runtime_turn_waiting,
         )
         app.prompt_mode = effective_mode
 
@@ -1074,6 +1095,23 @@ async def cmd_interactive_daemon(
             f"connected={daemon_status.get('connected_clients', 0)} "
             f"volatile={daemon_status.get('volatile')}"
         )
+        # Surface this TUI's own workspace so a user running several TUIs against
+        # one shared daemon can confirm at a glance which project this session is
+        # bound to (tools and memory are scoped to exactly this root).
+        console.system(f"Workspace: {Path.cwd().resolve()}")
+        admission = daemon_status.get("turn_admission")
+        if isinstance(admission, dict):
+            active = int(admission.get("active", 0) or 0)
+            cap = int(admission.get("max_concurrent", 0) or 0)
+            waiting = int(admission.get("waiting", 0) or 0)
+            available = int(admission.get("available", 0) or 0)
+            console.system(
+                f"Daemon turns: active={active}/{cap} "
+                f"available={available} waiting={waiting}"
+            )
+            active_ids = [str(item) for item in admission.get("active_request_ids") or []]
+            if active_ids:
+                console.system(f"Active turn request ids: {', '.join(active_ids)}")
         db_path = daemon_status.get("db_path")
         if db_path:
             console.system(f"DB: {db_path}")
@@ -1147,7 +1185,11 @@ async def cmd_interactive_daemon(
         saw_real_event = False
         turn_completed = False
         try:
-            async for event in bridge.client.engine_chat(prompt_text):
+            async for event in bridge.client.engine_chat(
+                prompt_text,
+                session_id=active_session_id,
+                workspace_root=str(Path.cwd().resolve()),
+            ):
                 metadata = event.metadata or {}
                 is_heartbeat = event.type == "status" and metadata.get("heartbeat")
                 if not is_heartbeat:

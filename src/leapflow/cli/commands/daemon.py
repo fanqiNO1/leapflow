@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from argparse import Namespace
 from pathlib import Path
@@ -51,7 +52,11 @@ def _status(runtime_dir: Path) -> int:
         try:
             details = asyncio.run(_runtime_status(info.sock_path))
         except Exception as exc:
-            sys.stderr.write(f"Could not fetch daemon runtime details: {exc}\n")
+            sys.stderr.write(
+                f"Could not fetch daemon runtime details within {_runtime_status_timeout():g}s: {exc}\n"
+                "leapd accepted the socket connection but did not answer RPC; "
+                "run 'leap daemon restart --force' if this persists.\n"
+            )
         else:
             _print_runtime_status(details)
     return 0 if info.is_healthy else 1
@@ -60,7 +65,15 @@ def _status(runtime_dir: Path) -> int:
 async def _runtime_status(sock_path: Path) -> dict:
     from leapflow.daemon.client import DaemonClient
 
-    return await DaemonClient(sock_path).status()
+    return await DaemonClient(sock_path, timeout_s=_runtime_status_timeout()).status()
+
+
+def _runtime_status_timeout() -> float:
+    raw = os.getenv("LEAPFLOW_DAEMON_STATUS_TIMEOUT", "3").strip()
+    try:
+        return max(0.5, float(raw))
+    except ValueError:
+        return 3.0
 
 
 def _print_runtime_status(status: dict) -> None:
@@ -80,8 +93,44 @@ def _print_runtime_status(status: dict) -> None:
         f"{status.get('model')} "
         f"context={status.get('context_used', 0)}/{status.get('llm_context_length', 0)}"
     )
+    admission = status.get("turn_admission")
+    if isinstance(admission, dict):
+        print(
+            "turns: "
+            f"active={admission.get('active', 0)}/{admission.get('max_concurrent', 0)} "
+            f"available={admission.get('available', 0)} "
+            f"waiting={admission.get('waiting', 0)}"
+        )
+        active_ids = [str(item) for item in admission.get("active_request_ids") or []]
+        if active_ids:
+            print(f"active_request_ids: {', '.join(active_ids)}")
+    deferred = status.get("deferred_init")
+    if isinstance(deferred, dict):
+        initialized = bool(deferred.get("initialized"))
+        running = bool(deferred.get("running"))
+        degraded = bool(deferred.get("degraded"))
+        state = "ready" if initialized else "running" if running else "degraded" if degraded else "pending"
+        attempts = int(deferred.get("attempts", 0) or 0)
+        max_attempts = int(deferred.get("max_attempts", 0) or 0)
+        print(f"deferred_init: state={state} attempts={attempts}/{max_attempts}")
+        if deferred.get("error"):
+            print(f"deferred_error: {deferred['error']}")
     if status.get("session_id"):
         print(f"session: {status['session_id']}")
+    clients = status.get("clients")
+    if isinstance(clients, list) and clients:
+        print("clients:")
+        for client in clients:
+            if not isinstance(client, dict):
+                continue
+            workspace = client.get("workspace_root") or "?"
+            session = client.get("session_id") or "-"
+            print(
+                f"  - {client.get('kind', '?')}"
+                f" state={client.get('state', '?')}"
+                f" session={session}"
+                f" workspace={workspace}"
+            )
     if status.get("runtime_version"):
         print(f"version: {status['runtime_version']}")
     if status.get("runtime_source"):

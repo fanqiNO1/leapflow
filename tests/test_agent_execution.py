@@ -17,9 +17,7 @@ from leapflow.engine.engine import (
     _tool_args_metadata,
     build_default_registry,
 )
-from leapflow.engine.graph_planner import GraphPlanner
 from leapflow.engine.intent_classifier import Intent
-from leapflow.engine.scheduler import TaskScheduler
 from leapflow.engine.task_graph import (
     GraphValidationError,
     RetryPolicy,
@@ -120,6 +118,698 @@ async def test_react_loop_tool_then_answer() -> None:
             assert llm.call_count >= 2
         finally:
             lt.close()
+
+
+@pytest.mark.xfail(
+    reason=(
+        "Documents a SINGLE shared engine's limitation: two turns run concurrently on one "
+        "engine instance cross-contaminate, because per-turn substrate (active frame, working "
+        "memory, prompt assembly) lives on that instance. Stage 3 resolves concurrency with "
+        "Approach D — the daemon runs each session on its OWN engine (build_session_engine) "
+        "bounded by TurnAdmission — rather than isolating a single shared engine, so this stays "
+        "xfail intentionally. The positive proof is test_concurrent_session_engines_are_isolated "
+        "(separate per-session engines run concurrent turns with no cross-contamination)."
+    ),
+    strict=False,
+)
+@pytest.mark.asyncio
+async def test_concurrent_engine_turns_are_isolated() -> None:
+    import json as _json
+    from leapflow.engine.engine import AgentEngine, build_default_registry
+    from leapflow.llm.base import LLMChatResponse, LLMProvider
+    from leapflow.platform.mock import MockBridge
+
+    class _EchoLLM(LLMProvider):
+        async def achat(self, messages, *, stream=True, enable_thinking=False, **kwargs):
+            user = ""
+            for m in reversed(messages):
+                if m.get("role") == "user":
+                    user = str(m.get("content") or "")
+                    break
+            payload = {"thought": "d", "action": {"type": "answer", "name": "final", "payload": {"text": user}}}
+            return LLMChatResponse(content=_json.dumps(payload))
+
+        async def achat_stream(self, messages, *, enable_thinking=False, **kwargs):
+            if False:
+                yield ""
+
+    class _Simple:
+        def classify(self, *a, **k):
+            return "simple"
+
+        async def aclassify(self, *a, **k):
+            return "simple"
+
+    with tempfile.TemporaryDirectory() as td:
+        settings = make_settings(td)
+        rpc = MockBridge()
+        llm = _EchoLLM()
+        wm = WorkingMemoryProvider(max_tokens=1024)
+        lt = SemanticMemoryProvider(source=settings.duckdb_path)
+        imm = EpisodicMemoryProvider()
+        try:
+            reg = build_default_registry(rpc, llm, wm, lt)
+            engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, _Simple())
+            out_a, out_b = await asyncio.gather(
+                engine._unified_tool_loop("MARKER-AAA-111"),
+                engine._unified_tool_loop("MARKER-BBB-222"),
+            )
+            # Each turn must reflect only its own input (no cross-contamination).
+            assert "111" in out_a and "222" not in out_a
+            assert "222" in out_b and "111" not in out_b
+        finally:
+            lt.close()
+
+
+@pytest.mark.asyncio
+async def test_child_frame_runs_isolated_from_parent() -> None:
+    """RB4: a recursive child frame runs the full loop without contaminating the
+    parent's per-turn subsystems.
+
+    This is the completeness check for per-turn state isolation: if any per-turn
+    subsystem were not swapped around the child run, the parent's reference would
+    change (or its state mutate) and an assertion below would fail.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        settings = make_settings(td)
+        from leapflow.platform.mock import MockBridge
+
+        rpc = MockBridge()
+        llm = StubLLM(["child final answer"])  # single round: direct final answer, no tools
+        wm = WorkingMemoryProvider(max_tokens=1024)
+        lt = SemanticMemoryProvider(source=settings.duckdb_path)
+        imm = EpisodicMemoryProvider()
+        try:
+            reg = build_default_registry(rpc, llm, wm, lt)
+            classifier = _FixedClassifier("complex")
+            engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, classifier)
+
+            # Capture the parent (engine baseline) per-turn subsystems.
+            parent_governance = engine._context_governance_controller
+            parent_ledger = engine._research_ledger
+            parent_usage = engine._usage_tracker
+            parent_commitment = engine._prefix_commitment
+            parent_compressor = engine._compressor
+            assert engine._active_frame is None
+
+            # Per-turn identity must also be scoped to the frame (saved/restored
+            # around the child), so a child cannot leak its ids to the parent.
+            engine._current_session_id = "parent-sess"
+            engine._current_turn_id = "parent-turn"
+            engine._current_command_id = "parent-cmd"
+
+            # A child frame must have fresh, distinct subsystems.
+            child = engine._build_child_frame("do a subtask", depth=1)
+            assert child.governance is not parent_governance
+            assert child.ledger is not parent_ledger
+            assert child.usage_tracker is not parent_usage
+            assert child.depth == 1
+
+            out = await engine._run_child_frame(child)
+            assert out == "child final answer"
+
+            # Parent's per-turn subsystems must be restored (references unchanged).
+            assert engine._context_governance_controller is parent_governance
+            assert engine._research_ledger is parent_ledger
+            assert engine._usage_tracker is parent_usage
+            assert engine._prefix_commitment is parent_commitment
+            assert engine._compressor is parent_compressor
+            assert engine._active_frame is None
+            # Per-turn ids restored to the parent's after the child run.
+            assert engine._current_session_id == "parent-sess"
+            assert engine._current_turn_id == "parent-turn"
+            assert engine._current_command_id == "parent-cmd"
+        finally:
+            lt.close()
+
+
+@pytest.mark.asyncio
+async def test_full_loop_subagent_executor_runs_isolated() -> None:
+    """RB4 wiring: EngineFrameSubagentExecutor runs a delegated subagent through
+    the engine's full loop on an isolated child frame, restricted to permitted
+    tools and leaving the parent's per-turn state untouched.
+    """
+    from leapflow.engine.subagent import EngineFrameSubagentExecutor, SubagentConfig
+
+    with tempfile.TemporaryDirectory() as td:
+        settings = make_settings(td)
+        from leapflow.platform.mock import MockBridge
+
+        rpc = MockBridge()
+        llm = StubLLM(["subagent completed the task"])  # single-round final answer
+        wm = WorkingMemoryProvider(max_tokens=1024)
+        lt = SemanticMemoryProvider(source=settings.duckdb_path)
+        imm = EpisodicMemoryProvider()
+        try:
+            reg = build_default_registry(rpc, llm, wm, lt)
+            classifier = _FixedClassifier("complex")
+            engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, classifier)
+            parent_ledger = engine._research_ledger
+            parent_governance = engine._context_governance_controller
+
+            executor = EngineFrameSubagentExecutor(
+                run_child=engine._run_subagent_goal,
+                tool_names=["time_get", "shell_run", "delegate_task"],
+                settings=settings,
+            )
+            # depth=1 with max_depth=2 gates delegate_task out of the child.
+            config = SubagentConfig(goal="do a focused subtask", depth=1)
+            result = await executor.execute_subagent(config)
+
+            assert result.status == "completed"
+            assert "subagent" in result.summary
+            # The child ran on an isolated frame: parent references are intact.
+            assert engine._research_ledger is parent_ledger
+            assert engine._context_governance_controller is parent_governance
+            assert engine._active_frame is None
+        finally:
+            lt.close()
+
+
+def test_engine_recalibrate_difficulty_applies_and_resets(tmp_path) -> None:
+    """S3-L3: enabled calibration installs a bounded scale_k derived from the
+    baseline from stored turn signals; reset reverts it exactly.
+    """
+    import dataclasses
+
+    from leapflow.storage.evolution_store import DuckDBEvolutionStore
+
+    settings = dataclasses.replace(make_settings(str(tmp_path)), agent_calibration_enabled=True)
+    from leapflow.platform.mock import MockBridge
+
+    rpc = MockBridge()
+    llm = StubLLM(["x"])
+    wm = WorkingMemoryProvider(max_tokens=1024)
+    lt = SemanticMemoryProvider(source=settings.duckdb_path)
+    imm = EpisodicMemoryProvider()
+    store = DuckDBEvolutionStore(str(tmp_path / "evo.duckdb"))
+    try:
+        reg = build_default_registry(rpc, llm, wm, lt)
+        classifier = _FixedClassifier("complex")
+        engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, classifier)
+        baseline = engine._budget_config.scale_k
+
+        # 20 over-predicted turns: high difficulty costs *less* effort than low.
+        for i in range(20):
+            difficulty = 0.9 if i % 2 == 0 else 0.1
+            steps = 2 if difficulty > 0.5 else 4
+            store.save_episode(
+                episode_id=f"e{i}", skill_name="turn_x", actions=[],
+                outcome="completed", reward=1.0,
+                context={"final_difficulty": difficulty, "steps": steps},
+            )
+
+        result = engine.recalibrate_difficulty(store)
+        assert result.applied is True
+        assert engine._budget_config.scale_k < baseline          # over-predicted -> reduce
+        assert 0.25 <= engine._budget_config.scale_k <= 3.0       # clamped
+
+        engine.reset_calibration()
+        assert engine._budget_config.scale_k == baseline          # exact revert
+    finally:
+        store.close()
+        lt.close()
+
+
+def test_engine_recalibrate_difficulty_disabled_is_noop(tmp_path) -> None:
+    """S3-L3: with calibration disabled (default), recalibration never changes the weight."""
+    from leapflow.storage.evolution_store import DuckDBEvolutionStore
+
+    settings = make_settings(str(tmp_path))  # agent_calibration_enabled defaults False
+    from leapflow.platform.mock import MockBridge
+
+    rpc = MockBridge()
+    llm = StubLLM(["x"])
+    wm = WorkingMemoryProvider(max_tokens=1024)
+    lt = SemanticMemoryProvider(source=settings.duckdb_path)
+    imm = EpisodicMemoryProvider()
+    store = DuckDBEvolutionStore(str(tmp_path / "evo.duckdb"))
+    try:
+        reg = build_default_registry(rpc, llm, wm, lt)
+        engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, _FixedClassifier("complex"))
+        baseline = engine._budget_config.scale_k
+        for i in range(20):
+            store.save_episode(
+                episode_id=f"e{i}", skill_name="turn_x", actions=[],
+                outcome="completed", reward=1.0,
+                context={"final_difficulty": 0.9, "steps": 1},
+            )
+        result = engine.recalibrate_difficulty(store)
+        assert result.applied is False
+        assert "disabled" in result.reason
+        assert engine._budget_config.scale_k == baseline
+    finally:
+        store.close()
+        lt.close()
+
+
+def test_engine_recalibrate_thresholds_applies_and_resets(tmp_path) -> None:
+    """S3-L4: premature-finalization signal raises the finalize threshold
+    (bounded, from baseline), rebuilding governance; reset reverts to None.
+    """
+    import dataclasses
+
+    from leapflow.storage.evolution_store import DuckDBEvolutionStore
+
+    settings = dataclasses.replace(make_settings(str(tmp_path)), agent_calibration_enabled=True)
+    from leapflow.platform.mock import MockBridge
+
+    rpc = MockBridge()
+    llm = StubLLM(["x"])
+    wm = WorkingMemoryProvider(max_tokens=1024)
+    lt = SemanticMemoryProvider(source=settings.duckdb_path)
+    imm = EpisodicMemoryProvider()
+    store = DuckDBEvolutionStore(str(tmp_path / "evo.duckdb"))
+    try:
+        reg = build_default_registry(rpc, llm, wm, lt)
+        engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, _FixedClassifier("complex"))
+        baseline = settings.context_finalizing_ratio
+        # 20 finalizing-posture turns that failed -> premature -> raise threshold.
+        for i in range(20):
+            store.save_episode(
+                episode_id=f"e{i}", skill_name="turn_x", actions=[],
+                outcome="failed", reward=-0.5,
+                context={"final_posture": "finalizing", "final_difficulty": 0.5},
+            )
+        result = engine.recalibrate_thresholds(store)
+        assert result.applied is True
+        assert engine._calibrated_finalizing_ratio >= baseline    # premature -> raise (or clamp)
+        assert 0.6 <= engine._calibrated_finalizing_ratio <= 0.98  # clamped band
+
+        engine.reset_threshold_calibration()
+        assert engine._calibrated_finalizing_ratio is None
+    finally:
+        store.close()
+        lt.close()
+
+
+def test_engine_orientation_view_aggregates_ledger(tmp_path) -> None:
+    """S4-D1: orientation_view is a read-only unified query over existing state;
+    the current research ledger forms the working layer. Changes nothing.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        settings = make_settings(td)
+        from leapflow.platform.mock import MockBridge
+
+        rpc = MockBridge()
+        llm = StubLLM(["x"])
+        wm = WorkingMemoryProvider(max_tokens=1024)
+        lt = SemanticMemoryProvider(source=settings.duckdb_path)
+        imm = EpisodicMemoryProvider()
+        try:
+            reg = build_default_registry(rpc, llm, wm, lt)
+            engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, _FixedClassifier("complex"))
+            engine._research_ledger.note("finding", "A uses DuckDB")
+            engine._research_ledger.note("open_question", "does B cache?")
+
+            orientation = engine.orientation_view()
+            working_texts = [it.text for it in orientation.by_layer("working")]
+            assert "A uses DuckDB" in working_texts
+            assert any("does B cache?" in t for t in working_texts)
+            # Read-only: the ledger is unchanged (open question still tracked).
+            assert engine._research_ledger.open_question_count == 1
+        finally:
+            lt.close()
+
+
+def test_child_frame_gets_isolated_session(tmp_path) -> None:
+    """S4-E: a recursive child frame persists under its own isolated ``sub_``
+    session, never the parent turn's session.
+    """
+    import dataclasses
+
+    class _FakeConvStore:
+        def __init__(self) -> None:
+            self.created: list = []
+
+        def create_session(self, session_id, **kwargs) -> None:
+            self.created.append(session_id)
+
+    with tempfile.TemporaryDirectory() as td:
+        settings = dataclasses.replace(make_settings(td), session_persistence_enabled=True)
+        from leapflow.platform.mock import MockBridge
+
+        rpc = MockBridge()
+        llm = StubLLM(["x"])
+        wm = WorkingMemoryProvider(max_tokens=1024)
+        lt = SemanticMemoryProvider(source=settings.duckdb_path)
+        imm = EpisodicMemoryProvider()
+        try:
+            reg = build_default_registry(rpc, llm, wm, lt)
+            engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, _FixedClassifier("complex"))
+            engine._conversation_store = _FakeConvStore()
+
+            root_sid = engine._ensure_session_for_frame(engine._build_root_frame("hello"), "hello")
+            child = engine._build_child_frame("sub goal", depth=1)
+            child_sid = engine._ensure_session_for_frame(child, "sub goal")
+
+            assert child_sid is not None and child_sid.startswith("sub_")
+            assert child_sid != root_sid                     # isolated from the root session
+            assert child_sid != engine._current_session_id   # never the parent's session
+        finally:
+            lt.close()
+
+
+def test_periodic_recalibration_runs_every_interval(tmp_path) -> None:
+    """E-2: with a positive interval, S3 calibration re-runs every N root turns
+    (0 = one-shot only). Bounded/gated like the underlying recalibration.
+    """
+    import dataclasses
+
+    from leapflow.storage.evolution_store import DuckDBEvolutionStore
+
+    settings = dataclasses.replace(
+        make_settings(str(tmp_path)),
+        agent_calibration_enabled=True,
+        agent_calibration_interval_turns=2,
+    )
+    from leapflow.platform.mock import MockBridge
+
+    rpc = MockBridge()
+    llm = StubLLM(["x"])
+    wm = WorkingMemoryProvider(max_tokens=1024)
+    lt = SemanticMemoryProvider(source=settings.duckdb_path)
+    imm = EpisodicMemoryProvider()
+    store = DuckDBEvolutionStore(str(tmp_path / "evo.duckdb"))
+    try:
+        reg = build_default_registry(rpc, llm, wm, lt)
+        engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, _FixedClassifier("complex"))
+        # Over-predicted episodes so recalibration reduces scale_k when it fires.
+        for i in range(20):
+            difficulty = 0.9 if i % 2 == 0 else 0.1
+            steps = 2 if difficulty > 0.5 else 4
+            store.save_episode(
+                episode_id=f"e{i}", skill_name="turn_x", actions=[],
+                outcome="completed", reward=1.0,
+                context={"final_difficulty": difficulty, "steps": steps},
+            )
+        engine.set_calibration_store(store)
+        baseline = engine._budget_config.scale_k
+
+        engine._maybe_periodic_recalibration()          # turn 1: counter 1 < 2 -> no change
+        assert engine._budget_config.scale_k == baseline
+        engine._maybe_periodic_recalibration()          # turn 2: interval hit -> recalibrate
+        assert engine._budget_config.scale_k < baseline
+    finally:
+        store.close()
+        lt.close()
+
+
+def test_periodic_recalibration_off_by_default(tmp_path) -> None:
+    """E-2: interval 0 (default) never re-calibrates even when enabled."""
+    import dataclasses
+
+    from leapflow.storage.evolution_store import DuckDBEvolutionStore
+
+    settings = dataclasses.replace(make_settings(str(tmp_path)), agent_calibration_enabled=True)
+    from leapflow.platform.mock import MockBridge
+
+    rpc = MockBridge()
+    llm = StubLLM(["x"])
+    wm = WorkingMemoryProvider(max_tokens=1024)
+    lt = SemanticMemoryProvider(source=settings.duckdb_path)
+    imm = EpisodicMemoryProvider()
+    store = DuckDBEvolutionStore(str(tmp_path / "evo.duckdb"))
+    try:
+        reg = build_default_registry(rpc, llm, wm, lt)
+        engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, _FixedClassifier("complex"))
+        for i in range(20):
+            store.save_episode(
+                episode_id=f"e{i}", skill_name="turn_x", actions=[],
+                outcome="completed", reward=1.0,
+                context={"final_difficulty": 0.9, "steps": 1},
+            )
+        engine.set_calibration_store(store)
+        baseline = engine._budget_config.scale_k
+        for _ in range(5):
+            engine._maybe_periodic_recalibration()
+        assert engine._budget_config.scale_k == baseline    # interval 0 -> never fires
+    finally:
+        store.close()
+        lt.close()
+
+
+def _long_messages(pairs: int = 30) -> list:
+    msgs = [{"role": "system", "content": "You are a helpful agent."}]
+    for i in range(pairs):
+        msgs.append({"role": "user", "content": ("context token " * 40) + f" #{i}"})
+        msgs.append({"role": "assistant", "content": ("response detail " * 40) + f" #{i}"})
+    return msgs
+
+
+def _writeback_engine(td, *, enabled: bool):
+    import dataclasses
+
+    from conftest import make_settings
+    settings = dataclasses.replace(
+        make_settings(td), llm_context_length=400, agent_compression_writeback=enabled,
+    )
+    from leapflow.platform.mock import MockBridge
+    rpc = MockBridge()
+    llm = StubLLM(["x"])
+    wm = WorkingMemoryProvider(max_tokens=1024)
+    lt = SemanticMemoryProvider(source=settings.duckdb_path)
+    imm = EpisodicMemoryProvider()
+    reg = build_default_registry(rpc, llm, wm, lt)
+    engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, _FixedClassifier("complex"))
+    return engine, lt
+
+
+def test_compression_writeback_persists_when_enabled() -> None:
+    """E-3 (CL-8): with writeback on, structural compression is persisted back into
+    the loop's message history (so the frozen prefix stays byte-stable). Off = intact.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        engine, lt = _writeback_engine(td, enabled=True)
+        try:
+            messages = _long_messages()
+            before = len(messages)
+            engine._prepare_llm_messages(messages)
+            assert len(messages) < before        # write-back shrank the history
+            assert messages[0]["role"] == "system"  # cacheable prefix preserved
+        finally:
+            lt.close()
+
+
+def test_compression_writeback_off_leaves_history_intact() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        engine, lt = _writeback_engine(td, enabled=False)
+        try:
+            messages = _long_messages()
+            before = len(messages)
+            engine._prepare_llm_messages(messages)
+            assert len(messages) == before       # default off: history unchanged
+        finally:
+            lt.close()
+
+
+def _adaptive_engine(td):
+    from conftest import make_settings
+    from leapflow.platform.mock import MockBridge
+    settings = make_settings(td)
+    rpc = MockBridge()
+    llm = StubLLM(["x"])
+    wm = WorkingMemoryProvider(max_tokens=1024)
+    lt = SemanticMemoryProvider(source=settings.duckdb_path)
+    imm = EpisodicMemoryProvider()
+    reg = build_default_registry(rpc, llm, wm, lt)
+    engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, _FixedClassifier("complex"))
+    return engine, lt, settings
+
+
+def test_progress_gated_budget_extension_decision() -> None:
+    """P0: extend the budget only when productively unfinished (open ledger work,
+    not stalled, within resources); stop when stalled or the ledger is complete.
+    """
+    from leapflow.engine.agent_loop import AgentLoopFrame
+
+    with tempfile.TemporaryDirectory() as td:
+        engine, lt, settings = _adaptive_engine(td)
+        try:
+            frame = AgentLoopFrame(user_text="x")
+            # Open question + not stalled + resources ok -> extend.
+            engine._research_ledger.note("open_question", "How does X cache?")
+            frame.stalled_rounds = 0
+            assert engine._should_extend_budget(frame) is True
+            # Stalled beyond threshold -> stop (let it converge).
+            frame.stalled_rounds = settings.agent_stall_rounds
+            assert engine._should_extend_budget(frame) is False
+            # Ledger reports completion (0 open questions) -> stop.
+            frame.stalled_rounds = 0
+            engine._research_ledger.note("resolved", "How does X cache")
+            assert engine._research_ledger.open_question_count == 0
+            assert engine._should_extend_budget(frame) is False
+        finally:
+            lt.close()
+
+
+def test_update_progress_and_stall_tracks_progress() -> None:
+    """P0: stall counter increments when the progress marker is unchanged and
+    resets when new evidence/ledger progress appears."""
+    from leapflow.engine.agent_loop import AgentLoopFrame
+
+    with tempfile.TemporaryDirectory() as td:
+        engine, lt, _ = _adaptive_engine(td)
+        try:
+            frame = AgentLoopFrame(user_text="x")
+            engine._last_context_snapshot = {"context_governance": {"evidence_count": 1, "sources_seen": 1}}
+            engine._update_progress_and_stall(frame)     # first marker recorded
+            assert frame.stalled_rounds == 0
+            engine._update_progress_and_stall(frame)     # unchanged -> stall++
+            assert frame.stalled_rounds == 1
+            engine._update_progress_and_stall(frame)
+            assert frame.stalled_rounds == 2
+            # New evidence surfaces -> progress -> reset.
+            engine._last_context_snapshot = {"context_governance": {"evidence_count": 9, "sources_seen": 3}}
+            engine._update_progress_and_stall(frame)
+            assert frame.stalled_rounds == 0
+        finally:
+            lt.close()
+
+
+def test_stagnation_guard_ignores_injected_context() -> None:
+    """Guardrail fix: StagnationGuard counts only genuine tool results, not
+    injected user context (ledger/live signals/memory), so a context-heavy long
+    task with successful tools is not falsely flagged as stagnating."""
+    from leapflow.engine.tool_guardrails import StagnationGuard
+
+    guard = StagnationGuard(window=5, min_success_rate=0.5)
+    history: list = []
+    for i in range(5):
+        history.append({"role": "tool", "content": '{"ok": true, "n": %d}' % i})
+        history.append({"role": "user", "content": "MEMORY_CONTEXT: prior experience ..."})
+        history.append({"role": "user", "content": "## Research Ledger (task state) ..."})
+
+    assert guard.check(history).violated is False   # noise excluded; all tools succeeded
+
+
+def test_stagnation_guard_flags_genuine_tool_failures() -> None:
+    from leapflow.engine.tool_guardrails import StagnationGuard
+
+    guard = StagnationGuard(window=5, min_success_rate=0.5)
+    history = [{"role": "tool", "content": '{"ok": false, "error": "boom"}'} for _ in range(6)]
+    assert guard.check(history).violated is True    # genuine failures -> flagged
+
+
+def test_guardrail_halt_suppressed_while_progressing() -> None:
+    """Guardrail is progress-aware: a halt/nudge is suppressed while the task is
+    advancing (stall counter 0) and only escalates once the task is stalled."""
+    from leapflow.engine.agent_loop import AgentLoopFrame
+    from leapflow.engine.tool_guardrails import GuardrailViolation
+
+    class _HaltGuard:
+        def check(self, history):
+            return GuardrailViolation(violated=True, reason="loop", severity="halt", suggestion="stop")
+
+        def reset(self):
+            pass
+
+    with tempfile.TemporaryDirectory() as td:
+        engine, lt, _ = _adaptive_engine(td)
+        try:
+            engine._guardrail = _HaltGuard()
+            frame = AgentLoopFrame(user_text="x")
+            engine._active_frame = frame
+            msgs = [{"role": "user", "content": "x"}]
+
+            frame.stalled_rounds = 0
+            assert engine._check_guardrail(msgs) is None      # progressing -> halt suppressed
+            frame.stalled_rounds = 2
+            assert engine._check_guardrail(msgs) == "halt"     # stalled -> halt fires
+        finally:
+            lt.close()
+
+
+def _with_coordinator(engine):
+    from leapflow.engine.recovery_budget import RecoveryBudget
+    from leapflow.engine.recovery_coordinator import RecoveryCoordinator
+    from leapflow.engine.recovery_strategies import default_strategies
+    engine._recovery_coordinator = RecoveryCoordinator(
+        strategies=default_strategies(), budget=RecoveryBudget(total_recovery_actions=12),
+    )
+    return engine._recovery_coordinator
+
+
+def test_recoverable_tool_failures_feed_back_never_break() -> None:
+    """TF: many consecutive recoverable tool failures are fed back for autonomous
+    diagnosis (no halt) — no blanket count-based break."""
+    with tempfile.TemporaryDirectory() as td:
+        engine, lt, _ = _adaptive_engine(td)
+        try:
+            _with_coordinator(engine)
+            failed = [("shell_run", {"ok": False, "error": "boom", "retryable": True})] * 10
+            assert engine._evaluate_tool_failures(failed, turn_id=1) is None   # never halts
+        finally:
+            lt.close()
+
+
+def test_recoverable_tool_failures_do_not_spend_recovery_budget() -> None:
+    """TF: tool failures are agent-level observations, not infrastructure recovery,
+    so feeding them back must not deplete the shared system recovery budget."""
+    with tempfile.TemporaryDirectory() as td:
+        engine, lt, _ = _adaptive_engine(td)
+        try:
+            coord = _with_coordinator(engine)
+            before = coord.budget.remaining()
+            engine._evaluate_tool_failures(
+                [("shell_run", {"ok": False, "error": "x", "retryable": True})] * 8, turn_id=1,
+            )
+            assert coord.budget.remaining() == before   # zero-cost feedback
+        finally:
+            lt.close()
+
+
+def test_non_recoverable_tool_failure_halts_via_coordinator() -> None:
+    """TF: only a genuinely non-recoverable failure (e.g. permission denied) halts
+    the turn — routed through the single recovery decision point."""
+    with tempfile.TemporaryDirectory() as td:
+        engine, lt, _ = _adaptive_engine(td)
+        try:
+            _with_coordinator(engine)
+            perm = [("gateway_send", {
+                "ok": False,
+                "failure_class": "authorization",
+                "error": "permission denied",
+                "execution_policy": "external_side_effect",
+            })]
+            reason = engine._evaluate_tool_failures(perm, turn_id=1)
+            assert reason is not None and reason != ""
+        finally:
+            lt.close()
+
+
+def test_turn_recovery_rearm_after_progress_content_only() -> None:
+    """P1-A: progress re-arms content-level one-shots (so a long task can recover
+    again) but keeps storm-prone infrastructure one-shots strict for the turn."""
+    from leapflow.engine.turn_recovery import TurnRecoveryState
+
+    rec = TurnRecoveryState()
+    assert rec.try_length_continuation() is True    # content one-shot fires
+    assert rec.try_length_continuation() is False   # exhausted within the streak
+    assert rec.try_provider_failover() is True      # infra one-shot fires
+
+    assert rec.rearm_after_progress() is True        # progress re-arms content guards
+    assert rec.try_length_continuation() is True     # available again
+    assert rec.try_compress() is True                # content guard re-armed too
+    assert rec.try_provider_failover() is False      # infra stays strict
+
+    # No-op (returns False) when no content guard had been used.
+    assert TurnRecoveryState().rearm_after_progress() is False
+
+
+def test_should_stop_after_tool_result_is_policy_driven() -> None:
+    """P1-B: the side-effect batch-stop gate is driven by the declared
+    execution_policy, not a hardcoded tool-name list."""
+    from leapflow.engine.engine import _should_stop_after_tool_result
+
+    # Any mutating/side-effect policy failure stops the batch…
+    assert _should_stop_after_tool_result("any_tool", {"ok": False, "execution_policy": "external_side_effect"}) is True
+    assert _should_stop_after_tool_result("any_tool", {"ok": False, "execution_policy": "mutating_once"}) is True
+    # …while a read-only failure does not — even for a tool that used to be in the
+    # hardcoded side-effect name list (proves it is now policy-driven).
+    assert _should_stop_after_tool_result("shell_run", {"ok": False, "execution_policy": "read_only"}) is False
+    # A non-failure never stops the batch.
+    assert _should_stop_after_tool_result("gateway_send", {"ok": True}) is False
 
 
 @pytest.mark.asyncio
@@ -619,52 +1309,6 @@ async def test_unknown_tool_in_stream_triggers_structured_retry() -> None:
             assert tool_events[1].metadata["ok"] is False
             assert tool_events[1].metadata["error_type"] == "unknown_tool"
             assert "resolved_from" not in tool_events[1].metadata
-        finally:
-            lt.close()
-
-
-@pytest.mark.asyncio
-async def test_dag_execution_end_to_end() -> None:
-    """DAG planner/scheduler: direct invocation produces graph summary."""
-    with tempfile.TemporaryDirectory() as td:
-        settings = make_settings(td)
-        from leapflow.platform.mock import MockBridge
-
-        rpc = MockBridge()
-        llm = StubLLM([])
-        wm = WorkingMemoryProvider(max_tokens=1024)
-        lt = SemanticMemoryProvider(source=settings.duckdb_path)
-        imm = EpisodicMemoryProvider()
-
-        planned = TaskGraph(goal="organize downloads")
-        planned.add_node(_node("step1", action="file_organizer"))
-        planned.add_node(_node("step2", action="clipboard_manager", depends_on=["step1"]))
-
-        executed = TaskGraph(goal="organize downloads")
-        executed.add_node(_node("step1", action="file_organizer"))
-        executed.add_node(_node("step2", action="clipboard_manager", depends_on=["step1"]))
-        executed.mark_completed("step1", "listed files")
-        executed.mark_completed("step2", "organized")
-
-        mock_planner = AsyncMock(spec=GraphPlanner)
-        mock_planner.plan.return_value = planned
-
-        mock_scheduler = AsyncMock(spec=TaskScheduler)
-        mock_scheduler.execute_graph.return_value = executed
-
-        try:
-            reg = build_default_registry(rpc, llm, wm, lt)
-            classifier = _FixedClassifier("complex")
-            engine = AgentEngine(
-                settings, rpc, llm, wm, lt, imm, reg, classifier,
-                graph_planner=mock_planner,
-                scheduler=mock_scheduler,
-            )
-            # Call _handle_complex_task directly (DAG is internal machinery)
-            out = await engine._handle_complex_task("Organize my downloads folder")
-            assert "organize downloads" in out
-            mock_planner.plan.assert_awaited_once()
-            mock_scheduler.execute_graph.assert_awaited_once()
         finally:
             lt.close()
 

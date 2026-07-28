@@ -8,8 +8,25 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from leapflow.tools.file_operations import file_list, file_read, file_write
-from leapflow.tools.scm_tools import scm_sync
+from leapflow.tools.file_operations import (
+    code_search,
+    edit_file,
+    file_find,
+    file_list,
+    file_read,
+    file_write,
+)
+from leapflow.tools.scm_tools import scm_sync, git_query, git_write
+from leapflow.tools.code_intel import code_intel
+from leapflow.tools.repo_map import repo_map
+from leapflow.tools.dev_tools import test_run, lint_check
+from leapflow.tools.terminal_session import (
+    terminal_open,
+    terminal_send,
+    terminal_read,
+    terminal_close,
+    terminal_list,
+)
 from leapflow.tools.shell_tools import shell_run
 from leapflow.tools.system_tools import env_info, time_get
 from leapflow.tools.text_tools import text_replace, text_search
@@ -37,12 +54,16 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "file_list",
-            "description": "List files and directories at a given path.",
+            "description": (
+                "List files and directories at a given path. Use depth=1 or depth=2 to get a "
+                "recursive tree in one call instead of listing each sub-directory separately."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Directory path (default: current dir)"},
-                    "pattern": {"type": "string", "description": "Glob pattern (default: *)"},
+                    "pattern": {"type": "string", "description": "Glob pattern for flat listing (default: *; ignored when depth > 0)"},
+                    "depth": {"type": "integer", "description": "Recursion depth: 0 = flat one-level listing (default), 1-5 = recursive tree skipping VCS/deps dirs"},
                 },
             },
         },
@@ -91,6 +112,128 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 },
                 "required": ["path", "content"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "code_search",
+            "description": (
+                "Search file CONTENTS by regex across a directory tree (ripgrep-backed). "
+                "Prefer this over shell_run grep: faster, skips VCS/dependency/build dirs, "
+                "and returns structured path:line:column matches. Use file_read for the "
+                "surrounding context of a hit."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regex pattern to search for"},
+                    "path": {"type": "string", "description": "Base directory (default: current dir)"},
+                    "glob": {"type": "string", "description": "Filter files by glob, e.g. *.py"},
+                    "ignore_case": {"type": "boolean", "description": "Case-insensitive match (default: false)"},
+                    "multiline": {"type": "boolean", "description": "Let . span newlines / match across lines (default: false)"},
+                    "max_results": {"type": "integer", "description": "Max matches to return (default: 200)"},
+                    "context_lines": {"type": "integer", "description": "Lines of context before/after each match (default: 0, max 10)"},
+                },
+                "required": ["pattern"],
+            },
+            "x_leapflow": {"category": "file", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "file_find",
+            "description": (
+                "Find files by a recursive glob pattern under a base path (e.g. '**/test_*.py' "
+                "or '*.md'). Prefer this over shell_run find; skips VCS/dependency/build dirs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "glob": {"type": "string", "description": "Glob pattern, recursive (e.g. *.py, **/conftest.py)"},
+                    "path": {"type": "string", "description": "Base directory (default: current dir)"},
+                    "max_results": {"type": "integer", "description": "Max files to return (default: 500)"},
+                },
+                "required": ["glob"],
+            },
+            "x_leapflow": {"category": "file", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": (
+                "Apply targeted, anchored search-replace edits to an EXISTING text file "
+                "(use file_write to create/overwrite). Each edit is {original_text, new_text, "
+                "replace_all?}; original_text must match exactly and uniquely (or set replace_all) "
+                "— a non-unique or missing anchor is rejected so files are never corrupted. Set "
+                "dry_run to preview. Alternatively pass a unified 'diff' to apply its hunks as "
+                "anchored edits. Far cheaper and safer than rewriting a whole file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path to edit"},
+                    "edits": {
+                        "type": "array",
+                        "description": "List of edits, applied in order.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "original_text": {"type": "string", "description": "Exact text to replace (unique unless replace_all)"},
+                                "new_text": {"type": "string", "description": "Replacement text"},
+                                "replace_all": {"type": "boolean", "description": "Replace every occurrence (default: false)"},
+                            },
+                            "required": ["original_text", "new_text"],
+                        },
+                    },
+                    "dry_run": {"type": "boolean", "description": "Preview without writing (default: false)"},
+                    "diff": {"type": "string", "description": "Unified diff to apply (alternative to edits; each hunk applied as an anchored edit)"},
+                },
+                "required": ["path"],
+            },
+            "x_leapflow": {"category": "file", "risk_level": "mutating", "schema_cost": "medium", "requires_approval": True},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "code_intel",
+            "description": (
+                "Precise document symbols (outline) for a source file: classes, functions, and "
+                "methods with line ranges. Python uses an exact AST parse; other languages use a "
+                "keyword-prefix scan. Prefer over file_read mode=symbols for accurate navigation "
+                "before editing. Read-only."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Source file to analyze"},
+                    "operation": {"type": "string", "enum": ["symbols"], "description": "Analysis operation (default: symbols)"},
+                },
+                "required": ["path"],
+            },
+            "x_leapflow": {"category": "file", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "repo_map",
+            "description": (
+                "Compact project orientation for a repository root: languages, detected test/lint "
+                "commands, top-level structure, entry points, manifest, and VCS branch. Call this "
+                "first when entering an unfamiliar codebase. Read-only."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Repository root (default: current dir)"},
+                },
+            },
+            "x_leapflow": {"category": "file", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
         },
     },
     {
@@ -146,6 +289,56 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 "idempotency_scope": "session",
                 "summary": "Typed git status/pull/push with explicit current-branch push semantics.",
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_query",
+            "description": (
+                "Read-only structured git inspection: action=diff|log|status|branch|show. "
+                "Prefer over shell_run for reading repo state — output is clipped, redacted, and "
+                "log/branch are parsed into structured fields. Use scm_sync for pull/push."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["diff", "log", "status", "branch", "show"], "description": "Git read action"},
+                    "cwd": {"type": "string", "description": "Repository working directory (optional)"},
+                    "ref": {"type": "string", "description": "A single git ref (e.g. HEAD~1, a branch/commit); ranges not allowed"},
+                    "path": {"type": "string", "description": "Limit diff/log to this path (optional)"},
+                    "staged": {"type": "boolean", "description": "diff: show staged changes (default: false)"},
+                    "max_count": {"type": "integer", "description": "log: max entries (default 20, max 200)"},
+                    "stat": {"type": "boolean", "description": "log: include --stat (default: false)"},
+                },
+                "required": ["action"],
+            },
+            "x_leapflow": {"category": "scm", "risk_level": "read_only", "schema_cost": "medium", "requires_approval": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_write",
+            "description": (
+                "Mutating git actions: action=commit (message, stage_all), branch (create+switch), "
+                "checkout (switch; create=true for -b). Approval-gated. Use scm_sync for pull/push "
+                "and git_query for reads."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["commit", "branch", "checkout"], "description": "Git write action"},
+                    "cwd": {"type": "string", "description": "Repository working directory (optional)"},
+                    "message": {"type": "string", "description": "commit: commit message (required for commit)"},
+                    "stage_all": {"type": "boolean", "description": "commit: stage all changes first (default: true)"},
+                    "name": {"type": "string", "description": "branch: new branch name"},
+                    "ref": {"type": "string", "description": "checkout: ref/branch to switch to"},
+                    "create": {"type": "boolean", "description": "checkout: create the branch (-b) (default: false)"},
+                },
+                "required": ["action"],
+            },
+            "x_leapflow": {"category": "scm", "risk_level": "high", "schema_cost": "medium", "requires_approval": True, "idempotency_scope": "session"},
         },
     },
     {
@@ -266,6 +459,63 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             },
         },
     },
+    # ── Research ledger (durable long-task state; mechanism 5) ──
+    {
+        "type": "function",
+        "function": {
+            "name": "research_note",
+            "description": (
+                "Record a compact, structured note about the current task's state so it "
+                "survives context compression on long / multi-step tasks. Use for durable "
+                "findings, open questions still to resolve, decisions / excluded paths, and "
+                "the immediate next step. One concise sentence per note."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["finding", "open_question", "resolved", "decision", "next_step"],
+                        "description": "finding | open_question | resolved (closes a matching open question) | decision | next_step",
+                    },
+                    "text": {"type": "string", "description": "One concise sentence."},
+                },
+                "required": ["kind", "text"],
+            },
+        },
+        "x_leapflow": {"category": "memory", "risk_level": "read_only", "requires_approval": False, "schema_cost": "medium"},
+    },
+    # ── Event-driven re-entry (S2) ──
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_reentry",
+            "description": (
+                "Register a re-entry so this task can resume later from its current "
+                "orientation (findings / open questions / next step). Use when work must "
+                "pause and continue after a delay (kind=time) or when a matching platform "
+                "event arrives (kind=event), instead of finishing now. The research-ledger "
+                "state is carried over automatically."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["time", "event"],
+                        "description": "time = resume after delay_seconds; event = resume when a matching platform event arrives",
+                    },
+                    "reason": {"type": "string", "description": "One concise sentence: what to continue and why (carried into the resumed turn)."},
+                    "delay_seconds": {"type": "number", "description": "kind=time: seconds from now to resume."},
+                    "event_match": {"type": "object", "description": "kind=event: match filter, e.g. platform / chat / keyword."},
+                    "max_reentries": {"type": "integer", "description": "Max times this may resume (default 1)."},
+                    "deadline_seconds": {"type": "number", "description": "Optional: abandon the re-entry after this many seconds."},
+                },
+                "required": ["kind", "reason"],
+            },
+        },
+        "x_leapflow": {"category": "memory", "risk_level": "read_only", "requires_approval": False, "schema_cost": "medium"},
+    },
     # ── Capability discovery (Tier 1 structural gate) ──
     # Lets the model expand a heavier tool category (hub/gateway/delegate) into
     # full native schemas on demand, instead of the runtime guessing from text
@@ -318,6 +568,124 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "test_run",
+            "description": (
+                "Run the project's test suite and return structured results (framework, passed/"
+                "failed counts, failing tests). Auto-detects the runner (pytest/npm/go/cargo) or "
+                "uses a configured/explicit command; executes via the governed shell. ok=true means "
+                "the runner executed — see 'success' for pass/fail."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Explicit test command (optional; overrides auto-detect)"},
+                    "cwd": {"type": "string", "description": "Working directory (default: current dir)"},
+                    "timeout": {"type": "number", "description": "Timeout seconds (default 120, max 120)"},
+                },
+            },
+            "x_leapflow": {"category": "dev", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lint_check",
+            "description": (
+                "Run the project's linter and return a structured clean/issue result. Auto-detects "
+                "the linter (ruff/eslint/go vet/clippy) or uses a configured/explicit command; "
+                "executes via the governed shell. ok=true means the linter ran — see 'clean'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Explicit lint command (optional; overrides auto-detect)"},
+                    "cwd": {"type": "string", "description": "Working directory (default: current dir)"},
+                    "timeout": {"type": "number", "description": "Timeout seconds (default 120, max 120)"},
+                },
+            },
+            "x_leapflow": {"category": "dev", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "terminal_open",
+            "description": (
+                "Open a PERSISTENT shell session (REPL/dev server/watch), returning a session_id "
+                "for terminal_send/read/close. Disabled unless tools.terminal_session_enabled is "
+                "set. For one-shot commands use shell_run instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Optional initial command to run in the session"},
+                    "cwd": {"type": "string", "description": "Working directory (default: current dir)"},
+                    "shell": {"type": "string", "description": "Shell to launch (default: $SHELL or /bin/bash)"},
+                },
+            },
+            "x_leapflow": {"category": "terminal", "risk_level": "high", "schema_cost": "medium", "requires_approval": True, "effect_scope": "external"},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "terminal_send",
+            "description": "Send a line of input to a persistent terminal session and return output captured shortly after.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Session id from terminal_open"},
+                    "input": {"type": "string", "description": "Line of input to send"},
+                    "wait": {"type": "number", "description": "Seconds to wait for output before reading (default 0.3, max 10)"},
+                },
+                "required": ["session_id"],
+            },
+            "x_leapflow": {"category": "terminal", "risk_level": "high", "schema_cost": "low", "requires_approval": True, "effect_scope": "external"},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "terminal_read",
+            "description": "Drain buffered output from a persistent terminal session (optionally waiting briefly first).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Session id from terminal_open"},
+                    "wait": {"type": "number", "description": "Seconds to wait before draining (default 0, max 10)"},
+                },
+                "required": ["session_id"],
+            },
+            "x_leapflow": {"category": "terminal", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "terminal_close",
+            "description": "Terminate a persistent terminal session and release its process group.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Session id from terminal_open"},
+                },
+                "required": ["session_id"],
+            },
+            "x_leapflow": {"category": "terminal", "risk_level": "medium", "schema_cost": "low", "requires_approval": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "terminal_list",
+            "description": "List active persistent terminal sessions.",
+            "parameters": {"type": "object", "properties": {}},
+            "x_leapflow": {"category": "terminal", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+        },
+    },
 ] + HUB_TOOL_DEFINITIONS + GATEWAY_TOOL_DEFINITIONS
 
 
@@ -330,10 +698,14 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
 _BRIDGE_TOOLS = [
     {
         "name": "gp_file_list",
-        "description": "List files and directories at a given path.",
+        "description": (
+            "List files and directories at a given path. Use depth=1 or depth=2 to get a "
+            "recursive tree in one call instead of listing each sub-directory separately."
+        ),
         "parameters": {
             "path": "string (optional) — directory path to list (default: .)",
-            "pattern": "string (optional) — glob pattern to filter (default: *)",
+            "pattern": "string (optional) — glob pattern for flat listing (default: *; ignored when depth > 0)",
+            "depth": "integer (optional) — recursion depth: 0 = flat (default), 1-5 = recursive tree skipping VCS/deps",
         },
         "handler": file_list,
     },
@@ -364,6 +736,59 @@ _BRIDGE_TOOLS = [
         "mutates_state": True,
     },
     {
+        "name": "gp_code_search",
+        "description": "Search file contents by regex across a directory tree (ripgrep-backed, structured results).",
+        "parameters": {
+            "pattern": "string (required) — regex pattern",
+            "path": "string (optional) — base directory (default: .)",
+            "glob": "string (optional) — filter files by glob, e.g. *.py",
+            "ignore_case": "boolean (optional) — case-insensitive (default: false)",
+            "multiline": "boolean (optional) — match across lines (default: false)",
+            "max_results": "integer (optional) — max matches (default: 200)",
+            "context_lines": "integer (optional) — context lines around each match (default 0, max 10)",
+        },
+        "handler": code_search,
+    },
+    {
+        "name": "gp_file_find",
+        "description": "Find files by recursive glob under a base path.",
+        "parameters": {
+            "glob": "string (required) — recursive glob, e.g. **/test_*.py",
+            "path": "string (optional) — base directory (default: .)",
+            "max_results": "integer (optional) — max files (default: 500)",
+        },
+        "handler": file_find,
+    },
+    {
+        "name": "gp_edit_file",
+        "description": "Apply anchored search-replace edits (or a unified diff) to an existing text file (dry_run supported).",
+        "parameters": {
+            "path": "string (required) — file path to edit",
+            "edits": "array (optional) — list of {original_text, new_text, replace_all?}",
+            "diff": "string (optional) — unified diff to apply (alternative to edits)",
+            "dry_run": "boolean (optional) — preview without writing (default: false)",
+        },
+        "handler": edit_file,
+        "mutates_state": True,
+    },
+    {
+        "name": "gp_code_intel",
+        "description": "Precise document symbols (classes/functions/methods with line ranges); Python via AST.",
+        "parameters": {
+            "path": "string (required) — source file to analyze",
+            "operation": "string (optional) — 'symbols' (default)",
+        },
+        "handler": code_intel,
+    },
+    {
+        "name": "gp_repo_map",
+        "description": "Compact project orientation (languages, test/lint commands, structure, entry points, VCS).",
+        "parameters": {
+            "path": "string (optional) — repository root (default: .)",
+        },
+        "handler": repo_map,
+    },
+    {
         "name": "gp_shell_run",
         "description": "Execute a shell command with timeout protection.",
         "parameters": {
@@ -386,6 +811,35 @@ _BRIDGE_TOOLS = [
             "timeout": "number (optional) — timeout in seconds (default/max 120)",
         },
         "handler": scm_sync,
+        "mutates_state": True,
+    },
+    {
+        "name": "gp_git_query",
+        "description": "Read-only structured git inspection (diff/log/status/branch/show).",
+        "parameters": {
+            "action": "string (required) — diff|log|status|branch|show",
+            "cwd": "string (optional) — repository working directory",
+            "ref": "string (optional) — single git ref (no ranges)",
+            "path": "string (optional) — limit diff/log to this path",
+            "staged": "boolean (optional) — diff staged changes",
+            "max_count": "integer (optional) — log max entries (default 20)",
+            "stat": "boolean (optional) — log include --stat",
+        },
+        "handler": git_query,
+    },
+    {
+        "name": "gp_git_write",
+        "description": "Mutating git: commit/branch/checkout (approval-gated).",
+        "parameters": {
+            "action": "string (required) — commit|branch|checkout",
+            "cwd": "string (optional) — repository working directory",
+            "message": "string — commit message (required for commit)",
+            "stage_all": "boolean (optional) — commit: stage all first (default true)",
+            "name": "string — branch: new branch name",
+            "ref": "string — checkout: ref to switch to",
+            "create": "boolean (optional) — checkout: create branch (-b)",
+        },
+        "handler": git_write,
         "mutates_state": True,
     },
     {
@@ -438,6 +892,72 @@ _BRIDGE_TOOLS = [
         },
         "handler": skill_view,
     },
+    {
+        "name": "gp_test_run",
+        "description": "Run the project's test suite; structured pass/fail (auto-detect or explicit command).",
+        "parameters": {
+            "command": "string (optional) — explicit test command (overrides auto-detect)",
+            "cwd": "string (optional) — working directory",
+            "timeout": "number (optional) — timeout seconds (default 120)",
+        },
+        "handler": test_run,
+    },
+    {
+        "name": "gp_lint_check",
+        "description": "Run the project's linter; structured clean/issue result (auto-detect or explicit command).",
+        "parameters": {
+            "command": "string (optional) — explicit lint command (overrides auto-detect)",
+            "cwd": "string (optional) — working directory",
+            "timeout": "number (optional) — timeout seconds (default 120)",
+        },
+        "handler": lint_check,
+    },
+    {
+        "name": "gp_terminal_open",
+        "description": "Open a persistent shell session (disabled unless tools.terminal_session_enabled).",
+        "parameters": {
+            "command": "string (optional) — initial command",
+            "cwd": "string (optional) — working directory",
+            "shell": "string (optional) — shell to launch",
+        },
+        "handler": terminal_open,
+        "mutates_state": True,
+    },
+    {
+        "name": "gp_terminal_send",
+        "description": "Send input to a persistent terminal session and return output.",
+        "parameters": {
+            "session_id": "string (required) — session id from terminal_open",
+            "input": "string (optional) — line of input",
+            "wait": "number (optional) — seconds to wait for output (default 0.3)",
+        },
+        "handler": terminal_send,
+        "mutates_state": True,
+    },
+    {
+        "name": "gp_terminal_read",
+        "description": "Drain buffered output from a persistent terminal session.",
+        "parameters": {
+            "session_id": "string (required) — session id from terminal_open",
+            "wait": "number (optional) — seconds to wait before draining (default 0)",
+        },
+        "handler": terminal_read,
+    },
+    {
+        "name": "gp_terminal_close",
+        "description": "Terminate a persistent terminal session.",
+        "parameters": {
+            "session_id": "string (required) — session id from terminal_open",
+        },
+        "handler": terminal_close,
+        "mutates_state": True,
+    },
+    {
+        "name": "gp_terminal_list",
+        "description": "List active persistent terminal sessions.",
+        "parameters": {},
+        "handler": terminal_list,
+    },
 ] + HUB_BRIDGE_TOOLS + GATEWAY_BRIDGE_TOOLS
 
 
@@ -476,11 +996,31 @@ def set_memory_manager(manager: Any) -> None:
     _memory_manager_ref = manager
 
 
+def _active_workspace_root() -> str:
+    """Return the current turn's workspace root from the tool execution context.
+
+    Memory tools run inside ``Engine._execute_tool_scoped``, which installs the
+    per-turn :class:`ToolExecutionContext`. Reading it here scopes memory reads
+    and tags writes to the active workspace without threading the value through
+    every tool signature (concurrency-safe: it is a ContextVar, not shared
+    mutable state).
+    """
+    try:
+        from leapflow.tools.execution_context import current_tool_context
+
+        ctx = current_tool_context()
+    except Exception:
+        return ""
+    return str(getattr(ctx, "workspace_root", "") or "")
+
+
 async def _memory_search_handler(params: Dict[str, Any]) -> Dict[str, Any]:
     if _memory_manager_ref is None:
         return {"ok": False, "error": "Memory system not initialized"}
     try:
-        result = await _memory_manager_ref.handle_tool_call("memory_search", params)
+        result = await _memory_manager_ref.handle_tool_call(
+            "memory_search", params, workspace_root=_active_workspace_root()
+        )
         return {"ok": True, "result": result}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -501,7 +1041,9 @@ async def _memory_add_handler(params: Dict[str, Any]) -> Dict[str, Any]:
         except ImportError:
             pass
     try:
-        result = await _memory_manager_ref.handle_tool_call("memory_add", params)
+        result = await _memory_manager_ref.handle_tool_call(
+            "memory_add", params, workspace_root=_active_workspace_root()
+        )
         return {"ok": True, "result": result}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -511,6 +1053,71 @@ TOOL_HANDLERS["memory_search"] = _memory_search_handler
 TOOL_HANDLERS["memory_add"] = _memory_add_handler
 TOOL_HANDLERS["gp_memory_search"] = _memory_search_handler
 TOOL_HANDLERS["gp_memory_add"] = _memory_add_handler
+
+
+# ────────────────────────────────────────────────────
+# Research-ledger tool late-binding: delegates to the engine's per-task
+# ResearchLedger when installed; fails gracefully when not.
+# ────────────────────────────────────────────────────
+
+_research_ledger_ref: Any = None
+
+
+def set_research_ledger(ledger: Any) -> None:
+    """Install the active ResearchLedger for research_note dispatch."""
+    global _research_ledger_ref
+    _research_ledger_ref = ledger
+
+
+async def _research_note_handler(params: Dict[str, Any]) -> Dict[str, Any]:
+    if _research_ledger_ref is None:
+        return {"ok": False, "error": "Research ledger not initialized"}
+    ok = _research_ledger_ref.note(params.get("kind", ""), params.get("text", ""))
+    if not ok:
+        return {
+            "ok": False,
+            "error": "invalid note: kind must be one of finding|open_question|resolved|decision|next_step and text must be non-empty",
+        }
+    return {"ok": True, "open_questions": _research_ledger_ref.open_question_count}
+
+
+TOOL_HANDLERS["research_note"] = _research_note_handler
+TOOL_HANDLERS["gp_research_note"] = _research_note_handler
+
+
+# ────────────────────────────────────────────────────
+# Re-entry scheduling (S2) late-binding: delegates to the engine's
+# _schedule_reentry when installed; gated by config + persisted engine-side.
+# ────────────────────────────────────────────────────
+
+_reentry_scheduler_ref: Any = None
+
+
+def set_reentry_scheduler(scheduler: Any) -> None:
+    """Install the engine's re-entry scheduler callable for schedule_reentry."""
+    global _reentry_scheduler_ref
+    _reentry_scheduler_ref = scheduler
+
+
+async def _schedule_reentry_handler(params: Dict[str, Any]) -> Dict[str, Any]:
+    if _reentry_scheduler_ref is None:
+        return {"ok": False, "error": "Re-entry scheduling not initialized"}
+    try:
+        result = _reentry_scheduler_ref(
+            kind=str(params.get("kind", "time")),
+            reason=str(params.get("reason", "")),
+            delay_seconds=params.get("delay_seconds", 0.0),
+            event_match=params.get("event_match") or {},
+            max_reentries=params.get("max_reentries", 1),
+            deadline_seconds=params.get("deadline_seconds", 0.0),
+        )
+        return result if isinstance(result, dict) else {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+TOOL_HANDLERS["schedule_reentry"] = _schedule_reentry_handler
+TOOL_HANDLERS["gp_schedule_reentry"] = _schedule_reentry_handler
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -530,10 +1137,11 @@ async def _delegate_task_handler(params: Dict[str, Any]) -> Dict[str, Any]:
     if _subagent_manager_ref is None:
         return {"ok": False, "error": "Subagent system not configured"}
     try:
-        from leapflow.engine.subagent import SubagentConfig
+        from leapflow.engine.subagent import SubagentConfig, current_subagent_depth
         config = SubagentConfig(
             goal=params.get("goal", ""),
             context=params.get("context", ""),
+            depth=current_subagent_depth() + 1,
         )
         result = await _subagent_manager_ref.delegate(config)
         return {"ok": result.status == "completed", "summary": result.summary, "status": result.status}
