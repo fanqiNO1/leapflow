@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import ClassVar, Dict
+from typing import Dict
 
 
 _UNIT_MAP: Dict[str, float] = {
@@ -57,8 +57,6 @@ class IntervalTrigger:
     Accepts human-readable specs like "30m", "2h", "1d", "every 5m".
     """
 
-    trigger_type: ClassVar[str] = "interval"
-
     def __init__(self, interval_seconds: float, *, next_due_at: float = 0.0) -> None:
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
@@ -70,7 +68,7 @@ class IntervalTrigger:
     # ------------------------------------------------------------------
 
     @property
-    def trigger_type(self) -> str:  # type: ignore[override]
+    def trigger_type(self) -> str:
         return "interval"
 
     def is_due(self, now: float) -> bool:

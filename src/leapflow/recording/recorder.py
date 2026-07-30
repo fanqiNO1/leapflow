@@ -9,7 +9,6 @@ State machine: IDLE → RECORDING ⇄ PAUSED → IDLE
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -629,7 +628,6 @@ class DemonstrationRecorder:
         or state.focused_app (fallback).
         Returns the number of steps marked.
         """
-        from fnmatch import fnmatch
 
         if not self._trajectory:
             return 0

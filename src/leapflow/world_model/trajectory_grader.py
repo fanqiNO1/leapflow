@@ -111,7 +111,7 @@ class TrajectoryGrader:
         goal: str,
     ) -> List[ActionGrade]:
         """Single LLM call: teacher grades with full hindsight."""
-        labels_str = ", ".join(f'"{l}"' for l in self._grade_labels)
+        labels_str = ", ".join(f'"{label}"' for label in self._grade_labels)
         prompt = _GRADE_PROMPT.format(
             goal=goal or "(not specified)",
             trajectory_text=trajectory_text,

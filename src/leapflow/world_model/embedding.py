@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import math
 from collections import Counter
-from typing import Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 

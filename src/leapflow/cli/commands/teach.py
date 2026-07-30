@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 from leapflow.cli.helpers import (
     blink_recording,
@@ -17,6 +17,7 @@ from leapflow.cli.helpers import (
 
 if TYPE_CHECKING:
     from leapflow.cli.context import Context
+    from leapflow.recording.health import RecordingHealthMonitor
 
 
 _VALID_LEVELS = frozenset({"full", "structural", "opaque", "deny"})

@@ -17,7 +17,6 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checka
 from leapflow.perception.types import (
     MacroAnalysisResult,
     VideoAction,
-    VideoSegment,
 )
 from leapflow.perception.video.prompts import (
     AnalysisPromptStrategy,

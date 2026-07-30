@@ -7,10 +7,9 @@ enabling cross-session reuse for recurring visual patterns.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from leapflow.perception.types import VisualAction

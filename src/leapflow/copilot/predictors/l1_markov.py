@@ -14,7 +14,7 @@ the transition matrix for checkpoint/restore cycles.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 from leapflow.copilot.types import (
     ContextState,

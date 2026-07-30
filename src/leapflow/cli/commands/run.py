@@ -8,7 +8,7 @@ import sys
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from leapflow.cli.helpers import require_initialized
-from leapflow.engine.situational_assessor import Assessment, AssessmentVerdict
+from leapflow.engine.situational_assessor import AssessmentVerdict
 
 if TYPE_CHECKING:
     from leapflow.cli.context import Context

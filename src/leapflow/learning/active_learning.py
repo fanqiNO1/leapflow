@@ -18,8 +18,10 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Set
 
 if TYPE_CHECKING:
     from leapflow.analysis.consensus import MultiTrajectoryDistiller
+    from leapflow.learning.document import ProvenanceEntry, SkillDocument
     from leapflow.skills.activator import SkillActivator
     from leapflow.learning.doc_generator import SkillDocGenerator
+    from leapflow.storage.bundle_writer import BundleFiles
     from leapflow.storage.skill_docs import SkillDocStore
     from leapflow.world_model.curiosity import CuriosityScore
     from leapflow.world_model.prediction import PredictionOutcome

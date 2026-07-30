@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from leapflow.platform.cua_client import CuaDriverClient
 
 from leapflow.domain.platform import (
     Capability,
@@ -134,7 +137,6 @@ def _manifest_from_cua_tools(rpc: "CuaDriverClient") -> PlatformManifest:
     """Build a PlatformManifest from CuaDriverClient's discovered tools."""
     import platform as _platform
 
-    from leapflow.platform.cua_client import CuaDriverClient
 
     session = rpc._session  # noqa: SLF001
     tools = session.available_tools

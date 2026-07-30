@@ -9,11 +9,11 @@ from collections import deque
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
-
 from leapflow.domain.events import SystemEvent, UINode
 from leapflow.domain.platform import Capability, PlatformManifest
 from leapflow.platform.protocol import HostRpc, Methods
+
+logger = logging.getLogger(__name__)
 
 
 class DarwinPerceptionAdapter:

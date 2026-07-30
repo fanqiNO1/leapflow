@@ -142,7 +142,7 @@ class PredictionLoop:
             self._store.store(
                 action_description=action_desc,
                 app_context="",
-                predicted_effect=f"execute successfully",
+                predicted_effect="execute successfully",
                 actual_effect=f"FAILED: {error}",
                 delta=1.0,
                 advantage=self._failure_advantage,

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
-from typing import ClassVar, Optional
+from typing import Optional
 
 try:
     from croniter import croniter as _croniter  # type: ignore[import-untyped]
@@ -26,8 +26,6 @@ class CronTrigger:
     only simple "HH:MM" daily schedules are supported.
     """
 
-    trigger_type: ClassVar[str] = "cron"
-
     def __init__(self, expression: str, *, next_due_at: float = 0.0) -> None:
         self._expression = expression.strip()
         self._next_due_at = next_due_at
@@ -41,7 +39,7 @@ class CronTrigger:
     # ------------------------------------------------------------------
 
     @property
-    def trigger_type(self) -> str:  # type: ignore[override]
+    def trigger_type(self) -> str:
         return "cron"
 
     def is_due(self, now: float) -> bool:

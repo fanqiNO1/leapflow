@@ -18,7 +18,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
-import duckdb
 
 from leapflow.domain.skill_types import (
     AnchorCandidate,

@@ -12,9 +12,9 @@ import operator
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from leapflow.domain.platform import PlatformManifest, capability_from_str
+from leapflow.domain.platform import capability_from_str
 from leapflow.platform.capabilities import EnvironmentProbe
 from leapflow.platform.protocol import HostRpc
 from leapflow.skills.registry import Skill, SkillResult

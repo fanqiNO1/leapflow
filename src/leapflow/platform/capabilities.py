@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from leapflow.domain.platform import Capability, PlatformManifest, capability_from_str
 from leapflow.platform.protocol import HostRpc, Methods

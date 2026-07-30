@@ -26,12 +26,9 @@ from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 from leapflow.domain.events import UINode
 from leapflow.skills.ui_selector import (
-    UISelector,
-    find_in_tree,
-    parse_selector,
     resolve_selector_string,
 )
-from leapflow.skills.ui_summarizer import UIElement, UITreeSummarizer, summarize_tree
+from leapflow.skills.ui_summarizer import UIElement, UITreeSummarizer
 
 logger = logging.getLogger(__name__)
 

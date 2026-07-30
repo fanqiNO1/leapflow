@@ -8,7 +8,7 @@ from leapflow.engine import StreamEvent
 from leapflow.memory.protocol import MemoryEntry
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    pass
 
 logger = logging.getLogger(__name__)
 

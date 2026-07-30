@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 
 from leapflow.gateway.connectors.cli_discovery import CliDiscovery
 from leapflow.gateway.connectors.protocol import (
+    ActionFailure,
     ActionPreview,
     ActionResult,
     ActionSpec,

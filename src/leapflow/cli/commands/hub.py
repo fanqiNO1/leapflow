@@ -7,7 +7,6 @@ through configured Hub backends (ModelScope, HuggingFace, local, etc.).
 from __future__ import annotations
 
 import logging
-import sys
 from typing import TYPE_CHECKING, List
 
 logger = logging.getLogger(__name__)
@@ -233,7 +232,7 @@ async def _hub_push(ctx: "Context", args: List[str]) -> int:
     client = _build_hub_client(ctx)
     repo_id = client._build_repo_id(bundle.manifest.name)
 
-    print(f"\n  Push Summary:")
+    print("\n  Push Summary:")
     print(f"    Skill:      {bundle.manifest.name}")
     print(f"    Version:    {bundle.manifest.version}")
     print(f"    Visibility: {visibility.value}")
@@ -286,7 +285,7 @@ async def _hub_push(ctx: "Context", args: List[str]) -> int:
             print("  Push aborted.")
             return 0
 
-    print(f"\n  Pushed successfully!")
+    print("\n  Pushed successfully!")
     print(f"    Repo: {result.repo_id}")
     print(f"    Version: {result.version}")
     print(f"    URL: {result.url}")
@@ -343,7 +342,7 @@ async def _hub_pull(ctx: "Context", args: List[str]) -> int:
             return 0
 
     # Step 4: Show summary
-    print(f"\n  Pull Summary:")
+    print("\n  Pull Summary:")
     print(f"    Skill:   {bundle.manifest.name}")
     print(f"    Version: {bundle.manifest.version}")
     print(f"    Source:  {repo_id} ({client.hub_type})")
@@ -458,7 +457,7 @@ async def _hub_sync(ctx: "Context", args: List[str]) -> int:
         return 0
 
     # Display plan
-    print(f"\n  Sync Plan:")
+    print("\n  Sync Plan:")
     if plan.to_push and not pull_only:
         print(f"    Push ({len(plan.to_push)}):")
         for m in plan.to_push:

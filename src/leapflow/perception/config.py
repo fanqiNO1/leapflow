@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Optional, TYPE_CHECKING
+from typing import Dict, FrozenSet, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from leapflow.config import Settings

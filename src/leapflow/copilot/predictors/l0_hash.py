@@ -13,7 +13,7 @@ owns the predictor exclusively.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Protocol, Tuple
 
 from leapflow.copilot.types import (

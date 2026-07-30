@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import fnmatch
 import time
-from typing import ClassVar
 
 
 class EventTrigger:
@@ -14,8 +13,6 @@ class EventTrigger:
     EventBus subscriber or similar mechanism. Pattern matching uses
     fnmatch-style glob patterns (e.g. "ci.passed", "fs.change:*.pdf").
     """
-
-    trigger_type: ClassVar[str] = "event"
 
     def __init__(
         self,
@@ -35,7 +32,7 @@ class EventTrigger:
     # ------------------------------------------------------------------
 
     @property
-    def trigger_type(self) -> str:  # type: ignore[override]
+    def trigger_type(self) -> str:
         return "event"
 
     def is_due(self, now: float) -> bool:

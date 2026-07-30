@@ -11,7 +11,7 @@ UIDetectionBackend protocol.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import List, Optional, Protocol, Tuple, runtime_checkable
 
 
 @dataclass(frozen=True)

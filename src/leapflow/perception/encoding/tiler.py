@@ -9,14 +9,16 @@ from typing import List, Optional, TYPE_CHECKING
 from leapflow.perception.types import ComposedImage, TiledBatch
 
 if TYPE_CHECKING:
-    from leapflow.perception.types import InteractionSignal, PairContext
+    from leapflow.perception.types import PairContext
 
 logger = logging.getLogger(__name__)
 
 _MAX_SIGNALS_PER_PAIR_TILED = 4
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    # ImageFont participates in the availability probe: a partial PIL install
+    # missing it must also count as unavailable.
+    from PIL import Image, ImageDraw, ImageFont  # noqa: F401
 
     _HAS_PIL = True
 except ImportError:

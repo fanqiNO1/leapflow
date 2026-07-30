@@ -7,7 +7,6 @@ from leapflow.gateway.capability_health import CapabilityHealthLedger
 from leapflow.gateway.backends.lark_cli_errors import classify_lark_cli_failure
 from leapflow.gateway.connectors.action_registry import (
     ActionRegistry,
-    ValidationResult,
     normalize_payload,
     summarize_action_result,
     validate_payload,

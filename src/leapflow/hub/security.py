@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, List, Pattern
+from typing import TYPE_CHECKING, ClassVar, List
 
 if TYPE_CHECKING:
     from leapflow.hub.protocol import SkillBundle

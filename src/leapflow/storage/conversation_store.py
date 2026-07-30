@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, Union, ru
 
 if TYPE_CHECKING:
     from leapflow.engine.tool_execution import ToolExecutionRecord
+    from leapflow.storage.connection import ConnectionHolder
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,7 @@ class DuckDBConversationStore:
     """
 
     def __init__(self, source: "Union[ConnectionHolder, Path, str]") -> None:
-        from leapflow.storage.connection import ConnectionHolder, LocalConnectionHolder
+        from leapflow.storage.connection import LocalConnectionHolder
         self._owns_holder = isinstance(source, (str, Path))
         if self._owns_holder:
             source = LocalConnectionHolder(Path(source))

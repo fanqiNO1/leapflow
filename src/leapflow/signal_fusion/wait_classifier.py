@@ -11,7 +11,7 @@ SRP: classifies only — does not modify actions or segments.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import ClassVar, Dict, Optional, Pattern
 
 from leapflow.signal_fusion.types import SilentPeriodClass

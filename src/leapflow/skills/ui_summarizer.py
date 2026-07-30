@@ -14,7 +14,7 @@ Responsibilities:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, List, Optional, Set
+from typing import Any, Dict, FrozenSet, List, Optional
 
 from leapflow.domain.events import UINode
 from leapflow.domain.ui_vocabulary import INTERACTIVE_ROLES, LAYOUT_ROLES, STRUCTURAL_ROLES

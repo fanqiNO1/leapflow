@@ -384,7 +384,7 @@ class SyncEngine:
 
         # Determine repo_id to pull from
         repo_id = action.repo_id or self._client._build_repo_id(action.skill_name)
-        bundle = await self._client.pull(repo_id)
+        await self._client.pull(repo_id)
 
         desc = (
             f"Pulled '{action.skill_name}' v{action.remote_version} ← "

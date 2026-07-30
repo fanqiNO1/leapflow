@@ -232,7 +232,8 @@ class EvolutionMemoryProvider:
             mq = MemoryQuery(keywords=keywords, limit=limit)
             # Synchronous wrapper for the async search
             try:
-                loop = asyncio.get_running_loop()
+                # Probe whether a loop is already running (RuntimeError = not).
+                asyncio.get_running_loop()
                 # If we're inside an event loop, use run_until_complete workaround
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as pool:

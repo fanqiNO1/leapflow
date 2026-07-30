@@ -10,7 +10,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, List
 
 if TYPE_CHECKING:
-    from leapflow.cli.context import Context
+    pass
 
 logger = logging.getLogger(__name__)
 

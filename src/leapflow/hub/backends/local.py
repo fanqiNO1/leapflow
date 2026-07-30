@@ -6,7 +6,6 @@ hub operations without network connectivity.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -76,7 +75,7 @@ class LocalBackend:
 
         parts = PurePosixPath(repo_id).parts
         if not parts:
-            raise ValueError(f"Empty repo_id")
+            raise ValueError("Empty repo_id")
         if any(p == ".." for p in parts):
             raise ValueError(f"Path traversal detected in repo_id: '{repo_id}'")
         if PurePosixPath(repo_id).is_absolute():
