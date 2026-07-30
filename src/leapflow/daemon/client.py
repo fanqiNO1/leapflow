@@ -183,9 +183,16 @@ class DaemonClient:
         result = await self.request("app.command", {"args": args})
         return dict(result or {})
 
-    async def command_execute(self, name: str, args: str = "") -> dict[str, Any]:
-        """Execute any engine-routed slash command via daemon."""
-        result = await self.request("command.execute", {"name": name, "args": args})
+    async def command_execute(self, name: str, args: str = "", session_id: str = "") -> dict[str, Any]:
+        """Execute any engine-routed slash command via daemon.
+
+        ``session_id`` tells the daemon which client session the command belongs
+        to, so session-scoped commands (e.g. ``/board``) observe the caller's
+        conversation instead of whichever session was last active.
+        """
+        result = await self.request(
+            "command.execute", {"name": name, "args": args, "session_id": session_id},
+        )
         return dict(result or {})
 
     async def approval_status(self) -> dict[str, Any]:
@@ -257,9 +264,11 @@ class DaemonClient:
             "watch.findings", {"watch_id": watch_id, "limit": limit, "offset": offset}
         ) or [])
 
-    async def session_history(self, *, limit: int = 200) -> dict[str, Any]:
-        """Return the current conversation transcript and counts."""
-        return dict(await self.request("session.history", {"limit": limit}) or {})
+    async def session_history(self, *, limit: int = 200, session_id: str = "") -> dict[str, Any]:
+        """Return a session's transcript and counts (empty id = current session)."""
+        return dict(await self.request(
+            "session.history", {"limit": limit, "session_id": session_id},
+        ) or {})
 
     async def session_analyze(self) -> dict[str, Any]:
         """Ensure a session-analysis watch and run one analysis cycle now."""

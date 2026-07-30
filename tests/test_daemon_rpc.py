@@ -1332,13 +1332,14 @@ async def test_daemon_client_slash_metadata_rpc() -> None:
                 "context_length": 100,
             }
 
-        async def command_execute(self, name: str, args: str = "") -> dict[str, Any]:
+        async def command_execute(self, name: str, args: str = "", session_id: str = "") -> dict[str, Any]:
             return {
                 "ok": True,
                 "view": name,
                 "model": "test-model",
                 "context_length": 100,
                 "requested_model": args,
+                "seen_session_id": session_id,
             }
 
         async def app_command(self, args: str = "") -> dict[str, Any]:
@@ -1355,7 +1356,7 @@ async def test_daemon_client_slash_metadata_rpc() -> None:
         try:
             tools = await client.tools_list()
             usage = await client.usage_summary()
-            model = await client.command_execute("model", "next-model")
+            model = await client.command_execute("model", "next-model", session_id="tui-1")
             app_payload = await client.app_command("list")
         finally:
             task.cancel()
@@ -1368,6 +1369,9 @@ async def test_daemon_client_slash_metadata_rpc() -> None:
     assert tools["groups"] == {"core": ["chat"]}
     assert usage["total_tokens"] == 15
     assert model["requested_model"] == "next-model"
+    # session_id must reach the daemon: /board binds it to the session watch, so a
+    # silently dropped id makes the board analyze the wrong conversation.
+    assert model["seen_session_id"] == "tui-1"
     assert app_payload["view"] == "list"
     assert app_payload["args"] == "list"
 

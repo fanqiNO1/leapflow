@@ -469,8 +469,10 @@ class RuntimeLeapService:
     async def session_resume(self, session_id: str) -> dict[str, Any]:
         return await self._session_coordinator.resume(self.context, session_id)
 
-    async def session_history(self, limit: int = 200) -> dict[str, Any]:
-        return await self._session_coordinator.get_history(self._ctx, self._settings, limit=limit)
+    async def session_history(self, limit: int = 200, session_id: str = "") -> dict[str, Any]:
+        return await self._session_coordinator.get_history(
+            self._ctx, self._settings, limit=limit, session_id=session_id,
+        )
 
     async def session_analyze(self) -> dict[str, Any]:
         return await self._session_coordinator.analyze(self._monitors, self._ctx, self._settings)
@@ -618,9 +620,9 @@ class RuntimeLeapService:
         from leapflow.cli.commands.slash_handlers import build_app_payload
         return await build_app_payload(self.context, args)
 
-    async def command_execute(self, name: str, args: str = "") -> dict[str, Any]:
+    async def command_execute(self, name: str, args: str = "", session_id: str = "") -> dict[str, Any]:
         from leapflow.cli.commands.slash_handlers import command_execute
-        return await command_execute(self.context, name, args)
+        return await command_execute(self.context, name, args, session_id=session_id)
 
     # ── Delegate: gateway (stubs) ────────────────────────────────────
 

@@ -1294,7 +1294,9 @@ async def cmd_interactive_daemon(
             # Engine-routed commands: dispatch through daemon RPC
             try:
                 payload = await bridge.call(
-                    lambda current_client: current_client.command_execute(canonical, cmd_args),
+                    lambda current_client: current_client.command_execute(
+                        canonical, cmd_args, session_id=active_session_id,
+                    ),
                     description=f"/{canonical}",
                 )
             except Exception as exc:
