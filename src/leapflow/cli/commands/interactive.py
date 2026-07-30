@@ -349,7 +349,6 @@ async def cmd_interactive(ctx: "Context", *, resume_id: Optional[str] = None) ->
         handle_usage,
         handle_model,
         handle_config,
-        handle_clear,
         handle_gateway,
         handle_app,
         render_command_payload,
@@ -666,7 +665,7 @@ async def cmd_interactive(ctx: "Context", *, resume_id: Optional[str] = None) ->
                 return
 
             if canonical == "clear":
-                handle_clear(ctx, console, cmd_args)
+                app.clear_screen()
                 _render_banner()
                 return
 
@@ -1285,6 +1284,7 @@ async def cmd_interactive_daemon(
                     _show_help(console, runtime="daemon")
                     return
                 if canonical == "clear":
+                    app.clear_screen()
                     _render_banner()
                     return
                 # Task control commands are handled by the existing _handle_task_control

@@ -1071,9 +1071,10 @@ async def handle_app(ctx: "Context", console: "LeapConsole", args: str) -> None:
     render_app_payload(console, await build_app_payload(ctx, args))
 
 
-def handle_clear(ctx: "Context", console: "LeapConsole", args: str) -> None:
-    """Clear the terminal screen."""
-    os.system("cls" if os.name == "nt" else "clear")
+# NOTE: screen clearing is owned by ``LeapApp.clear_screen()``. It must go
+# through the prompt_toolkit renderer that owns the TTY — a shell ``clear``
+# leaves the renderer's cursor cache stale and misplaces the next redraw — so
+# there is deliberately no clear handler here.
 
 
 # ══════════════════════════════════════════════════════════════════════

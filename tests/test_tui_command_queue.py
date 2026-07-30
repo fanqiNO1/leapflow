@@ -1541,3 +1541,50 @@ async def test_process_loop_runs_submitted_commands_serially() -> None:
         (2, TuiCommandStatus.DONE),
     ]
     assert status.counts[-1] == (0, 0)
+
+
+# ── /clear screen clearing (renderer-owned) ──────────────────────────
+
+
+def test_clear_screen_goes_through_prompt_toolkit_renderer() -> None:
+    """/clear must clear via the renderer that owns the TTY.
+
+    Regression: the daemon REPL only redrew the banner (no clearing at all),
+    and the in-process REPL shelled out to `clear`, which leaves the
+    prompt_toolkit renderer's cursor cache stale.
+    """
+    app, _console, _status = _make_app()
+    cleared: list[str] = []
+
+    class _Renderer:
+        def clear(self) -> None:
+            cleared.append("renderer.clear")
+
+    app._app = SimpleNamespace(is_running=True, renderer=_Renderer())
+
+    app.clear_screen()
+
+    assert cleared == ["renderer.clear"]
+
+
+def test_clear_screen_is_a_noop_when_app_not_running() -> None:
+    app, _console, _status = _make_app()
+
+    class _Renderer:
+        def clear(self) -> None:  # pragma: no cover - must not be reached
+            raise AssertionError("renderer must not be touched while not running")
+
+    app._app = SimpleNamespace(is_running=False, renderer=_Renderer())
+
+    app.clear_screen()  # must not raise
+
+
+def test_no_shell_clear_bypass_remains_in_slash_handlers() -> None:
+    """No handler may clear the screen behind the renderer's back."""
+    import inspect
+
+    import leapflow.cli.commands.slash_handlers as handlers
+
+    source = inspect.getsource(handlers)
+    assert 'os.system("cls"' not in source
+    assert not hasattr(handlers, "handle_clear")
