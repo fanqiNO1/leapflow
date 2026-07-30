@@ -1416,15 +1416,31 @@ async def test_buffer_insert_compacts_large_chinese_paste_with_ascii_marker() ->
     assert app.submit_text(visible).text == pasted.strip()
 
 
+def _paste_fragments(app: LeapApp, monkeypatch, text: str, *, size: int) -> str:
+    """Feed ``text`` as same-paste fragments under a controlled clock.
+
+    Fragment detection is time-based (``PASTE_FRAGMENT_WINDOW_S`` = 80ms between
+    inserts). Driving it off the real clock makes these tests load-sensitive: a
+    single scheduling stall over the window splits one paste into two, so the
+    compactor restarts and plaintext leaks into the visible buffer. A stepped
+    fake clock states the intent directly — "these fragments belong to one
+    paste" — and keeps the assertion about compaction, not machine speed.
+    """
+    clock = [100.0]
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+    for index in range(0, len(text), size):
+        app._input_area.buffer.insert_text(text[index:index + size])
+        clock[0] += 0.001  # well inside the window: one continuous paste
+    return app._input_area.buffer.text
+
+
 @pytest.mark.asyncio
-async def test_fragmented_chinese_paste_compacts_and_submits_full_text() -> None:
+async def test_fragmented_chinese_paste_compacts_and_submits_full_text(monkeypatch) -> None:
     app, _console, _status = _make_app()
     pasted = "经济活动达到最低点，经济增长理论，索洛增长模型。" * 80
 
-    for index in range(0, len(pasted), 18):
-        app._input_area.buffer.insert_text(pasted[index:index + 18])
+    visible = _paste_fragments(app, monkeypatch, pasted, size=18)
 
-    visible = app._input_area.buffer.text
     assert pasted not in visible
     assert "经济活动" not in visible
     assert visible.startswith("[pasted block #1:")
@@ -1434,14 +1450,12 @@ async def test_fragmented_chinese_paste_compacts_and_submits_full_text() -> None
 
 
 @pytest.mark.asyncio
-async def test_fragmented_english_single_line_paste_compacts() -> None:
+async def test_fragmented_english_single_line_paste_compacts(monkeypatch) -> None:
     app, _console, _status = _make_app()
     pasted = "capital accumulation and productivity growth " * 80
 
-    for index in range(0, len(pasted), 16):
-        app._input_area.buffer.insert_text(pasted[index:index + 16])
+    visible = _paste_fragments(app, monkeypatch, pasted, size=16)
 
-    visible = app._input_area.buffer.text
     assert pasted not in visible
     assert visible.startswith("[pasted block #1:")
     assert visible.isascii()
