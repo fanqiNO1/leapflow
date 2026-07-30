@@ -93,3 +93,118 @@ def test_mask_secret_reveals_only_a_short_suffix() -> None:
     assert _mask_secret("12345678") == "***"
     # Never leaks the full value.
     assert "1234567890" not in _mask_secret("sk-1234567890abc")
+
+
+def test_daemon_log_level_config_chain(monkeypatch, tmp_path) -> None:
+    """daemon.log_level flows through all three layers: Settings default,
+    env override, and the discoverable config catalog (restart-required)."""
+    from conftest import make_settings
+    from leapflow.config import _build_settings_from_env
+    from leapflow.config_service import _build_field_specs
+
+    # Layer 1: Settings default keeps daemon file logs at INFO.
+    settings = make_settings(str(tmp_path))
+    assert settings.daemon_log_level == "INFO"
+
+    # Layer 2: catalog exposes the key with restart-required semantics.
+    specs = _build_field_specs()
+    assert "daemon.log_level" in specs
+    spec = specs["daemon.log_level"]
+    assert spec.setting_name == "daemon_log_level"
+
+    # Layer 3: LEAPFLOW_DAEMON_LOG_LEVEL overrides (the same channel the
+    # config loader uses when flattening daemon.yaml values).
+    monkeypatch.setenv("LEAPFLOW_DATA_DIR", str(tmp_path / "home"))
+    monkeypatch.setenv("LEAPFLOW_DAEMON_LOG_LEVEL", "DEBUG")
+    built = _build_settings_from_env()
+    assert built.daemon_log_level == "DEBUG"
+
+
+def test_logging_setup_is_idempotent_and_redacting(monkeypatch) -> None:
+    """Centralized init: one tagged redacting handler on root, re-init only
+    adjusts the level and never stacks duplicate handlers."""
+    import logging
+
+    from leapflow import logging_setup
+    from leapflow.security.redact import RedactingFormatter
+
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+    original_level = root.level
+    try:
+        for handler in original_handlers:
+            root.removeHandler(handler)
+
+        logging_setup.init_logging("INFO")
+        owned = [h for h in root.handlers if getattr(h, "_leapflow_log_handler", False)]
+        assert len(owned) == 1
+        assert isinstance(owned[0].formatter, RedactingFormatter)
+        assert root.level == logging.INFO
+
+        # Re-init: level changes, handler count does not.
+        logging_setup.init_logging("DEBUG")
+        owned_again = [h for h in root.handlers if getattr(h, "_leapflow_log_handler", False)]
+        assert owned_again == owned
+        assert root.level == logging.DEBUG
+
+        # Unknown level falls back to the surface default, never raises.
+        logging_setup.init_logging("NOT-A-LEVEL")
+        assert root.level == logging.WARNING
+    finally:
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+        for handler in original_handlers:
+            root.addHandler(handler)
+        root.setLevel(original_level)
+
+
+def test_surface_level_policy_cli_quiet_daemon_verbose(tmp_path) -> None:
+    """Level policy lives in one place: CLI/TUI defaults quiet (WARNING),
+    the daemon surface defaults verbose (INFO) for leapd.log evidence."""
+    import logging
+
+    from leapflow import logging_setup
+
+    resolved: list[int] = []
+
+    class _Settings:
+        log_level = ""
+        daemon_log_level = ""
+
+    original = logging_setup.init_logging
+    try:
+        logging_setup.init_logging = lambda level, *, default=logging.WARNING: resolved.append(
+            logging_setup.resolve_level(level, default=default)
+        )
+        logging_setup.init_cli_logging(_Settings())
+        logging_setup.init_daemon_logging(_Settings())
+    finally:
+        logging_setup.init_logging = original
+
+    assert resolved == [logging.WARNING, logging.INFO]
+
+
+def test_daemon_serve_applies_daemon_log_level(monkeypatch, tmp_path) -> None:
+    """`leap daemon serve` must configure logging from daemon.log_level so
+    INFO field evidence lands in leapd.log (previously nothing configured
+    logging in the daemon process and only WARNING+ was emitted)."""
+    import asyncio
+
+    from leapflow.cli.commands import daemon as daemon_module
+
+    applied: list[object] = []
+
+    async def fake_serve(settings, *, mock_host=False):
+        return 0
+
+    monkeypatch.setattr(
+        "leapflow.logging_setup.init_daemon_logging", lambda settings: applied.append(settings)
+    )
+    monkeypatch.setattr("leapflow.daemon.server.serve_daemon", fake_serve)
+
+    class Settings:
+        daemon_log_level = "DEBUG"
+
+    settings = Settings()
+    assert asyncio.run(daemon_module._serve(settings, mock_host=True)) == 0
+    assert applied == [settings]

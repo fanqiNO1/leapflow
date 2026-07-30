@@ -283,6 +283,22 @@ def _unknown_tool_retry_prompt(result: Dict[str, Any]) -> str:
     )
 
 
+# Empty-response hardening: an LLM call that "succeeds" with empty content is a
+# failure signal, never a valid answer. It gets one bounded retry with an
+# explicit nudge; a second empty response produces a transparent degraded
+# message instead of a fake-success filler.
+_EMPTY_RESPONSE_RETRY_PROMPT = (
+    "SYSTEM: Your previous reply was empty. Respond to the user's request now "
+    "with substantive content. If you cannot help, say so explicitly."
+)
+
+_EMPTY_RESPONSE_DEGRADED_MESSAGE = (
+    "The model returned an empty response twice, so no answer was produced for "
+    "this turn. This is usually transient (e.g., provider or runtime warm-up "
+    "right after startup) \u2014 please resend your message."
+)
+
+
 def _is_permission_failure_payload(payload: Dict[str, Any]) -> bool:
     """Return whether a tool-result payload represents an unresolved permission failure."""
     return is_permission_failure_payload(payload)
@@ -3234,6 +3250,7 @@ class AgentEngine:
         use_native_tools = assembly.plan.native_tools
         result_budget = self._effective_tool_result_budget()
         unknown_tool_retry_used = False
+        empty_response_retry_used = False
         self._usage_tracker.reset()
 
         tools_kwarg: Dict[str, Any] = self._planned_tools_kwarg(assembly.plan)
@@ -3607,11 +3624,31 @@ class AgentEngine:
             tool_call = self._parse_tool_call_from_content(content)
 
             if tool_call is None:
+                if not content and not empty_response_retry_used:
+                    # Empty successful response: treat as a transient failure and
+                    # retry once with an explicit nudge (mirrors the bounded
+                    # unknown-tool retry). WARNING-level so the field log always
+                    # captures the occurrence for diagnosis.
+                    empty_response_retry_used = True
+                    logger.warning(
+                        "unified_loop_stream: empty LLM response "
+                        "(model=%s provider=%s stream=%s); retrying once",
+                        getattr(self._llm, "model", ""),
+                        getattr(self._llm, "active_provider_name", "") or getattr(self._llm, "provider", ""),
+                        self._settings.stream_output,
+                    )
+                    messages.append(build_user_message_text(_EMPTY_RESPONSE_RETRY_PROMPT))
+                    continue
                 self._wm.remember_chat(build_assistant_message(content))
                 trace.record(ExecutionMode.COMPLETE)
                 if not content:
+                    logger.warning(
+                        "unified_loop_stream: empty LLM response persisted after retry "
+                        "(model=%s); emitting transparent degraded message",
+                        getattr(self._llm, "model", ""),
+                    )
                     fallback = _app_onboarding_recovery_message(messages)
-                    final_text = fallback or "I processed your request but have no additional output."
+                    final_text = fallback or _EMPTY_RESPONSE_DEGRADED_MESSAGE
                     self._emit_chat_event("response", {"content": final_text[:500]})
                     yield StreamEvent(type="final", content=final_text)
                 else:

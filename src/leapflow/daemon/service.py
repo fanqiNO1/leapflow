@@ -216,10 +216,28 @@ class RuntimeLeapService:
                     "Deferred init still in progress after %.0fs; serving turn "
                     "in critical-only mode", self._DEFERRED_WAIT_TIMEOUT_S,
                 )
+                yield StreamChunk(
+                    event_type="status",
+                    content=(
+                        "Runtime is still warming up; answering with core "
+                        "capabilities only. Full capabilities return shortly."
+                    ),
+                    request_id=request_id,
+                    metadata={"degraded": "warmup"},
+                )
             except Exception:
                 logger.warning(
                     "Deferred init failed; serving turn in critical-only mode",
                     exc_info=True,
+                )
+                yield StreamChunk(
+                    event_type="status",
+                    content=(
+                        "Some runtime components failed to initialize; answering "
+                        "with core capabilities only. See daemon logs for details."
+                    ),
+                    request_id=request_id,
+                    metadata={"degraded": "deferred_init_failed"},
                 )
 
         # Busy-feedback for clients when all slots occupied

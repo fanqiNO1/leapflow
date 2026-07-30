@@ -242,9 +242,9 @@ async def _cmd_start() -> int:
 
     # Module-based runner for the daemon process
     daemon_script = (
-        "import asyncio, logging, signal, sys; "
-        "logging.basicConfig(level=logging.INFO, "
-        "format='%(asctime)s %(name)s %(levelname)s %(message)s'); "
+        "import asyncio, signal, sys; "
+        "from leapflow.logging_setup import init_logging; "
+        "init_logging('INFO'); "
         "from leapflow.platform.event_bus import EventBus; "
         "from leapflow.platform.observers import ObservationDaemon, ObserverConfig; "
         "from leapflow.memory.providers.episodic import EpisodicMemoryProvider; "

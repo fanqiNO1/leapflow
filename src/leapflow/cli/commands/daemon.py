@@ -249,5 +249,11 @@ def _restart(settings: object, mock_host: bool, *, force: bool = False) -> int:
 
 async def _serve(settings: object, mock_host: bool) -> int:
     from leapflow.daemon.server import serve_daemon
+    from leapflow.logging_setup import init_daemon_logging
 
+    # The daemon writes stdout/stderr to leapd.log; without an explicit logging
+    # setup Python's lastResort handler only emits WARNING+, hiding the INFO
+    # field evidence (deferred init progress, turn usage). daemon.log_level is
+    # independent from runtime.log_level and requires a daemon restart.
+    init_daemon_logging(settings)
     return await serve_daemon(settings, mock_host=mock_host)

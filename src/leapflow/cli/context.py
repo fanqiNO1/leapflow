@@ -146,21 +146,6 @@ def _emit_status(msg: str) -> None:
     sys.stderr.flush()
 
 
-def configure_logging(level: str) -> None:
-    log_level = getattr(logging, level.upper(), logging.INFO)
-
-    # Install RedactingFormatter to prevent secret leakage in logs
-    try:
-        from leapflow.security.redact import RedactingFormatter
-        formatter = RedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    except ImportError:
-        formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-
-    handler = logging.StreamHandler()
-    handler.setFormatter(formatter)
-    logging.basicConfig(level=log_level, handlers=[handler])
-
-
 def _build_visual_components(
     settings: Settings, rpc: Any,
 ) -> Optional[Any]:
@@ -1621,13 +1606,16 @@ class Context:
         # ── Seamless ripgrep provisioning for code_search (best-effort, background) ──
         # code_search always works via the pure-Python fallback; this just tries to
         # provision the faster ripgrep backend without blocking startup or searches.
+        # The attempt is persisted in the profile cache so daemon restarts never
+        # re-trigger the installer's process storm after a failed install.
         try:
             if getattr(settings, "tools_ripgrep_autoinstall", True):
                 import threading
                 from leapflow.tools.file_operations import ensure_ripgrep_available
+                provision_marker = settings.profile_layout.cache.profile_dir / "ripgrep_provision.json"
                 threading.Thread(
                     target=ensure_ripgrep_available,
-                    kwargs={"autoinstall": True},
+                    kwargs={"autoinstall": True, "marker_path": provision_marker},
                     daemon=True,
                 ).start()
         except Exception:

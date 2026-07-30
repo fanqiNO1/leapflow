@@ -115,6 +115,35 @@ class TestEngineChatWarmupStatus:
         assert fake_ctx.ensure_called is False
 
     @pytest.mark.asyncio
+    async def test_degraded_status_streamed_when_deferred_times_out(self) -> None:
+        """P1-A2: a warm-up timeout must be visible to the client as a status
+        chunk (transparent degradation), not only a daemon-side log line."""
+
+        class _NeverReady:
+            _deferred_initialized = False
+
+            async def _ensure_deferred(self) -> None:
+                await asyncio.Event().wait()
+
+        service = RuntimeLeapService.__new__(RuntimeLeapService)
+        service._ctx = _NeverReady()
+        service._DEFERRED_WAIT_TIMEOUT_S = 0.05  # type: ignore[misc]
+        service._turn_admission = type(
+            "_Admission", (), {"locked": staticmethod(lambda: False)}
+        )()
+
+        stream = service.engine_chat("hello", request_id="req-degrade-status")
+        try:
+            first = await stream.__anext__()
+            assert "warming up" in first.content.lower()
+            second = await asyncio.wait_for(stream.__anext__(), timeout=2.0)
+            assert second.event_type == "status"
+            assert (second.metadata or {}).get("degraded") == "warmup"
+            assert "core" in second.content.lower()
+        finally:
+            await stream.aclose()
+
+    @pytest.mark.asyncio
     async def test_no_warmup_chunk_when_deferred_completed(self) -> None:
         service = RuntimeLeapService.__new__(RuntimeLeapService)
         fake_ctx = _FakePendingContext()

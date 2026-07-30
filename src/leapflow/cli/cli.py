@@ -31,6 +31,8 @@ from leapflow.config import load_config
 
 async def _async_main(args: argparse.Namespace) -> int:
     settings = load_config()
+    from leapflow.logging_setup import init_cli_logging
+    init_cli_logging(settings)
     mock_host = getattr(args, "mock_host", False)
     sys.stderr.write("\033[2m→ Initializing LeapFlow...\033[0m\n")
     sys.stderr.flush()
@@ -128,6 +130,8 @@ async def _async_daemon_main(args: argparse.Namespace) -> int:
     from leapflow.daemon.client import DaemonUnavailableError, recover_daemon_client
 
     settings = load_config()
+    from leapflow.logging_setup import init_cli_logging
+    init_cli_logging(settings)
     mock_host = getattr(args, "mock_host", False)
 
     def _status(message: str) -> None:
