@@ -1514,6 +1514,54 @@ class AgentEngine:
             ))
         return None
 
+    def _save_halt_checkpoint(
+        self,
+        decision: Any,
+        envelope: Any,
+        messages: List[Dict[str, Any]],
+        *,
+        budget_used: int,
+        tools_kwarg: Optional[Dict[str, Any]] = None,
+        use_native_tools: bool = False,
+    ) -> None:
+        """Persist a resumable checkpoint for a ``HALT_WITH_CHECKPOINT`` decision.
+
+        Shared by every terminal dispatch site (streaming included): the gate
+        that withholds a replay after a side effect emits this action from any
+        path, and a halt that skips the save leaves the decision's
+        ``resumption_key`` pointing at nothing. The envelope id and the
+        interaction's request id are recorded so the client can find this
+        checkpoint again from the ``InteractionRequest`` it was shown
+        (``resumption_key`` == envelope id; lookup via ``list_pending``).
+        """
+        interaction = getattr(decision, "interaction", None)
+        try:
+            checkpoint = RecoveryCheckpoint(
+                session_id=getattr(self, '_current_session_id', '') or '',
+                turn_id=budget_used,
+                failure_envelope_data={
+                    "envelope_id": envelope.envelope_id,
+                    "message": envelope.message,
+                    "category": envelope.category,
+                    "failure_code": envelope.failure_code,
+                    "source": envelope.source.value,
+                    "side_effect_state": envelope.side_effect_state.value,
+                },
+                interaction_request_id=(
+                    interaction.request_id if interaction is not None else ""
+                ),
+                messages_snapshot=list(messages),
+                context_data={
+                    "resumption_key": getattr(interaction, "resumption_key", "") or "",
+                    "tools_kwarg_keys": list((tools_kwarg or {}).keys()),
+                    "use_native_tools": use_native_tools,
+                    "budget_used": budget_used,
+                },
+            )
+            self._checkpoint_store.save(checkpoint)
+        except Exception:  # noqa: BLE001 - a failed save must not mask the halt itself
+            logger.warning("recovery: failed to persist halt checkpoint", exc_info=True)
+
     def set_tool_timeouts(self, timeouts: Dict[str, float]) -> None:
         """Set per-tool execution timeout overrides (seconds)."""
         self._tool_timeouts = dict(timeouts)
@@ -2938,23 +2986,12 @@ class AgentEngine:
 
                 elif decision.action in (RecoveryAction.HALT_CLEAN, RecoveryAction.HALT_WITH_CHECKPOINT):
                     if decision.action == RecoveryAction.HALT_WITH_CHECKPOINT:
-                        checkpoint = RecoveryCheckpoint(
-                            session_id=getattr(self, '_current_session_id', '') or '',
-                            turn_id=budget.used,
-                            failure_envelope_data={
-                                "message": envelope.message,
-                                "category": envelope.category,
-                                "failure_code": envelope.failure_code,
-                                "source": envelope.source.value,
-                            },
-                            messages_snapshot=list(messages),
-                            context_data={
-                                "tools_kwarg_keys": list(tools_kwarg.keys()),
-                                "use_native_tools": use_native_tools,
-                                "budget_used": budget.used,
-                            },
+                        self._save_halt_checkpoint(
+                            decision, envelope, messages,
+                            budget_used=budget.used,
+                            tools_kwarg=tools_kwarg,
+                            use_native_tools=use_native_tools,
                         )
-                        self._checkpoint_store.save(checkpoint)
                     fatal_error = _terminal_failure_text(decision)
                     self._audit_sink.update_outcome(
                         decision.decision_id, "failure",
@@ -2966,6 +3003,10 @@ class AgentEngine:
                     # ASK_USER, SKIP_AND_CONTINUE, or unknown. ASK_USER carries an
                     # InteractionRequest describing what the user must decide;
                     # surfacing only decision.reason would drop it.
+                    if decision.action == RecoveryAction.HALT_WITH_CHECKPOINT:
+                        self._save_halt_checkpoint(
+                            decision, envelope, messages, budget_used=budget.used,
+                        )
                     fatal_error = _terminal_failure_text(decision)
                     break
             _clear_indicator()
@@ -3450,6 +3491,13 @@ class AgentEngine:
                         continue
                     else:
                         # Terminal: HALT_CLEAN, HALT_WITH_CHECKPOINT, ASK_USER
+                        if decision.action == RecoveryAction.HALT_WITH_CHECKPOINT:
+                            self._save_halt_checkpoint(
+                                decision, envelope, messages,
+                                budget_used=budget.used,
+                                tools_kwarg=tools_kwarg,
+                                use_native_tools=use_native_tools,
+                            )
                         fatal_error = _terminal_failure_text(decision)
                         yield StreamEvent(
                             type="error",
@@ -3644,6 +3692,10 @@ class AgentEngine:
                             coordinator.on_strategy_outcome(decision.decision_id, True)
                             continue
                         else:
+                            if decision.action == RecoveryAction.HALT_WITH_CHECKPOINT:
+                                self._save_halt_checkpoint(
+                                    decision, envelope, messages, budget_used=budget.used,
+                                )
                             fatal_error = _terminal_failure_text(decision)
                             logger.error("unified_loop_stream: unrecoverable %s: %s", envelope.category, exc)
                             yield StreamEvent(
@@ -3707,6 +3759,10 @@ class AgentEngine:
                             coordinator.on_strategy_outcome(decision.decision_id, True)
                             continue
                         else:
+                            if decision.action == RecoveryAction.HALT_WITH_CHECKPOINT:
+                                self._save_halt_checkpoint(
+                                    decision, envelope, messages, budget_used=budget.used,
+                                )
                             fatal_error = _terminal_failure_text(decision)
                             logger.error("unified_loop_stream: unrecoverable %s: %s", envelope.category, exc)
                             yield StreamEvent(

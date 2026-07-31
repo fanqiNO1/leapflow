@@ -204,3 +204,110 @@ def test_gated_halt_reaches_the_user_with_actionable_text() -> None:
     assert "gateway_send" in text
     assert "Verify the target state" in text
     assert _interaction_metadata(decision)["interaction"]["resumption_key"]
+
+
+# ── Checkpoint persistence and resumption linkage ─────────────────────
+
+
+def _engine_with_checkpoint_store():
+    from leapflow.engine.engine import AgentEngine
+    from leapflow.engine.recovery_checkpoint import InMemoryCheckpointStore
+
+    engine = AgentEngine.__new__(AgentEngine)
+    engine._checkpoint_store = InMemoryCheckpointStore()
+    engine._current_session_id = "sess-1"
+    return engine
+
+
+def test_halt_checkpoint_links_back_to_the_interaction() -> None:
+    """The saved checkpoint must be findable from what the user was shown.
+
+    The InteractionRequest carries ``resumption_key`` (the envelope id) while
+    the checkpoint gets a random id; without recording the envelope id, the
+    interaction request id, and the resumption key on the checkpoint, the
+    client has no way back from the prompt to the saved state.
+    """
+    engine = _engine_with_checkpoint_store()
+    coord = RecoveryCoordinator(
+        strategies=default_strategies(), budget=RecoveryBudget(total_recovery_actions=8),
+    )
+    coord.budget.start_deadline()
+    envelope = _envelope()
+    decision = coord.evaluate(envelope)
+    assert decision.action == RecoveryAction.HALT_WITH_CHECKPOINT
+
+    engine._save_halt_checkpoint(
+        decision, envelope, [{"role": "user", "content": "send it"}], budget_used=2,
+    )
+
+    pending = engine._checkpoint_store.list_pending("sess-1")
+    assert len(pending) == 1
+    saved = pending[0]
+    assert saved.failure_envelope_data["envelope_id"] == envelope.envelope_id
+    assert saved.failure_envelope_data["side_effect_state"] == "unknown"
+    assert saved.interaction_request_id == decision.interaction.request_id
+    # The key shown to the user resolves to this checkpoint.
+    assert saved.context_data["resumption_key"] == decision.interaction.resumption_key
+    assert saved.messages_snapshot == [{"role": "user", "content": "send it"}]
+
+
+def test_halt_checkpoint_save_failure_does_not_mask_the_halt() -> None:
+    """A broken store must not turn a clean halt into a crash."""
+    engine = _engine_with_checkpoint_store()
+
+    class _BrokenStore:
+        def save(self, checkpoint) -> None:
+            raise OSError("disk full")
+
+    engine._checkpoint_store = _BrokenStore()
+    coord = RecoveryCoordinator(
+        strategies=default_strategies(), budget=RecoveryBudget(total_recovery_actions=8),
+    )
+    coord.budget.start_deadline()
+    envelope = _envelope()
+    decision = coord.evaluate(envelope)
+
+    # Must not raise.
+    engine._save_halt_checkpoint(decision, envelope, [], budget_used=1)
+
+
+def test_duplicate_result_preserves_the_uncertainty_verdict() -> None:
+    """A suppressed duplicate must keep the original failure's warning.
+
+    The duplicate path returns a synthesized payload, not the annotated one; if
+    the flag is not carried over, the model loses exactly the signal that told
+    it to verify before retrying.
+    """
+    from leapflow.engine.tool_execution import ToolExecutionLedger, ToolExecutionRecord
+
+    record = ToolExecutionRecord(
+        execution_id="x1", session_id="s", turn_id="t", command_id="c",
+        tool_call_id="tc", tool_name="gateway_send", idempotency_key="k1",
+        arguments={}, policy="external_side_effect", status="failed_retryable",
+        result={
+            "ok": False, "error": "timeout",
+            "side_effect_uncertain": True,
+            "retry_guidance": "Verify the current state before retrying.",
+        },
+    )
+
+    duplicate = ToolExecutionLedger.duplicate_result(record)
+
+    assert duplicate["side_effect_uncertain"] is True
+    assert "Verify" in duplicate["retry_guidance"]
+
+
+def test_duplicate_result_stays_clean_for_certain_outcomes() -> None:
+    """No false alarm: a completed original adds no uncertainty flag."""
+    from leapflow.engine.tool_execution import ToolExecutionLedger, ToolExecutionRecord
+
+    record = ToolExecutionRecord(
+        execution_id="x2", session_id="s", turn_id="t", command_id="c",
+        tool_call_id="tc", tool_name="gateway_send", idempotency_key="k2",
+        arguments={}, policy="external_side_effect", status="completed",
+        result={"ok": True},
+    )
+
+    duplicate = ToolExecutionLedger.duplicate_result(record)
+
+    assert "side_effect_uncertain" not in duplicate

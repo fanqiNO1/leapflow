@@ -247,6 +247,14 @@ class ToolExecutionLedger:
         }
         if not completed:
             payload["error"] = "An identical side-effect attempt is already recorded. Review the original result before retrying."
+        # Preserve the original attempt's uncertainty verdict: if that failure may
+        # already have taken effect, the suppressed duplicate must say so too, or
+        # the model loses exactly the warning that told it to verify first.
+        original = record.result if isinstance(record.result, Mapping) else {}
+        if original.get("side_effect_uncertain"):
+            payload["side_effect_uncertain"] = True
+            if original.get("retry_guidance"):
+                payload["retry_guidance"] = original["retry_guidance"]
         return payload
 
     def _get_durable(self, session_id: str, key: str) -> ToolExecutionRecord | None:

@@ -79,7 +79,6 @@ async def validate_credentials(
 
     try:
         ok, msg = await asyncio.wait_for(fn(credentials), timeout=timeout_s)
-        return ok, msg
     except asyncio.TimeoutError:
         return False, f"Validation timed out after {timeout_s}s"
     except Exception as exc:  # noqa: BLE001 - any vendor error becomes a safe message
@@ -87,6 +86,14 @@ async def validate_credentials(
 
         safe_error = redact_sensitive_text(str(exc), force=True)
         return False, f"Validation error: {safe_error}"
+
+    if not ok and msg:
+        # Vendor error strings can echo request parameters back; never assume a
+        # third-party API keeps credentials out of its error messages.
+        from leapflow.security.redact import redact_sensitive_text
+
+        msg = redact_sensitive_text(msg, force=True)
+    return ok, msg
 
 
 # ── Register built-in validators (eager: see module docstring) ────────
