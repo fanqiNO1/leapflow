@@ -5,11 +5,12 @@
 
 ### News
 
-- **2026-07-28**: v0.0.5 released — adaptive-depth execution for long-horizon tasks, built-in coding tools, per-session daemon concurrency, improved TUI stability, and hardened leapd recovery/status diagnostics.
+- **2026-07-31**: v0.0.6 released — side-effect-gated recovery (checkpointed halts with structured `InteractionRequest`), uncertain-effect reporting for failed outbound calls, centralized logging with an independent daemon log level, session-bound LeapBoard analysis, platform-neutral gateway validators, and end-to-end architecture contract tests with the CI gate restored.
 
 <details>
 <summary>Previous releases</summary>
 
+- **2026-07-28**: v0.0.5 released — adaptive-depth execution for long-horizon tasks, built-in coding tools, per-session daemon concurrency, improved TUI stability, and hardened leapd recovery/status diagnostics.
 - **2026-07-16**: **LeapBoard** — general-purpose monitoring web dashboard (Watch→Finding + Server-Driven UI); `/board` entry, live session analysis, and finance/sentiment/research templates.
 - **2026-07-16**: v0.0.4 released — protocol-driven recovery coordinator with budget-constrained strategies, unified error classification, checkpoint-based cross-turn resumption, structured audit trail, and tool execution idempotency ledger.
 - **2026-07-15**: v0.0.3 released — layered YAML config, Path/Profile/Cache layouts, encrypted secret refs, DuckDB cache indexing, `leap config`, and robustness hardening.
