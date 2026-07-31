@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import tempfile
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, List, Optional
 
 import pytest
 
@@ -14,13 +12,8 @@ from leapflow.config import Settings
 from leapflow.layout import build_layout
 from leapflow.domain.events import SystemEvent
 from leapflow.domain.trajectory import (
-    ActionType,
     Episode,
-    RawAction,
     SemanticAction,
-    StateSnapshot,
-    Trajectory,
-    TrajectoryStep,
 )
 from leapflow.llm.base import LLMChatResponse, LLMProvider
 from leapflow.memory import (

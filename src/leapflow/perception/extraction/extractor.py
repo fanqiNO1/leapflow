@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING
 
 from leapflow.perception.types import FramePair, InferenceLevel, PairContext, TiledBatch, VisualAction
 
 if TYPE_CHECKING:
     from leapflow.llm.base import LLMProvider
+    from leapflow.perception.types import InteractionSignal
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +122,6 @@ class ContextEnrichedVLMExtractor:
         levels: Optional[List[InferenceLevel]] = None,
     ) -> List[List[VisualAction]]:
         """Extract actions from multiple pairs (sequential for now)."""
-        import asyncio
 
         results = []
         for i, pair in enumerate(pairs):

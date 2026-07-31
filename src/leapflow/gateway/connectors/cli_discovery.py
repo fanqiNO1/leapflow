@@ -28,7 +28,7 @@ import hashlib
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Sequence
 
 from leapflow.gateway.connectors.protocol import ActionSpec, BackendKind
 
@@ -212,7 +212,6 @@ class HelpParser:
                     continue
                 match = _FLAG_RE.match(line)
                 if match:
-                    short = match.group(1) or ""
                     long_flag = match.group(2)
                     value_hint = match.group(3) or ""
                     desc = match.group(4).strip()

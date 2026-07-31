@@ -12,9 +12,9 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
-from leapflow.domain.perception import FieldRule, PerceptionLevel, sort_rules
+from leapflow.domain.perception import FieldRule, PerceptionLevel
 from leapflow.recording.perceptual_field import FieldPolicy
 
 logger = logging.getLogger(__name__)

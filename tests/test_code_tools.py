@@ -83,6 +83,77 @@ def test_code_search_python_backend_matches(tmp_path, monkeypatch) -> None:
     assert result["match_count"] == 1 and result["matches"][0]["line"] == 2
 
 
+def test_code_search_multiple_patterns_or_combined_single_pass(tmp_path, monkeypatch) -> None:
+    """P1-B2: batched patterns run as ONE search (one potential process spawn)."""
+    monkeypatch.setattr(fo.shutil, "which", lambda _name: None)  # force fallback
+    (tmp_path / "a.py").write_text("alpha_token\n")
+    (tmp_path / "b.py").write_text("beta_token\n")
+    (tmp_path / "c.py").write_text("unrelated\n")
+
+    result = _run(code_search({
+        "pattern": "alpha_token",
+        "patterns": ["beta_token"],
+        "path": str(tmp_path),
+    }))
+
+    assert result["ok"] is True
+    assert result["match_count"] == 2
+    hit_paths = {m["path"] for m in result["matches"]}
+    assert any(p.endswith("a.py") for p in hit_paths)
+    assert any(p.endswith("b.py") for p in hit_paths)
+
+
+def test_code_search_patterns_only_without_primary_pattern(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(fo.shutil, "which", lambda _name: None)
+    (tmp_path / "a.py").write_text("needle\n")
+    result = _run(code_search({"patterns": ["needle"], "path": str(tmp_path)}))
+    assert result["ok"] is True and result["match_count"] == 1
+
+
+# ── ripgrep provisioning persistence (P0-B1) ───────────────────────
+
+
+def test_ripgrep_provision_marker_blocks_reinstall_across_restarts(tmp_path, monkeypatch) -> None:
+    """A failed install attempt persisted on disk must stop later daemon starts
+    from re-spawning the installer's process storm."""
+    marker = tmp_path / "cache" / "ripgrep_provision.json"
+    monkeypatch.setattr(fo.shutil, "which", lambda _name: "/usr/local/bin/brew" if _name == "brew" else None)
+    monkeypatch.setattr(fo.sys, "platform", "darwin")
+
+    install_calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        install_calls.append(list(args))
+        class _R:  # noqa: N801 - minimal stub
+            returncode = 1
+        return _R()
+
+    monkeypatch.setattr(fo.subprocess, "run", fake_run)
+
+    # First process lifetime: attempts the install once and persists the marker.
+    monkeypatch.setitem(fo._RG_PROVISION, "done", False)
+    monkeypatch.setitem(fo._RG_PROVISION, "available", False)
+    assert fo.ensure_ripgrep_available(autoinstall=True, marker_path=marker) is False
+    assert len(install_calls) == 1
+    assert marker.exists()
+
+    # Simulated restart (fresh in-process cache): marker must block a re-attempt.
+    monkeypatch.setitem(fo._RG_PROVISION, "done", False)
+    monkeypatch.setitem(fo._RG_PROVISION, "available", False)
+    assert fo.ensure_ripgrep_available(autoinstall=True, marker_path=marker) is False
+    assert len(install_calls) == 1  # no second installer spawn
+
+
+def test_ripgrep_provision_marker_ignored_when_rg_present(tmp_path, monkeypatch) -> None:
+    marker = tmp_path / "ripgrep_provision.json"
+    marker.write_text('{"attempted": true, "available": false}')
+    monkeypatch.setattr(fo.shutil, "which", lambda _name: "/opt/homebrew/bin/rg" if _name == "rg" else None)
+    monkeypatch.setitem(fo._RG_PROVISION, "done", False)
+    monkeypatch.setitem(fo._RG_PROVISION, "available", False)
+
+    assert fo.ensure_ripgrep_available(autoinstall=True, marker_path=marker) is True
+
+
 # ── file_find ────────────────────────────────────────────────────────
 
 def test_file_find_recursive_glob(tmp_path) -> None:

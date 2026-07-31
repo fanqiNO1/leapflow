@@ -1071,9 +1071,10 @@ async def handle_app(ctx: "Context", console: "LeapConsole", args: str) -> None:
     render_app_payload(console, await build_app_payload(ctx, args))
 
 
-def handle_clear(ctx: "Context", console: "LeapConsole", args: str) -> None:
-    """Clear the terminal screen."""
-    os.system("cls" if os.name == "nt" else "clear")
+# NOTE: screen clearing is owned by ``LeapApp.clear_screen()``. It must go
+# through the prompt_toolkit renderer that owns the TTY — a shell ``clear``
+# leaves the renderer's cursor cache stale and misplaces the next redraw — so
+# there is deliberately no clear handler here.
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1117,12 +1118,15 @@ def build_orient_payload(ctx: "Context") -> dict[str, Any]:
     }
 
 
-async def command_execute(ctx: "Context", name: str, args: str = "") -> dict[str, Any]:
+async def command_execute(
+    ctx: "Context", name: str, args: str = "", session_id: str = "",
+) -> dict[str, Any]:
     """Execute a slash command and return a serializable result payload.
 
     This is the unified entry point for daemon-mode command execution.
     Returns a dict with at minimum ``ok`` and ``message`` keys, plus
-    optional structured data for rich TUI rendering.
+    optional structured data for rich TUI rendering. ``session_id`` identifies
+    the calling client's session for commands that observe it (e.g. ``/board``).
     """
     if name == "status":
         return build_status_payload(ctx)
@@ -1160,24 +1164,29 @@ async def command_execute(ctx: "Context", name: str, args: str = "") -> dict[str
     if name == "task":
         return _execute_scheduler_task(ctx)
     if name == "board" or name.startswith("board "):
-        return await _execute_dashboard(ctx, name, args)
+        return await _execute_dashboard(ctx, name, args, session_id=session_id)
     return {"ok": False, "message": f"Unknown command: /{name}"}
 
 
-async def _ensure_session_watch_refresh(ctx: "Context", monitors: Any) -> str:
+async def _ensure_session_watch_refresh(
+    ctx: "Context", monitors: Any, session_id: str = "",
+) -> str:
     """Ensure an active session watch exists and trigger one analysis cycle.
 
     The analysis producer is LLM-backed and can take tens of seconds, so it is
     scheduled in the background: arming the watch and opening the board must be
     instant and must never block the command RPC past its timeout. The board
     receives the resulting finding over WebSocket when the cycle completes.
+    ``session_id`` binds the watch to the caller's session so the analysis reads
+    that conversation rather than whichever session was last active.
     Returns the session watch id.
     """
     from leapflow.monitor.session_producer import ensure_session_watch, session_watch_params
 
-    watch_id = await ensure_session_watch(
-        monitors, params=session_watch_params(getattr(ctx, "settings", None))
-    )
+    params = session_watch_params(getattr(ctx, "settings", None))
+    if session_id:
+        params["session_id"] = session_id
+    watch_id = await ensure_session_watch(monitors, params=params)
     monitors.schedule_watch_once(watch_id, force=True)
     return watch_id
 
@@ -1190,7 +1199,9 @@ _BOARD_CONTROLLABLE_STATES = frozenset(
 )
 
 
-async def _execute_dashboard(ctx: "Context", name: str, args: str = "") -> dict[str, Any]:
+async def _execute_dashboard(
+    ctx: "Context", name: str, args: str = "", session_id: str = "",
+) -> dict[str, Any]:
     """Analyze the current session and render it through a template.
 
     LeapBoard has a single analysis target — the current session. ``/board``
@@ -1217,11 +1228,11 @@ async def _execute_dashboard(ctx: "Context", name: str, args: str = "") -> dict[
             ctx, monitors, verb, target=rest_tokens[0] if rest_tokens else "",
         )
     if not verb:
-        return await _execute_board_open(ctx, monitors, template="")
+        return await _execute_board_open(ctx, monitors, template="", session_id=session_id)
     # A non-empty, non-verb token must name a known template lens; otherwise it
     # is an unknown command and is rejected rather than coerced to generic.
     if verb in set(_template_library(ctx).names()):
-        return await _execute_board_open(ctx, monitors, template=verb)
+        return await _execute_board_open(ctx, monitors, template=verb, session_id=session_id)
     return {
         "ok": False,
         "message": (
@@ -1232,7 +1243,9 @@ async def _execute_dashboard(ctx: "Context", name: str, args: str = "") -> dict[
     }
 
 
-async def _execute_board_open(ctx: "Context", monitors: Any, *, template: str) -> dict[str, Any]:
+async def _execute_board_open(
+    ctx: "Context", monitors: Any, *, template: str, session_id: str = "",
+) -> dict[str, Any]:
     """Open the current-session board rendered with the requested template.
 
     ``template`` is guaranteed to be empty (default) or a known lens by the
@@ -1241,7 +1254,7 @@ async def _execute_board_open(ctx: "Context", monitors: Any, *, template: str) -
     session_watch_id = ""
     if monitors is not None:
         try:
-            session_watch_id = await _ensure_session_watch_refresh(ctx, monitors)
+            session_watch_id = await _ensure_session_watch_refresh(ctx, monitors, session_id)
         except Exception:
             logger.debug("dashboard: session watch refresh failed", exc_info=True)
     # The client owns the dashboard server lifecycle (it spawns/validates it off

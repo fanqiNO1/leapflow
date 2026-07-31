@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
@@ -503,6 +504,27 @@ def ripgrep_path() -> str | None:
     return shutil.which("rg")
 
 
+def _read_provision_marker(marker_path: Path) -> bool:
+    """Return True when a previous install attempt is recorded on disk."""
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+        return bool(payload.get("attempted"))
+    except (OSError, ValueError):
+        return False
+
+
+def _write_provision_marker(marker_path: Path, *, available: bool) -> None:
+    """Persist the install attempt so restarts never re-trigger the installer."""
+    try:
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text(
+            json.dumps({"attempted": True, "available": available, "ts": time.time()}),
+            encoding="utf-8",
+        )
+    except OSError:
+        logger.debug("code_search: could not persist ripgrep provision marker", exc_info=True)
+
+
 def ripgrep_install_hint() -> str:
     """Platform-appropriate manual install command for ripgrep."""
     if sys.platform == "darwin":
@@ -518,7 +540,12 @@ def ripgrep_install_hint() -> str:
     return "install ripgrep — see https://github.com/BurntSushi/ripgrep#installation"
 
 
-def ensure_ripgrep_available(*, autoinstall: bool = True, timeout: float = 180.0) -> bool:
+def ensure_ripgrep_available(
+    *,
+    autoinstall: bool = True,
+    timeout: float = 180.0,
+    marker_path: Path | None = None,
+) -> bool:
     """Best-effort, cached, non-fatal provision of ripgrep. Never raises.
 
     ripgrep is only an *accelerator*: ``code_search`` always works via the pure
@@ -527,12 +554,21 @@ def ensure_ripgrep_available(*, autoinstall: bool = True, timeout: float = 180.0
     no elevated privileges). Other platforms fall back to the Python search plus
     a manual-install hint. Intended to run once in the background at startup so
     it never blocks a search. Returns whether ripgrep is available afterward.
+
+    ``marker_path`` (profile-scoped, from CacheLayout) persists the attempt
+    across daemon restarts: a failed install must not re-spawn the installer's
+    process storm (and its per-exec security assessments) on every startup.
     """
     if _RG_PROVISION["done"]:
         return _RG_PROVISION["available"]
     if ripgrep_path() is not None:
         _RG_PROVISION.update(done=True, available=True)
         return True
+    if marker_path is not None and _read_provision_marker(marker_path):
+        # A previous run already attempted the install and rg is still absent:
+        # stay on the Python fallback instead of re-spawning the installer.
+        _RG_PROVISION.update(done=True, available=False)
+        return False
     available = False
     if autoinstall and sys.platform == "darwin" and shutil.which("brew"):
         try:
@@ -544,6 +580,8 @@ def ensure_ripgrep_available(*, autoinstall: bool = True, timeout: float = 180.0
             available = ripgrep_path() is not None
         except Exception:  # noqa: BLE001 - best-effort, never fatal
             logger.debug("code_search: ripgrep auto-install failed; using Python fallback", exc_info=True)
+        if marker_path is not None:
+            _write_provision_marker(marker_path, available=available)
     _RG_PROVISION.update(done=True, available=available)
     return available
 
@@ -657,10 +695,18 @@ def _enrich_context(matches: List[Dict[str, Any]], context_lines: int) -> None:
 async def code_search(params: Dict[str, Any]) -> Dict[str, Any]:
     """Search file *contents* by regex across a directory tree (ripgrep-backed,
     Python fallback). Read-only; VCS/dependency/build/cache dirs are skipped and
-    results are redacted."""
+    results are redacted. Multiple patterns are OR-combined into one pass so a
+    batched query costs a single process spawn."""
     pattern = str(params.get("pattern", "") or "")
-    if not pattern:
+    extra_raw = params.get("patterns") or []
+    extra = [str(item) for item in extra_raw if str(item or "").strip()] if isinstance(extra_raw, (list, tuple)) else []
+    all_patterns = [p for p in [pattern, *extra] if p]
+    if not all_patterns:
         return {"ok": False, "error": "Missing required parameter: pattern"}
+    if len(all_patterns) > 1:
+        pattern = "|".join(f"(?:{p})" for p in all_patterns)
+    else:
+        pattern = all_patterns[0]
     base = resolve_workspace_path(params.get("path", ".") or ".", default=".")
     scope_error = workspace_scope_error(base, operation="code_search")
     if scope_error:

@@ -15,7 +15,6 @@ from leapflow.domain.trajectory import (
     ActionType,
     Episode,
     RawAction,
-    SemanticAction,
     StateSnapshot,
     Trajectory,
     TrajectoryStep,

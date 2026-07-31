@@ -13,7 +13,7 @@ from __future__ import annotations
 import operator
 import re
 import time
-from typing import Any, Callable, ClassVar, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 
 # Supported comparison operators
@@ -49,8 +49,6 @@ class ConditionTrigger:
     Security: Does NOT use eval(). Implements a simple comparison parser.
     """
 
-    trigger_type: ClassVar[str] = "condition"
-
     def __init__(
         self,
         expression: str,
@@ -79,7 +77,7 @@ class ConditionTrigger:
     # ------------------------------------------------------------------
 
     @property
-    def trigger_type(self) -> str:  # type: ignore[override]
+    def trigger_type(self) -> str:
         return "condition"
 
     def is_due(self, now: float) -> bool:

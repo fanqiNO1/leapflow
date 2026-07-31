@@ -143,7 +143,6 @@ class ImplicitFeedbackObserver:
         if sub_type != UIActionSubType.SHORTCUT:
             return False
         modifiers = payload.get("modifiers", [])
-        key_code = payload.get("key_code", 0)
         char = payload.get("char", "").lower()
         if char == "z" and any(m in modifiers for m in ("cmd", "meta", "ctrl", "control")):
             return True

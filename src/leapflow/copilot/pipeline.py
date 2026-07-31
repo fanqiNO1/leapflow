@@ -24,7 +24,7 @@ import copy
 import logging
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from leapflow.copilot.config import CopilotConfig

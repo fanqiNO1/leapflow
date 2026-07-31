@@ -13,7 +13,12 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncIterator, Dict, Mapping, Protocol, Sequence, runtime_checkable
+from typing import Any, AsyncIterator, Dict, Mapping, Protocol, Sequence, TYPE_CHECKING, runtime_checkable
+
+if TYPE_CHECKING:
+    # Annotation-only: keeps this protocol module free of a runtime edge to the
+    # gateway domain types.
+    from leapflow.gateway.protocol import InboundMessage, MessageSource
 
 
 class BackendKind(str, Enum):

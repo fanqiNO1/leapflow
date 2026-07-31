@@ -35,7 +35,6 @@ from leapflow.gateway.connectors.protocol import (
     ActionSpec,
     BackendEvent,
     BackendEventSource,
-    EventClassification,
     EventKind,
     EventSourceStatus,
     InboundCallback,

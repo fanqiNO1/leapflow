@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # hub.sync imports HubClient, so this stays annotation-only to avoid a cycle.
+    from leapflow.hub.sync import SyncPlan
 
 from leapflow.hub.protocol import (
     HubBackend,

@@ -13,18 +13,15 @@ from __future__ import annotations
 
 import logging
 import math
-import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from leapflow.causal.channel import AggregationPolicy, ChannelRegistry
 from leapflow.causal.types import (
     CausalChain,
     CausalEvent,
-    EventSource,
     EventType,
-    FrameRef,
 )
 
 logger = logging.getLogger(__name__)

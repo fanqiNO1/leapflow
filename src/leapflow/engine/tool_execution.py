@@ -12,6 +12,17 @@ from typing import Any, Literal, Mapping
 ExecutionPolicy = Literal["read_only", "mutating_idempotent", "mutating_once", "external_side_effect"]
 ExecutionStatus = Literal["reserved", "running", "completed", "failed_retryable", "failed_final"]
 
+# Policies whose failure leaves the effect's fate unknown: the call may already
+# have landed (a delivered message, a committed write) even though it reported an
+# error, so a blind retry can duplicate it. ``mutating_idempotent`` is absent on
+# purpose — re-applying it converges, so flagging it would stall safe retries.
+UNCERTAIN_EFFECT_POLICIES: frozenset[str] = frozenset({"external_side_effect", "mutating_once"})
+
+
+def effect_is_uncertain_on_failure(policy: str) -> bool:
+    """Return whether a failed call under ``policy`` may still have taken effect."""
+    return str(policy or "") in UNCERTAIN_EFFECT_POLICIES
+
 _EXTERNAL_TOOLS = frozenset({
     "shell_run",
     "scm_sync",
@@ -236,6 +247,14 @@ class ToolExecutionLedger:
         }
         if not completed:
             payload["error"] = "An identical side-effect attempt is already recorded. Review the original result before retrying."
+        # Preserve the original attempt's uncertainty verdict: if that failure may
+        # already have taken effect, the suppressed duplicate must say so too, or
+        # the model loses exactly the warning that told it to verify first.
+        original = record.result if isinstance(record.result, Mapping) else {}
+        if original.get("side_effect_uncertain"):
+            payload["side_effect_uncertain"] = True
+            if original.get("retry_guidance"):
+                payload["retry_guidance"] = original["retry_guidance"]
         return payload
 
     def _get_durable(self, session_id: str, key: str) -> ToolExecutionRecord | None:

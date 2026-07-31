@@ -1,7 +1,6 @@
 """Tests for FeishuEventNormalizer — Feishu event classification and mapping."""
 from __future__ import annotations
 
-import pytest
 
 from leapflow.gateway.connectors.protocol import BackendEvent, EventKind
 from leapflow.gateway.normalizers.feishu import FeishuEventNormalizer

@@ -423,6 +423,11 @@ class Settings:
     daemon_max_concurrent_turns: int = 3
     daemon_max_live_sessions: int = 16
     daemon_session_idle_ttl_s: float = 1800.0
+    # File-log verbosity for the leapd process (stdout/stderr -> leapd.log).
+    # Independent from runtime.log_level so field diagnostics (deferred init
+    # progress, turn_usage, empty-response warnings) are captured without
+    # making the interactive CLI/TUI noisy. Requires `leap daemon restart`.
+    daemon_log_level: str = "INFO"
     circuit_breaker_threshold: int = 5  # Consecutive failures before circuit opens
     circuit_breaker_cooldown_s: float = 60.0  # Circuit breaker cooldown period
 
@@ -603,7 +608,10 @@ def _build_settings_from_env(
 
     mock_host = os.getenv("LEAPFLOW_MOCK_HOST", "0").strip() in ("1", "true", "True", "yes")
     duckdb = os.getenv("LEAPFLOW_DUCKDB_PATH", str(profile_layout.duckdb_path)).strip()
-    log_level = os.getenv("LEAPFLOW_LOG_LEVEL", "INFO").strip()
+    # Interactive CLI/TUI surface verbosity. WARNING matches the historical
+    # visible behavior (quiet interactive surface); verbose field diagnostics
+    # belong to the daemon file log (daemon.log_level, default INFO).
+    log_level = os.getenv("LEAPFLOW_LOG_LEVEL", "WARNING").strip()
 
     # Memory Providers
     memory_working_max_tokens = int(os.getenv("LEAPFLOW_MEMORY_WORKING_MAX_TOKENS", "8192"))
@@ -889,6 +897,7 @@ def _build_settings_from_env(
     daemon_max_concurrent_turns = int(os.getenv("LEAPFLOW_DAEMON_MAX_CONCURRENT_TURNS", "3"))
     daemon_max_live_sessions = int(os.getenv("LEAPFLOW_DAEMON_MAX_LIVE_SESSIONS", "16"))
     daemon_session_idle_ttl_s = float(os.getenv("LEAPFLOW_DAEMON_SESSION_IDLE_TTL_S", "1800.0"))
+    daemon_log_level = os.getenv("LEAPFLOW_DAEMON_LOG_LEVEL", "INFO").strip() or "INFO"
     circuit_breaker_threshold = int(os.getenv("LEAPFLOW_CIRCUIT_BREAKER_THRESHOLD", "5"))
     circuit_breaker_cooldown_s = float(os.getenv("LEAPFLOW_CIRCUIT_BREAKER_COOLDOWN_S", "60.0"))
 
@@ -1210,6 +1219,7 @@ def _build_settings_from_env(
         daemon_max_concurrent_turns=daemon_max_concurrent_turns,
         daemon_max_live_sessions=daemon_max_live_sessions,
         daemon_session_idle_ttl_s=daemon_session_idle_ttl_s,
+        daemon_log_level=daemon_log_level,
         circuit_breaker_threshold=circuit_breaker_threshold,
         circuit_breaker_cooldown_s=circuit_breaker_cooldown_s,
         # Signal Fusion

@@ -13,6 +13,12 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Protocol
 
+# Imported at runtime (no import cycle): the audit entry's annotations must stay
+# resolvable for typing.get_type_hints() introspection, not just static checks.
+from leapflow.engine.failure_envelope import FailureEnvelope
+from leapflow.engine.recovery_budget import RecoveryBudget
+from leapflow.engine.recovery_decision import RecoveryDecision
+
 logger = logging.getLogger(__name__)
 
 
@@ -149,9 +155,6 @@ def create_audit_entry(
 
     Handles attribute access safely for enum values and budget internals.
     """
-    from leapflow.engine.failure_envelope import FailureEnvelope  # noqa: F811
-    from leapflow.engine.recovery_decision import RecoveryDecision  # noqa: F811
-    from leapflow.engine.recovery_budget import RecoveryBudget  # noqa: F811
 
     return RecoveryAuditEntry(
         timestamp=time.time(),

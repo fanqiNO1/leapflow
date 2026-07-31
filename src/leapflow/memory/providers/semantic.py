@@ -642,7 +642,8 @@ class SemanticMemoryProvider:
                 session_scope=session_id if session_id else None,
             )
             try:
-                loop = asyncio.get_running_loop()
+                # Probe whether a loop is already running (RuntimeError = not).
+                asyncio.get_running_loop()
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as pool:
                     results = pool.submit(asyncio.run, self.search(mq)).result()

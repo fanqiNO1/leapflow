@@ -6,8 +6,7 @@ for 30s+ and starving the daemon keepalive heartbeat, which caused the TUI
 client's 30s readline timeout to fire on the first command.
 
 Validates:
-- ``initialize_deferred()`` contains event-loop yield points so concurrent
-  tasks (heartbeats) can run while it executes
+- concurrent tasks (heartbeats) can run while ``initialize_deferred()`` executes
 - ``engine_chat()`` yields an immediate ``status`` chunk before blocking on
   deferred initialization
 - ``_ensure_deferred()`` stops retrying after repeated failures (degraded
@@ -16,7 +15,6 @@ Validates:
 from __future__ import annotations
 
 import asyncio
-import inspect
 from typing import Any
 
 import pytest
@@ -31,18 +29,13 @@ from leapflow.daemon.service import RuntimeLeapService
 
 
 class TestDeferredInitYieldPoints:
-    """initialize_deferred() must cooperatively yield to the event loop."""
+    """initialize_deferred() must cooperatively yield to the event loop.
 
-    def test_initialize_deferred_contains_yield_points(self) -> None:
-        """The coroutine must contain multiple `await asyncio.sleep(0)` yield
-        points at phase boundaries so heartbeat callbacks stay responsive."""
-        source = inspect.getsource(Context.initialize_deferred)
-        yield_points = source.count("await asyncio.sleep(0)")
-        assert yield_points >= 6, (
-            f"initialize_deferred() has only {yield_points} event-loop yield "
-            "points; expected >= 6 (one per heavy phase) to keep the daemon "
-            "keepalive heartbeat alive during startup"
-        )
+    Asserted behaviorally: counting ``await asyncio.sleep(0)`` occurrences in
+    the source would freeze an implementation detail (how many yield points,
+    written which way) instead of the contract that matters — that a concurrent
+    task still gets scheduled while initialization runs.
+    """
 
     @pytest.mark.asyncio
     async def test_concurrent_task_runs_during_deferred_wait(self) -> None:
@@ -113,6 +106,35 @@ class TestEngineChatWarmupStatus:
         assert "warming up" in first_chunk.content.lower()
         # The status chunk must arrive BEFORE the blocking wait starts
         assert fake_ctx.ensure_called is False
+
+    @pytest.mark.asyncio
+    async def test_degraded_status_streamed_when_deferred_times_out(self) -> None:
+        """P1-A2: a warm-up timeout must be visible to the client as a status
+        chunk (transparent degradation), not only a daemon-side log line."""
+
+        class _NeverReady:
+            _deferred_initialized = False
+
+            async def _ensure_deferred(self) -> None:
+                await asyncio.Event().wait()
+
+        service = RuntimeLeapService.__new__(RuntimeLeapService)
+        service._ctx = _NeverReady()
+        service._DEFERRED_WAIT_TIMEOUT_S = 0.05  # type: ignore[misc]
+        service._turn_admission = type(
+            "_Admission", (), {"locked": staticmethod(lambda: False)}
+        )()
+
+        stream = service.engine_chat("hello", request_id="req-degrade-status")
+        try:
+            first = await stream.__anext__()
+            assert "warming up" in first.content.lower()
+            second = await asyncio.wait_for(stream.__anext__(), timeout=2.0)
+            assert second.event_type == "status"
+            assert (second.metadata or {}).get("degraded") == "warmup"
+            assert "core" in second.content.lower()
+        finally:
+            await stream.aclose()
 
     @pytest.mark.asyncio
     async def test_no_warmup_chunk_when_deferred_completed(self) -> None:

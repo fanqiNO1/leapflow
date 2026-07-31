@@ -161,7 +161,7 @@ class MHMSFusionPipeline:
         Bridges the signal_fusion output to the existing analysis pipeline's
         expected Episode format, enabling gradual adoption.
         """
-        from leapflow.domain.trajectory import Episode, SemanticAction
+        from leapflow.domain.trajectory import Episode
 
         domain_episodes: list = []
         for enriched in result.episodes:

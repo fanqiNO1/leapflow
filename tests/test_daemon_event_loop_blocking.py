@@ -24,7 +24,6 @@ Validates:
 from __future__ import annotations
 
 import asyncio
-import inspect
 import time
 from pathlib import Path
 from typing import Any, List, Optional
@@ -237,32 +236,13 @@ class TestEnsureDeferredCancelSafety:
 
 
 class TestDeferredDbExecutor:
-    """Blocking DuckDB work must not freeze the event loop."""
+    """Blocking DuckDB work must not freeze the event loop.
 
-    def test_initialize_deferred_routes_heavy_ops_through_executor(self) -> None:
-        """Every known-heavy synchronous DB call site must go through the
-        dedicated executor helper instead of running on the loop thread."""
-        source = inspect.getsource(Context.initialize_deferred)
-        assert source.count("_run_deferred_db") >= 6, (
-            "initialize_deferred() must route its heavy synchronous DuckDB "
-            "operations through _run_deferred_db (dedicated executor)"
-        )
-        for marker in (
-            "load_and_activate_all",
-            "load_all_as_skills",
-            "_register_stored_skill_fallbacks",
-            "_load_evolution_store",
-            "_hydrate_l1_markov",
-            "load_all_active",
-        ):
-            # Use the LAST occurrence: helper definitions may precede the
-            # wrapped call site (e.g. the _load_evolution_store closure).
-            call_pos = source.rfind(marker)
-            assert call_pos != -1, f"expected {marker} in initialize_deferred"
-            window = source[max(0, call_pos - 400):call_pos]
-            assert "_run_deferred_db" in window, (
-                f"{marker} must be wrapped by _run_deferred_db"
-            )
+    Asserted behaviorally below: scanning ``initialize_deferred``'s source for
+    ``_run_deferred_db`` occurrences would pin the current call-site layout
+    rather than the contract — that a blocking DB call keeps the loop
+    responsive and that ``status()`` still answers while the DB worker is busy.
+    """
 
     @pytest.mark.asyncio
     async def test_event_loop_stays_responsive_during_blocking_db_op(self) -> None:

@@ -104,12 +104,41 @@ class SessionCoordinator:
 
     # ── History ───────────────────────────────────────────────────────────
 
-    async def get_history(self, ctx: Any, settings: Any, limit: int = 200) -> dict[str, Any]:
-        """Get session message history with token stats."""
+    def resolve_session_engine(self, ctx: Any, session_id: str = "") -> tuple[Any, str]:
+        """Return the engine holding a session's live state, plus its id.
+
+        Conversation state lives on per-session engines from the registry, never
+        on ``ctx.engine`` (the base engine is only a template for building them).
+        Reading the base engine therefore observes an empty conversation — the
+        cause of an empty LeapBoard. Resolution order:
+
+        1. the requested ``session_id``, when that session is live;
+        2. otherwise the most recently active session ("the current session");
+        3. finally the base engine, for in-process mode where it *is* the engine.
+        """
+        base = getattr(ctx, "engine", None) if ctx is not None else None
+        registry = self._session_registry
+        if registry is not None:
+            session_ctx = registry.get(session_id) if session_id else None
+            if session_ctx is None and not session_id:
+                session_ctx = registry.most_recent()
+            if session_ctx is not None:
+                return session_ctx.engine, str(session_ctx.session_id or "")
+        if base is None:
+            return None, ""
+        return base, str(getattr(base, "_current_session_id", "") or "")
+
+    async def get_history(
+        self, ctx: Any, settings: Any, limit: int = 200, session_id: str = "",
+    ) -> dict[str, Any]:
+        """Get session message history with token stats.
+
+        ``session_id`` selects which live session to read; empty means "the
+        current session" (most recently active).
+        """
         if ctx is None:
             return {"session_id": "", "turn_count": 0, "token_count": 0, "messages": [], "artifacts": []}
-        engine = getattr(ctx, "engine", None)
-        session_id = getattr(engine, "_current_session_id", "") if engine else ""
+        engine, session_id = self.resolve_session_engine(ctx, session_id)
         messages: list[dict[str, Any]] = []
         if engine is not None:
             wm = getattr(engine, "_wm", None)

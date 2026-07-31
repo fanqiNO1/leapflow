@@ -279,7 +279,6 @@ class LLMSkillDistiller(SkillDistiller):
 
 def _extract_variable_params(episode: "Episode") -> List[Dict[str, str]]:
     """Identify parameters that vary across actions (likely user-configurable)."""
-    import os.path
 
     params: List[Dict[str, str]] = []
     seen_names: set[str] = set()

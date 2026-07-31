@@ -6,7 +6,7 @@ perceptual hashing. Designed for <1ms per hash computation.
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 try:
     from PIL import Image
@@ -82,9 +82,8 @@ def phash_64(data: bytes) -> bytes:
     # 2D DCT, keep 8x8 low-frequency
     dct_low = _dct_2d(matrix, 8)
 
-    # Flatten and compute median (exclude DC component)
+    # Flatten and compute median (exclude DC component at index 0)
     flat = [dct_low[r][c] for r in range(8) for c in range(8)]
-    dc = flat[0]
     flat_no_dc = flat[1:]
     median = sorted(flat_no_dc)[len(flat_no_dc) // 2]
 

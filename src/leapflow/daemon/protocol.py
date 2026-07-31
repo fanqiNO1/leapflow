@@ -227,8 +227,8 @@ class LeapService(Protocol):
         """Return persisted findings, newest first."""
         ...
 
-    async def session_history(self, limit: int = 200) -> Dict[str, Any]:
-        """Return the current conversation transcript and turn/token counts."""
+    async def session_history(self, limit: int = 200, session_id: str = "") -> Dict[str, Any]:
+        """Return a session's transcript and counts (empty id = current session)."""
         ...
 
     async def session_analyze(self) -> Dict[str, Any]:
@@ -267,7 +267,7 @@ class LeapService(Protocol):
         """Return an App Connector slash-command payload."""
         ...
 
-    async def command_execute(self, name: str, args: str = "") -> Dict[str, Any]:
+    async def command_execute(self, name: str, args: str = "", session_id: str = "") -> Dict[str, Any]:
         """Execute any engine-routed slash command and return structured result."""
         ...
 

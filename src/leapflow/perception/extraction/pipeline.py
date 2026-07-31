@@ -24,6 +24,7 @@ from leapflow.perception.types import (
 if TYPE_CHECKING:
     from leapflow.llm.base import LLMProvider
     from leapflow.perception.config import PerceptionConfig
+    from leapflow.perception.types import TiledBatch
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +210,7 @@ class OfflineExtractionPipeline:
                         _report("extract.vlm", completed_count, total)
                         return actions
 
-                tasks = [_do_one(p, c, l) for _, p, c, l in candidate_pairs]
+                tasks = [_do_one(p, c, level) for _, p, c, level in candidate_pairs]
                 results = await asyncio.gather(*tasks)
 
                 for (_, pair, _, _), actions in zip(candidate_pairs, results):

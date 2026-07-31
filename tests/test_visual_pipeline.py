@@ -7,7 +7,7 @@ import logging
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -22,15 +22,11 @@ from leapflow.perception.types import (
 )
 from leapflow.perception.video.analyzer import VideoAnalyzer
 from leapflow.perception.video.prompts import (
-    AnalysisPromptStrategy,
     DefaultAnalysisPrompts,
-    VLMMessageBuilder,
 )
 from leapflow.perception.video.segmenter import AnalysisSegment, VideoSegmenter
 from leapflow.perception.video.timeline import (
     SignalTimeline,
-    TimelineReader,
-    TimelineWriter,
 )
 
 
@@ -269,7 +265,7 @@ async def test_video_mode_analyze_routing(trajectory_store) -> None:
 
     # Create a minimal trajectory so analyze() has something to load
     from leapflow.domain.trajectory import (
-        ActionType, Episode, RawAction, StateSnapshot, Trajectory, TrajectoryStep,
+        ActionType, RawAction, StateSnapshot, Trajectory, TrajectoryStep,
     )
     import time as _time
     now = _time.time()

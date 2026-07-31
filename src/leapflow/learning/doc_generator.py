@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import logging
 import os.path
-import re
 import sys
 import textwrap
 from collections import Counter

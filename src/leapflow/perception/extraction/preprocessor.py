@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from leapflow.perception.cv.text_diff import TextDiffTracker
-from leapflow.perception.types import FramePair, InteractionSignal, PairContext, TextChange
+from leapflow.perception.types import FramePair, InteractionSignal, PairContext
 
 
 class SemanticPreprocessor:

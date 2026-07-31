@@ -147,8 +147,11 @@ _FIELD_DESCRIPTIONS = {
     "tools.verify_edits": "After edit_file/file_write, run an advisory syntax check on the written file (Python via AST) and attach syntax_ok/syntax_error to the result. Advisory only — it never blocks the write; the model sees a broken edit immediately and can fix it.",
     "agent.validate_tool_args": "Validate a tool call's required arguments before execution; a missing required parameter returns a structured invalid_arguments result (with the accepted schema) for in-turn self-repair instead of an opaque handler error. Does not count as a failure and never trips the batch-stop gate.",
     "daemon.max_concurrent_turns": "Maximum agent turns the daemon runs concurrently across sessions (Stage 3). 3 (default) lets several fresh TUI sessions run in parallel on isolated per-session engines; set to 1 for strict serialized fallback. Changes require `leap daemon restart`.",
-    "daemon.max_live_sessions": "Maximum per-session execution contexts the daemon keeps live (bounds memory); the least-recently-active non-primary session is evicted beyond this.",
-    "daemon.session_idle_ttl_s": "Idle seconds after which a non-primary session execution context is evicted (0 disables idle eviction).",
+    "daemon.log_level": "File-log verbosity for the leapd process (written to leapd.log). Independent from runtime.log_level so daemon field diagnostics (deferred init progress, turn usage, empty-response warnings) are captured without making the CLI/TUI noisy. Changes require `leap daemon restart`.",
+    "daemon.max_live_sessions": "Maximum per-session execution contexts the daemon keeps live (bounds memory); the least-recently-active non-primary session is evicted beyond this. Changes require `leap daemon restart`.",
+    "daemon.session_idle_ttl_s": "Idle seconds after which a non-primary session execution context is evicted (0 disables idle eviction). Changes require `leap daemon restart`.",
+    "daemon.request_ledger_max_entries": "Maximum RPC request ids the daemon remembers for idempotency (bounds memory); the oldest entries are dropped beyond this. Changes require `leap daemon restart`.",
+    "daemon.request_ledger_ttl_s": "Seconds a completed RPC request id stays in the idempotency ledger, so a client retry is deduplicated instead of re-running the turn. Changes require `leap daemon restart`.",
     "agent.cost_ceiling_context_multiple": "Optional cumulative effective-cost ceiling as a multiple of context length (0 disables; a soft finalize nudge, the iteration cap stays the hard bound).",
     "agent.subagent_max_depth": "Maximum delegation depth for subagents (governs recursive task decomposition).",
     "agent.max_parallel_tools": "Maximum tool calls executed in parallel within a single LLM response's batch (metadata-classified read-only / non-overlapping idempotent tools). Bounds the asyncio.gather fan-out so a large batch does not overwhelm IO; 1 forces sequential execution.",
@@ -210,6 +213,7 @@ _SECTION_CATEGORIES = {
 
 _VALUE_HINTS = {
     "runtime.log_level": "DEBUG|INFO|WARNING|ERROR",
+    "daemon.log_level": "DEBUG|INFO|WARNING|ERROR",
     "recording.mode": "video|default|vision_only",
     "signal.channels": "all or comma-separated channel names",
 }

@@ -8,7 +8,7 @@ from leapflow.engine import StreamEvent
 from leapflow.memory.protocol import MemoryEntry
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -183,8 +183,8 @@ class ProducerServices:
     def __init__(self, service: Any) -> None:
         self._service = service
 
-    async def session_history(self) -> dict[str, Any]:
-        return await self._service.session_history()
+    async def session_history(self, session_id: str = "") -> dict[str, Any]:
+        return await self._service.session_history(session_id=session_id)
 
     async def analyze_session(
         self,

@@ -26,6 +26,7 @@ from leapflow.domain.trajectory import RecordingMode
 
 if TYPE_CHECKING:
     from leapflow.causal import CausalGraph
+    from leapflow.causal.pipeline import CausalFusionPipeline
     from leapflow.domain.events import SystemEvent
     from leapflow.llm.base import LLMProvider
     from leapflow.platform.protocol import HostRpc

@@ -67,7 +67,7 @@ class PredictionEngine:
         degradation: Optional["DegradationPolicy"] = None,
     ) -> None:
         self._layers: List[PredictorLayer] = sorted(
-            layers, key=lambda l: l.priority
+            layers, key=lambda item: item.priority
         )
         self._config = config
         self._degradation = degradation
@@ -144,10 +144,10 @@ class PredictionEngine:
         """
         # Remove existing with same id (if any)
         self._layers = [
-            l for l in self._layers if l.layer_id != layer.layer_id
+            item for item in self._layers if item.layer_id != layer.layer_id
         ]
         self._layers.append(layer)
-        self._layers.sort(key=lambda l: l.priority)
+        self._layers.sort(key=lambda item: item.priority)
         logger.info(
             "Registered layer %s (priority=%d)", layer.layer_id, layer.priority
         )
@@ -158,7 +158,7 @@ class PredictionEngine:
         No-op if the layer is not found.
         """
         before = len(self._layers)
-        self._layers = [l for l in self._layers if l.layer_id != layer_id]
+        self._layers = [item for item in self._layers if item.layer_id != layer_id]
         if len(self._layers) < before:
             logger.info("Unregistered layer %s", layer_id)
 

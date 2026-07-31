@@ -40,7 +40,8 @@ def check_and_repair(
     try:
         conn = duckdb.connect(str(db_path), read_only=True)
         conn.execute("SELECT 1").fetchone()
-        tables = conn.execute("SHOW TABLES").fetchall()
+        # Probe that the catalog is readable too; the result itself is unused.
+        conn.execute("SHOW TABLES").fetchall()
         conn.close()
         return True
     except Exception as exc:

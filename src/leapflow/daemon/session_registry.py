@@ -6,9 +6,12 @@ turns of *different* sessions therefore run on *different* engine instances
 (isolated substrate), while turns *within* a session serialize on the session
 lock. A daemon-wide semaphore (wired in P3-2b/P3-4) bounds total concurrency.
 
-The first session to arrive reuses the daemon's existing base engine, so a
-single-session daemon (the common case) is byte-for-byte unchanged; only
-additional concurrent sessions get isolated per-session engines.
+Every session — including the first — gets its own engine built via
+``build_session_engine``, so all sessions follow one homogeneous path and the
+daemon's base engine is never mutated by conversation state. Consumers that
+need a session's live state (e.g. session-analysis watches feeding LeapBoard)
+must therefore resolve it through this registry rather than reading the base
+engine, which carries no conversation.
 
 This module is pure infrastructure: it does not import daemon internals and is
 unit-tested in isolation. Wiring into ``engine_chat`` (session-id routing) is
@@ -147,3 +150,22 @@ class SessionRegistry:
 
     def session_ids(self) -> List[str]:
         return list(self._contexts.keys())
+
+    def get(self, session_id: str) -> Optional[SessionExecutionContext]:
+        """Return an existing session context without creating one.
+
+        Read-only lookup for consumers that observe a session (e.g. the
+        session-analysis watch) and must never materialize an engine.
+        """
+        return self._contexts.get(str(session_id or ""))
+
+    def most_recent(self) -> Optional[SessionExecutionContext]:
+        """Return the most recently active session context, if any.
+
+        Defines "the current session" for consumers that have no session id of
+        their own. Since the base engine never holds conversation state, this is
+        the only meaningful fallback for observing live activity.
+        """
+        if not self._contexts:
+            return None
+        return max(self._contexts.values(), key=lambda ctx: ctx.last_active)

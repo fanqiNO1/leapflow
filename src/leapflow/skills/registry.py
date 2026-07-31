@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 from leapflow.domain.skill_types import SkillMetadata, SkillParameter  # noqa: F401
 
 if TYPE_CHECKING:
-    from leapflow.utils.resilience import ResiliencePolicy
     from leapflow.skills.conditions import ConditionChecker
 
 logger = logging.getLogger(__name__)

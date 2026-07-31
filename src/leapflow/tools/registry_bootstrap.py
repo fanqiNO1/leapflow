@@ -121,13 +121,20 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "description": (
                 "Search file CONTENTS by regex across a directory tree (ripgrep-backed). "
                 "Prefer this over shell_run grep: faster, skips VCS/dependency/build dirs, "
-                "and returns structured path:line:column matches. Use file_read for the "
-                "surrounding context of a hit."
+                "and returns structured path:line:column matches. Batch related lookups "
+                "into ONE call via `patterns` (OR-combined, single pass) instead of "
+                "issuing several separate searches. Use file_read for the surrounding "
+                "context of a hit."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Regex pattern to search for"},
+                    "patterns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Additional regex patterns OR-combined with pattern into one search pass",
+                    },
                     "path": {"type": "string", "description": "Base directory (default: current dir)"},
                     "glob": {"type": "string", "description": "Filter files by glob, e.g. *.py"},
                     "ignore_case": {"type": "boolean", "description": "Case-insensitive match (default: false)"},

@@ -8,11 +8,17 @@ from __future__ import annotations
 
 import logging
 import time
-import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from leapflow.engine.failure_envelope import FailureEnvelope, Recoverability
+from leapflow.engine.failure_envelope import FailureEnvelope, Recoverability, SideEffectState
+from leapflow.engine.interaction_request import (
+    InteractionRequest,
+    InteractionType,
+    Severity,
+    SuggestedAction,
+    TimeoutBehavior,
+)
 from leapflow.engine.oneshot_guard import OneShotGuard
 from leapflow.engine.recovery_budget import RecoveryBudget
 from leapflow.engine.recovery_decision import (
@@ -22,6 +28,14 @@ from leapflow.engine.recovery_decision import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Actions that re-run work already attempted. Safe only when the failed attempt
+# left no trace; after a mutation they can duplicate the effect.
+_REPLAYING_ACTIONS = frozenset({
+    RecoveryAction.RETRY_WITH_BACKOFF,
+    RecoveryAction.TRANSFORM_AND_RETRY,
+    RecoveryAction.FAILOVER,
+})
 
 
 @dataclass
@@ -153,6 +167,7 @@ class RecoveryCoordinator:
             return decision
 
         # Strategy evaluation
+        blocked_by_side_effect: list[str] = []
         for strategy in self._strategies:
             if not self._matches_source(strategy, envelope):
                 continue
@@ -166,6 +181,16 @@ class RecoveryCoordinator:
 
             # Budget pre-check for the strategy's expected cost
             decision = strategy.decide(envelope, self._state)
+
+            # Side-effect gating: once the attempt may have mutated state, a
+            # replaying action can duplicate it. Reject the candidate (rolling
+            # back whatever decide() staged) and keep looking for a strategy
+            # that does not replay; if none exists, halt with a checkpoint below.
+            if self._replay_blocked_by_side_effect(envelope, decision):
+                self._rollback_state_changes(decision, strategy)
+                blocked_by_side_effect.append(strategy.key)
+                continue
+
             if decision.budget_cost > 0:
                 if not self._budget.can_afford(decision.budget_cost, envelope.category):
                     # Rollback any state mutations from decide()
@@ -190,10 +215,82 @@ class RecoveryCoordinator:
             self._record_audit(decision, strategy_key=strategy.key)
             return decision
 
+        if blocked_by_side_effect:
+            decision = self._side_effect_halt(envelope, blocked_by_side_effect)
+            self._record_audit(decision, strategy_key="<side_effect_gated>")
+            return decision
+
         # No strategy matched
         decision = self.terminal_decision(envelope)
         self._record_audit(decision, strategy_key="<none_matched>")
         return decision
+
+    @staticmethod
+    def _replay_blocked_by_side_effect(
+        envelope: FailureEnvelope, decision: RecoveryDecision,
+    ) -> bool:
+        """Return whether the side-effect state forbids this replaying action.
+
+        Every state other than ``NONE`` blocks: ``COMMITTED`` and ``PARTIAL``
+        mean state changed, and ``UNKNOWN`` means it may have. ``UNKNOWN`` is
+        deliberately included rather than treated as safe — it is both the
+        classifier's fallback and the state it assigns to ``external_side_effect``
+        (an outbound send, an external API call), so exempting it would leave the
+        highest-risk case ungated.
+        """
+        if envelope.side_effect_state is SideEffectState.NONE:
+            return False
+        return decision.action in _REPLAYING_ACTIONS
+
+    def _side_effect_halt(
+        self, envelope: FailureEnvelope, blocked_strategies: list[str],
+    ) -> RecoveryDecision:
+        """Halt with a checkpoint because replaying could duplicate an effect.
+
+        Resumption is user-mediated on purpose: only the user (or a read-back of
+        the target's state) can settle whether the effect landed.
+        """
+        tool_name = envelope.context.tool_name or "the operation"
+        state_label = envelope.side_effect_state.value
+        reason = (
+            f"Automatic retry is blocked: {tool_name} failed with side-effect state "
+            f"'{state_label}', so replaying it could duplicate the effect. "
+            f"Strategies withheld: {', '.join(blocked_strategies)}."
+        )
+        interaction = InteractionRequest.create(
+            interaction_type=InteractionType.RETRY_CHOICE,
+            severity=Severity.WARNING,
+            title=f"{tool_name} may already have taken effect",
+            description=(
+                f"It failed with '{envelope.failure_code or envelope.category}', but its "
+                f"side-effect state is '{state_label}', so retrying automatically could "
+                "apply it twice. Check whether it took effect, then decide how to proceed."
+            ),
+            suggested_actions=(
+                SuggestedAction(
+                    label="Verify the target state, then retry if it did not apply",
+                    is_default=True,
+                ),
+                SuggestedAction(label="Abandon this step and continue"),
+            ),
+            context={
+                "tool_name": tool_name,
+                "side_effect_state": state_label,
+                "failure_code": envelope.failure_code,
+                "category": envelope.category,
+            },
+            resumption_key=envelope.envelope_id,
+            timeout_behavior=TimeoutBehavior.PERSIST,
+        )
+        return RecoveryDecision.create(
+            envelope=envelope,
+            action=RecoveryAction.HALT_WITH_CHECKPOINT,
+            reason=reason,
+            strategy_key="<side_effect_gated>",
+            retry_semantics=RetrySemantics(consumes_retry_budget=False),
+            budget_cost=0,
+            interaction=interaction,
+        )
 
     def on_strategy_outcome(self, decision_id: str, success: bool) -> None:
         """Record the outcome of executing a recovery decision.

@@ -36,8 +36,12 @@ class SessionAnalysisServices(Protocol):
     engine/LLM internals directly.
     """
 
-    async def session_history(self) -> dict[str, Any]:
-        """Return {session_id, turn_count, token_count, messages:[{role,content}]}."""
+    async def session_history(self, session_id: str = "") -> dict[str, Any]:
+        """Return {session_id, turn_count, token_count, messages:[{role,content}]}.
+
+        ``session_id`` selects which live session to read; empty means the
+        host's current session.
+        """
         ...
 
     async def analyze_session(
@@ -161,7 +165,16 @@ class SessionAnalysisProducer:
         max_per_min = int(params.get("max_refresh_per_min", _DEFAULT_MAX_PER_MIN))
 
         try:
-            history = await services.session_history()
+            # A session watch is bound to the session that armed it (the board is
+            # opened from one TUI). Without that binding the host would fall back
+            # to "most recently active", which is wrong once several TUIs share
+            # the daemon.
+            bound_session = str(params.get("session_id", "") or "")
+            try:
+                history = await services.session_history(bound_session)
+            except TypeError:
+                # Host predates the session-scoped signature.
+                history = await services.session_history()
         except Exception as exc:  # noqa: BLE001 - degrade if history unavailable
             logger.debug("session producer: history unavailable: %s", exc)
             return []

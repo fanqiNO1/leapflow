@@ -1,8 +1,7 @@
 """Tests for CLI help-based command discovery."""
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -17,7 +16,7 @@ from leapflow.gateway.connectors.cli_discovery import (
     _infer_effect,
 )
 from leapflow.gateway.connectors.action_registry import ActionRegistry
-from leapflow.gateway.connectors.protocol import ActionSpec, BackendKind
+from leapflow.gateway.connectors.protocol import ActionSpec
 
 
 # ── Realistic help text fixtures ─────────────────────────────────────

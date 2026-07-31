@@ -62,7 +62,11 @@ from leapflow.engine.tool_concurrency import (
     ToolCall as ConcurrentToolCall,
     ToolConcurrencyPolicy,
 )
-from leapflow.engine.tool_execution import ToolExecutionLedger, execution_policy_for
+from leapflow.engine.tool_execution import (
+    ToolExecutionLedger,
+    effect_is_uncertain_on_failure,
+    execution_policy_for,
+)
 from leapflow.engine.graph_planner import GraphPlanner
 from leapflow.engine.scheduler import TaskScheduler
 from leapflow.engine.session import SessionController, SessionMode
@@ -204,6 +208,9 @@ def _tool_result_metadata(
             "counts_as_failure", "counts_as_tool_attempt", "ui_hidden", "skipped_reason",
             "blocked_by_tool", "blocked_by_error", "execution_id", "idempotency_key", "execution_status",
             "execution_policy", "tool_call_id",
+            # Must reach the model: a failed side effect whose fate is unknown
+            # needs verification, not a blind retry.
+            "side_effect_uncertain", "retry_guidance",
         ):
             if key in result:
                 metadata[key] = result[key]
@@ -283,6 +290,22 @@ def _unknown_tool_retry_prompt(result: Dict[str, Any]) -> str:
     )
 
 
+# Empty-response hardening: an LLM call that "succeeds" with empty content is a
+# failure signal, never a valid answer. It gets one bounded retry with an
+# explicit nudge; a second empty response produces a transparent degraded
+# message instead of a fake-success filler.
+_EMPTY_RESPONSE_RETRY_PROMPT = (
+    "SYSTEM: Your previous reply was empty. Respond to the user's request now "
+    "with substantive content. If you cannot help, say so explicitly."
+)
+
+_EMPTY_RESPONSE_DEGRADED_MESSAGE = (
+    "The model returned an empty response twice, so no answer was produced for "
+    "this turn. This is usually transient (e.g., provider or runtime warm-up "
+    "right after startup) \u2014 please resend your message."
+)
+
+
 def _is_permission_failure_payload(payload: Dict[str, Any]) -> bool:
     """Return whether a tool-result payload represents an unresolved permission failure."""
     return is_permission_failure_payload(payload)
@@ -317,6 +340,92 @@ def _tool_failure_text(payload: Dict[str, Any]) -> str:
         if value:
             return str(value)
     return "unknown error"
+
+
+def _terminal_failure_text(decision: Any) -> str:
+    """Render a terminal recovery decision for the user.
+
+    When the decision carries an ``InteractionRequest``, its title, description,
+    and suggested actions are what the user needs in order to act; the raw
+    ``reason`` is written for the audit log. Falling back to ``reason`` alone
+    (the previous behavior) told the user a turn had stopped without saying what
+    to do about it.
+    """
+    interaction = getattr(decision, "interaction", None)
+    if interaction is None:
+        return str(getattr(decision, "reason", "") or "")
+
+    lines = [str(interaction.title or "Input needed to continue")]
+    if interaction.description:
+        lines.append(str(interaction.description))
+    for action in interaction.suggested_actions or ():
+        label = str(getattr(action, "label", "") or "")
+        command = str(getattr(action, "command", "") or "")
+        entry = f"  - {label}" if label else "  -"
+        if command:
+            entry += f": {command}"
+        lines.append(entry)
+    return "\n".join(line for line in lines if line.strip())
+
+
+def _interaction_metadata(decision: Any) -> Dict[str, Any]:
+    """Return the structured InteractionRequest payload, or ``{}``.
+
+    Carried on the stream event so the TUI/gateway can render a typed prompt and
+    resume via ``resumption_key`` instead of parsing the message text.
+    """
+    interaction = getattr(decision, "interaction", None)
+    if interaction is None:
+        return {}
+    return {
+        "interaction": {
+            "request_id": interaction.request_id,
+            "interaction_type": getattr(interaction.interaction_type, "value", str(interaction.interaction_type)),
+            "severity": getattr(interaction.severity, "value", str(interaction.severity)),
+            "title": interaction.title,
+            "description": interaction.description,
+            "suggested_actions": [
+                {
+                    "label": str(getattr(action, "label", "") or ""),
+                    "command": str(getattr(action, "command", "") or ""),
+                    "description": str(getattr(action, "description", "") or ""),
+                    "is_default": bool(getattr(action, "is_default", False)),
+                }
+                for action in interaction.suggested_actions or ()
+            ],
+            "resumption_key": interaction.resumption_key,
+            "timeout_behavior": getattr(
+                interaction.timeout_behavior, "value", str(interaction.timeout_behavior)
+            ),
+            "context": interaction.context_dict,
+        }
+    }
+
+
+def _annotate_uncertain_effect(payload: Dict[str, Any], policy: str) -> Dict[str, Any]:
+    """Mark a failed side-effecting result whose effect may already have landed.
+
+    A timeout or transport error on an outbound send does not mean the message
+    was not delivered, so the model must verify before resending. Without this
+    the failure reads as a plain "did not happen" and the natural next step is a
+    blind retry that duplicates the effect. Batch-level protection already stops
+    the rest of the batch (see ``_should_stop_after_tool_result``); this carries
+    the same knowledge across turns, where the model decides what to do next.
+
+    Advisory by design: only the tool's own state can settle whether the effect
+    landed, so a hard block would also reject legitimate retries (e.g. resending
+    after fixing an argument).
+    """
+    if not _tool_result_counts_as_failure(payload):
+        return payload
+    if not effect_is_uncertain_on_failure(policy):
+        return payload
+    payload["side_effect_uncertain"] = True
+    payload["retry_guidance"] = (
+        "This operation may already have taken effect despite the error. "
+        "Verify the current state before retrying; do not simply repeat the call."
+    )
+    return payload
 
 
 def _should_stop_after_tool_result(tool_name: str, payload: Dict[str, Any]) -> bool:
@@ -1404,6 +1513,54 @@ class AgentEngine:
                 session_id=session_id, turn_id=turn_id,
             ))
         return None
+
+    def _save_halt_checkpoint(
+        self,
+        decision: Any,
+        envelope: Any,
+        messages: List[Dict[str, Any]],
+        *,
+        budget_used: int,
+        tools_kwarg: Optional[Dict[str, Any]] = None,
+        use_native_tools: bool = False,
+    ) -> None:
+        """Persist a resumable checkpoint for a ``HALT_WITH_CHECKPOINT`` decision.
+
+        Shared by every terminal dispatch site (streaming included): the gate
+        that withholds a replay after a side effect emits this action from any
+        path, and a halt that skips the save leaves the decision's
+        ``resumption_key`` pointing at nothing. The envelope id and the
+        interaction's request id are recorded so the client can find this
+        checkpoint again from the ``InteractionRequest`` it was shown
+        (``resumption_key`` == envelope id; lookup via ``list_pending``).
+        """
+        interaction = getattr(decision, "interaction", None)
+        try:
+            checkpoint = RecoveryCheckpoint(
+                session_id=getattr(self, '_current_session_id', '') or '',
+                turn_id=budget_used,
+                failure_envelope_data={
+                    "envelope_id": envelope.envelope_id,
+                    "message": envelope.message,
+                    "category": envelope.category,
+                    "failure_code": envelope.failure_code,
+                    "source": envelope.source.value,
+                    "side_effect_state": envelope.side_effect_state.value,
+                },
+                interaction_request_id=(
+                    interaction.request_id if interaction is not None else ""
+                ),
+                messages_snapshot=list(messages),
+                context_data={
+                    "resumption_key": getattr(interaction, "resumption_key", "") or "",
+                    "tools_kwarg_keys": list((tools_kwarg or {}).keys()),
+                    "use_native_tools": use_native_tools,
+                    "budget_used": budget_used,
+                },
+            )
+            self._checkpoint_store.save(checkpoint)
+        except Exception:  # noqa: BLE001 - a failed save must not mask the halt itself
+            logger.warning("recovery: failed to persist halt checkpoint", exc_info=True)
 
     def set_tool_timeouts(self, timeouts: Dict[str, float]) -> None:
         """Set per-tool execution timeout overrides (seconds)."""
@@ -2829,24 +2986,13 @@ class AgentEngine:
 
                 elif decision.action in (RecoveryAction.HALT_CLEAN, RecoveryAction.HALT_WITH_CHECKPOINT):
                     if decision.action == RecoveryAction.HALT_WITH_CHECKPOINT:
-                        checkpoint = RecoveryCheckpoint(
-                            session_id=getattr(self, '_current_session_id', '') or '',
-                            turn_id=budget.used,
-                            failure_envelope_data={
-                                "message": envelope.message,
-                                "category": envelope.category,
-                                "failure_code": envelope.failure_code,
-                                "source": envelope.source.value,
-                            },
-                            messages_snapshot=list(messages),
-                            context_data={
-                                "tools_kwarg_keys": list(tools_kwarg.keys()),
-                                "use_native_tools": use_native_tools,
-                                "budget_used": budget.used,
-                            },
+                        self._save_halt_checkpoint(
+                            decision, envelope, messages,
+                            budget_used=budget.used,
+                            tools_kwarg=tools_kwarg,
+                            use_native_tools=use_native_tools,
                         )
-                        self._checkpoint_store.save(checkpoint)
-                    fatal_error = decision.reason
+                    fatal_error = _terminal_failure_text(decision)
                     self._audit_sink.update_outcome(
                         decision.decision_id, "failure",
                         reason="Terminal halt",
@@ -2854,8 +3000,14 @@ class AgentEngine:
                     break
 
                 else:
-                    # ASK_USER, SKIP_AND_CONTINUE, or unknown
-                    fatal_error = decision.reason
+                    # ASK_USER, SKIP_AND_CONTINUE, or unknown. ASK_USER carries an
+                    # InteractionRequest describing what the user must decide;
+                    # surfacing only decision.reason would drop it.
+                    if decision.action == RecoveryAction.HALT_WITH_CHECKPOINT:
+                        self._save_halt_checkpoint(
+                            decision, envelope, messages, budget_used=budget.used,
+                        )
+                    fatal_error = _terminal_failure_text(decision)
                     break
             _clear_indicator()
 
@@ -3234,6 +3386,7 @@ class AgentEngine:
         use_native_tools = assembly.plan.native_tools
         result_budget = self._effective_tool_result_budget()
         unknown_tool_retry_used = False
+        empty_response_retry_used = False
         self._usage_tracker.reset()
 
         tools_kwarg: Dict[str, Any] = self._planned_tools_kwarg(assembly.plan)
@@ -3338,8 +3491,19 @@ class AgentEngine:
                         continue
                     else:
                         # Terminal: HALT_CLEAN, HALT_WITH_CHECKPOINT, ASK_USER
-                        fatal_error = decision.reason
-                        yield StreamEvent(type="error", content=decision.reason)
+                        if decision.action == RecoveryAction.HALT_WITH_CHECKPOINT:
+                            self._save_halt_checkpoint(
+                                decision, envelope, messages,
+                                budget_used=budget.used,
+                                tools_kwarg=tools_kwarg,
+                                use_native_tools=use_native_tools,
+                            )
+                        fatal_error = _terminal_failure_text(decision)
+                        yield StreamEvent(
+                            type="error",
+                            content=fatal_error,
+                            metadata=_interaction_metadata(decision),
+                        )
                         break
                 _clear_indicator()
 
@@ -3528,9 +3692,17 @@ class AgentEngine:
                             coordinator.on_strategy_outcome(decision.decision_id, True)
                             continue
                         else:
-                            fatal_error = decision.reason
+                            if decision.action == RecoveryAction.HALT_WITH_CHECKPOINT:
+                                self._save_halt_checkpoint(
+                                    decision, envelope, messages, budget_used=budget.used,
+                                )
+                            fatal_error = _terminal_failure_text(decision)
                             logger.error("unified_loop_stream: unrecoverable %s: %s", envelope.category, exc)
-                            yield StreamEvent(type="error", content=decision.reason)
+                            yield StreamEvent(
+                                type="error",
+                                content=fatal_error,
+                                metadata=_interaction_metadata(decision),
+                            )
                             break
 
                     content = "".join(content_parts).strip()
@@ -3587,9 +3759,17 @@ class AgentEngine:
                             coordinator.on_strategy_outcome(decision.decision_id, True)
                             continue
                         else:
-                            fatal_error = decision.reason
+                            if decision.action == RecoveryAction.HALT_WITH_CHECKPOINT:
+                                self._save_halt_checkpoint(
+                                    decision, envelope, messages, budget_used=budget.used,
+                                )
+                            fatal_error = _terminal_failure_text(decision)
                             logger.error("unified_loop_stream: unrecoverable %s: %s", envelope.category, exc)
-                            yield StreamEvent(type="error", content=decision.reason)
+                            yield StreamEvent(
+                                type="error",
+                                content=fatal_error,
+                                metadata=_interaction_metadata(decision),
+                            )
                             break
                     _clear_indicator()
                     content = (resp.content or "").strip()
@@ -3607,11 +3787,31 @@ class AgentEngine:
             tool_call = self._parse_tool_call_from_content(content)
 
             if tool_call is None:
+                if not content and not empty_response_retry_used:
+                    # Empty successful response: treat as a transient failure and
+                    # retry once with an explicit nudge (mirrors the bounded
+                    # unknown-tool retry). WARNING-level so the field log always
+                    # captures the occurrence for diagnosis.
+                    empty_response_retry_used = True
+                    logger.warning(
+                        "unified_loop_stream: empty LLM response "
+                        "(model=%s provider=%s stream=%s); retrying once",
+                        getattr(self._llm, "model", ""),
+                        getattr(self._llm, "active_provider_name", "") or getattr(self._llm, "provider", ""),
+                        self._settings.stream_output,
+                    )
+                    messages.append(build_user_message_text(_EMPTY_RESPONSE_RETRY_PROMPT))
+                    continue
                 self._wm.remember_chat(build_assistant_message(content))
                 trace.record(ExecutionMode.COMPLETE)
                 if not content:
+                    logger.warning(
+                        "unified_loop_stream: empty LLM response persisted after retry "
+                        "(model=%s); emitting transparent degraded message",
+                        getattr(self._llm, "model", ""),
+                    )
                     fallback = _app_onboarding_recovery_message(messages)
-                    final_text = fallback or "I processed your request but have no additional output."
+                    final_text = fallback or _EMPTY_RESPONSE_DEGRADED_MESSAGE
                     self._emit_chat_event("response", {"content": final_text[:500]})
                     yield StreamEvent(type="final", content=final_text)
                 else:
@@ -4117,6 +4317,7 @@ class AgentEngine:
                 "execution_policy": policy,
                 "tool_call_id": tool_call_id,
             }
+            _annotate_uncertain_effect(failed_result, policy)
             self._tool_execution_ledger.complete(record, failed_result)
             raise
         if isinstance(result, dict):
@@ -4136,6 +4337,9 @@ class AgentEngine:
                 "execution_policy": policy,
                 "tool_call_id": tool_call_id,
             }
+        # Annotated before the ledger completes so the recorded result and the
+        # copy the model sees carry the same verdict.
+        _annotate_uncertain_effect(result_for_ledger, policy)
         completed = self._tool_execution_ledger.complete(record, result_for_ledger)
         result_for_ledger["execution_status"] = completed.status
         return result_for_ledger
@@ -4372,7 +4576,7 @@ class AgentEngine:
             "already_executed", "duplicate_suppressed", "execution_reused", "execution_skipped",
             "counts_as_failure", "counts_as_tool_attempt", "ui_hidden", "skipped_reason",
             "blocked_by_tool", "blocked_by_error", "tool_call_id", "path", "file_path",
-            "bytes_written",
+            "bytes_written", "side_effect_uncertain",
         ):
             if key in result:
                 metadata[key] = result[key]

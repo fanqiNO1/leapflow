@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, AsyncIterator, NamedTuple, Sequence
+from typing import AsyncIterator, NamedTuple, Sequence
 
 from leapflow.gateway.connectors.composite_event_source import CompositeEventSource
 from leapflow.gateway.connectors.event_sources import CliEventSourceConfig, CliNdjsonEventSource

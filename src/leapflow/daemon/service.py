@@ -216,10 +216,28 @@ class RuntimeLeapService:
                     "Deferred init still in progress after %.0fs; serving turn "
                     "in critical-only mode", self._DEFERRED_WAIT_TIMEOUT_S,
                 )
+                yield StreamChunk(
+                    event_type="status",
+                    content=(
+                        "Runtime is still warming up; answering with core "
+                        "capabilities only. Full capabilities return shortly."
+                    ),
+                    request_id=request_id,
+                    metadata={"degraded": "warmup"},
+                )
             except Exception:
                 logger.warning(
                     "Deferred init failed; serving turn in critical-only mode",
                     exc_info=True,
+                )
+                yield StreamChunk(
+                    event_type="status",
+                    content=(
+                        "Some runtime components failed to initialize; answering "
+                        "with core capabilities only. See daemon logs for details."
+                    ),
+                    request_id=request_id,
+                    metadata={"degraded": "deferred_init_failed"},
                 )
 
         # Busy-feedback for clients when all slots occupied
@@ -451,8 +469,10 @@ class RuntimeLeapService:
     async def session_resume(self, session_id: str) -> dict[str, Any]:
         return await self._session_coordinator.resume(self.context, session_id)
 
-    async def session_history(self, limit: int = 200) -> dict[str, Any]:
-        return await self._session_coordinator.get_history(self._ctx, self._settings, limit=limit)
+    async def session_history(self, limit: int = 200, session_id: str = "") -> dict[str, Any]:
+        return await self._session_coordinator.get_history(
+            self._ctx, self._settings, limit=limit, session_id=session_id,
+        )
 
     async def session_analyze(self) -> dict[str, Any]:
         return await self._session_coordinator.analyze(self._monitors, self._ctx, self._settings)
@@ -600,9 +620,9 @@ class RuntimeLeapService:
         from leapflow.cli.commands.slash_handlers import build_app_payload
         return await build_app_payload(self.context, args)
 
-    async def command_execute(self, name: str, args: str = "") -> dict[str, Any]:
+    async def command_execute(self, name: str, args: str = "", session_id: str = "") -> dict[str, Any]:
         from leapflow.cli.commands.slash_handlers import command_execute
-        return await command_execute(self.context, name, args)
+        return await command_execute(self.context, name, args, session_id=session_id)
 
     # ── Delegate: gateway (stubs) ────────────────────────────────────
 

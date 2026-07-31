@@ -44,7 +44,7 @@ def graph_to_pair_context(
     This adapter enables the existing ContextEnrichedVLMExtractor to consume
     causal chain data without modification.
     """
-    from leapflow.perception.types import InteractionSignal, PairContext
+    from leapflow.perception.types import PairContext
 
     chains = graph.chains_in_window(t0, t1)
     signals: List[InteractionSignal] = []

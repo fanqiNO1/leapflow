@@ -1,7 +1,6 @@
 """Tests for CliNdjsonEventSource — generic CLI NDJSON subprocess manager."""
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import pytest

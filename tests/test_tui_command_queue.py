@@ -1416,15 +1416,31 @@ async def test_buffer_insert_compacts_large_chinese_paste_with_ascii_marker() ->
     assert app.submit_text(visible).text == pasted.strip()
 
 
+def _paste_fragments(app: LeapApp, monkeypatch, text: str, *, size: int) -> str:
+    """Feed ``text`` as same-paste fragments under a controlled clock.
+
+    Fragment detection is time-based (``PASTE_FRAGMENT_WINDOW_S`` = 80ms between
+    inserts). Driving it off the real clock makes these tests load-sensitive: a
+    single scheduling stall over the window splits one paste into two, so the
+    compactor restarts and plaintext leaks into the visible buffer. A stepped
+    fake clock states the intent directly — "these fragments belong to one
+    paste" — and keeps the assertion about compaction, not machine speed.
+    """
+    clock = [100.0]
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+    for index in range(0, len(text), size):
+        app._input_area.buffer.insert_text(text[index:index + size])
+        clock[0] += 0.001  # well inside the window: one continuous paste
+    return app._input_area.buffer.text
+
+
 @pytest.mark.asyncio
-async def test_fragmented_chinese_paste_compacts_and_submits_full_text() -> None:
+async def test_fragmented_chinese_paste_compacts_and_submits_full_text(monkeypatch) -> None:
     app, _console, _status = _make_app()
     pasted = "经济活动达到最低点，经济增长理论，索洛增长模型。" * 80
 
-    for index in range(0, len(pasted), 18):
-        app._input_area.buffer.insert_text(pasted[index:index + 18])
+    visible = _paste_fragments(app, monkeypatch, pasted, size=18)
 
-    visible = app._input_area.buffer.text
     assert pasted not in visible
     assert "经济活动" not in visible
     assert visible.startswith("[pasted block #1:")
@@ -1434,14 +1450,12 @@ async def test_fragmented_chinese_paste_compacts_and_submits_full_text() -> None
 
 
 @pytest.mark.asyncio
-async def test_fragmented_english_single_line_paste_compacts() -> None:
+async def test_fragmented_english_single_line_paste_compacts(monkeypatch) -> None:
     app, _console, _status = _make_app()
     pasted = "capital accumulation and productivity growth " * 80
 
-    for index in range(0, len(pasted), 16):
-        app._input_area.buffer.insert_text(pasted[index:index + 16])
+    visible = _paste_fragments(app, monkeypatch, pasted, size=16)
 
-    visible = app._input_area.buffer.text
     assert pasted not in visible
     assert visible.startswith("[pasted block #1:")
     assert visible.isascii()
@@ -1541,3 +1555,50 @@ async def test_process_loop_runs_submitted_commands_serially() -> None:
         (2, TuiCommandStatus.DONE),
     ]
     assert status.counts[-1] == (0, 0)
+
+
+# ── /clear screen clearing (renderer-owned) ──────────────────────────
+
+
+def test_clear_screen_goes_through_prompt_toolkit_renderer() -> None:
+    """/clear must clear via the renderer that owns the TTY.
+
+    Regression: the daemon REPL only redrew the banner (no clearing at all),
+    and the in-process REPL shelled out to `clear`, which leaves the
+    prompt_toolkit renderer's cursor cache stale.
+    """
+    app, _console, _status = _make_app()
+    cleared: list[str] = []
+
+    class _Renderer:
+        def clear(self) -> None:
+            cleared.append("renderer.clear")
+
+    app._app = SimpleNamespace(is_running=True, renderer=_Renderer())
+
+    app.clear_screen()
+
+    assert cleared == ["renderer.clear"]
+
+
+def test_clear_screen_is_a_noop_when_app_not_running() -> None:
+    app, _console, _status = _make_app()
+
+    class _Renderer:
+        def clear(self) -> None:  # pragma: no cover - must not be reached
+            raise AssertionError("renderer must not be touched while not running")
+
+    app._app = SimpleNamespace(is_running=False, renderer=_Renderer())
+
+    app.clear_screen()  # must not raise
+
+
+def test_no_shell_clear_bypass_remains_in_slash_handlers() -> None:
+    """No handler may clear the screen behind the renderer's back."""
+    import inspect
+
+    import leapflow.cli.commands.slash_handlers as handlers
+
+    source = inspect.getsource(handlers)
+    assert 'os.system("cls"' not in source
+    assert not hasattr(handlers, "handle_clear")

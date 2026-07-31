@@ -39,7 +39,11 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 
 def _serve(args: argparse.Namespace, settings: object) -> int:
     from leapflow.dashboard.server import run_server
+    from leapflow.logging_setup import init_logging
 
+    # Long-lived server process: capture INFO evidence in its log output,
+    # mirroring the leapd daemon surface.
+    init_logging("INFO")
     token = getattr(args, "token", "") or launcher.generate_token()
     bind = getattr(args, "bind", "") or settings.dashboard_bind
     port = getattr(args, "port", 0) or settings.dashboard_port

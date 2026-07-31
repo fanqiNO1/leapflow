@@ -720,6 +720,20 @@ class LeapApp:
         if self._app.is_running:
             self._app.exit()
 
+    def clear_screen(self) -> None:
+        """Clear the terminal and reset the renderer's position state.
+
+        Must go through prompt_toolkit's renderer rather than a shell ``clear``:
+        the Application owns the TTY (``full_screen=False`` + ``patch_stdout``)
+        and caches where it last drew. Clearing behind its back leaves that
+        cache stale, so the next redraw lands at the wrong offset. Renderer
+        ``clear()`` erases the screen *and* re-requests the absolute cursor
+        position, keeping the layout consistent afterwards.
+        """
+        if not self._app.is_running:
+            return
+        self._app.renderer.clear()
+
     # ── Async worker ─────────────────────────────────────────────────
 
     async def _process_loop(self) -> None:
