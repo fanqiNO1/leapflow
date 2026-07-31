@@ -9,6 +9,7 @@ Covers each strategy:
 """
 from __future__ import annotations
 
+import pytest
 
 from leapflow.engine.failure_envelope import (
     FailureContext,
@@ -82,10 +83,6 @@ class TestProtocolCompliance:
         keys = [s.key for s in strategies]
         assert len(keys) == len(set(keys)), "Strategy keys must be unique"
 
-    def test_strategy_count(self) -> None:
-        strategies = default_strategies()
-        assert len(strategies) == 8
-
 
 # ===========================================================================
 # ContextCompressStrategy Tests
@@ -93,18 +90,6 @@ class TestProtocolCompliance:
 
 
 class TestContextCompressStrategy:
-    def test_priority(self) -> None:
-        s = ContextCompressStrategy()
-        assert s.priority == 10
-
-    def test_applicable_sources(self) -> None:
-        s = ContextCompressStrategy()
-        assert s.applicable_sources == frozenset({"llm"})
-
-    def test_applicable_categories(self) -> None:
-        s = ContextCompressStrategy()
-        assert s.applicable_categories == frozenset({"context_overflow", "payload_too_large"})
-
     def test_can_apply_fresh_state(self) -> None:
         s = ContextCompressStrategy()
         env = _make_envelope(category="context_overflow")
@@ -156,9 +141,6 @@ class TestContextCompressStrategy:
 
 
 class TestMultimodalStripStrategy:
-    def test_priority(self) -> None:
-        assert MultimodalStripStrategy().priority == 15
-
     def test_can_apply_with_image_message(self) -> None:
         s = MultimodalStripStrategy()
         env = _make_envelope(category="image_too_large", message="Image file too large to encode")
@@ -184,14 +166,6 @@ class TestMultimodalStripStrategy:
 
 
 class TestProviderFailoverStrategy:
-    def test_priority(self) -> None:
-        assert ProviderFailoverStrategy().priority == 20
-
-    def test_applicable_categories(self) -> None:
-        s = ProviderFailoverStrategy()
-        expected = frozenset({"billing", "auth_permanent", "overloaded", "model_not_found", "content_blocked"})
-        assert s.applicable_categories == expected
-
     def test_can_apply(self) -> None:
         s = ProviderFailoverStrategy()
         env = _make_envelope(category="billing")
@@ -213,13 +187,6 @@ class TestProviderFailoverStrategy:
 
 
 class TestCredentialRotateStrategy:
-    def test_priority(self) -> None:
-        assert CredentialRotateStrategy().priority == 25
-
-    def test_applicable_categories(self) -> None:
-        s = CredentialRotateStrategy()
-        assert s.applicable_categories == frozenset({"auth_error", "rate_limited", "billing"})
-
     def test_decide_action(self) -> None:
         s = CredentialRotateStrategy()
         env = _make_envelope(category="auth_error")
@@ -235,12 +202,6 @@ class TestCredentialRotateStrategy:
 
 
 class TestThinkingDisableStrategy:
-    def test_priority(self) -> None:
-        assert ThinkingDisableStrategy().priority == 30
-
-    def test_applicable_categories(self) -> None:
-        assert ThinkingDisableStrategy().applicable_categories == frozenset({"format_error"})
-
     def test_can_apply_always_true(self) -> None:
         s = ThinkingDisableStrategy()
         env = _make_envelope(category="format_error")
@@ -261,9 +222,6 @@ class TestThinkingDisableStrategy:
 
 
 class TestNativeToTextFallbackStrategy:
-    def test_priority(self) -> None:
-        assert NativeToTextFallbackStrategy().priority == 35
-
     def test_can_apply_with_tool_call_message(self) -> None:
         s = NativeToTextFallbackStrategy()
         env = _make_envelope(category="format_error", message="Failed to parse tool_call response")
@@ -294,15 +252,6 @@ class TestNativeToTextFallbackStrategy:
 
 
 class TestToolSchemaExpandStrategy:
-    def test_priority(self) -> None:
-        assert ToolSchemaExpandStrategy().priority == 40
-
-    def test_applicable_sources(self) -> None:
-        assert ToolSchemaExpandStrategy().applicable_sources == frozenset({"tool"})
-
-    def test_applicable_categories(self) -> None:
-        assert ToolSchemaExpandStrategy().applicable_categories == frozenset({"tool_unknown"})
-
     def test_can_apply_auto_recover(self) -> None:
         s = ToolSchemaExpandStrategy()
         env = _make_envelope(
@@ -342,16 +291,6 @@ class TestToolSchemaExpandStrategy:
 
 
 class TestJitteredRetryStrategy:
-    def test_priority(self) -> None:
-        assert JitteredRetryStrategy().priority == 100
-
-    def test_applicable_sources(self) -> None:
-        assert JitteredRetryStrategy().applicable_sources == frozenset({"llm", "tool", "system"})
-
-    def test_applicable_categories(self) -> None:
-        # Empty frozenset = wildcard, matches all categories
-        assert JitteredRetryStrategy().applicable_categories == frozenset()
-
     def test_can_apply_auto_retry(self) -> None:
         s = JitteredRetryStrategy()
         env = _make_envelope(category="transient", recoverability=Recoverability.AUTO_RETRY)
@@ -430,27 +369,76 @@ class TestJitteredRetryStrategy:
 
 
 # ===========================================================================
-# Integration: Strategy Priority Ordering
+# Integration: routing contract through the coordinator
 # ===========================================================================
 
 
-class TestStrategyPriorityOrdering:
-    def test_priorities_are_in_expected_order(self) -> None:
-        strategies = default_strategies()
-        expected_keys = [
-            "context_compress",
-            "multimodal_strip",
-            "provider_failover",
-            "credential_rotate",
-            "thinking_disable",
-            "native_to_text",
-            "tool_schema_expand",
-            "jittered_retry",
-        ]
-        actual_keys = [s.key for s in strategies]
-        assert actual_keys == expected_keys
+class TestStrategyRoutingContract:
+    """What the registry must guarantee, asserted as behavior.
+
+    Per-strategy ``priority``/``applicable_*`` assertions were removed: copying
+    implementation constants into the test freezes them without proving
+    anything, and any real regression shows up here instead — as the wrong
+    strategy winning for a given failure.
+    """
+
+    @pytest.mark.parametrize(
+        ("source", "category", "message", "recoverability", "expected_key"),
+        [
+            # Context pressure is compressed before anything else is tried.
+            (FailureSource.LLM, "context_overflow", "too many tokens",
+             Recoverability.AUTO_RETRY, "context_compress"),
+            (FailureSource.LLM, "payload_too_large", "payload too large",
+             Recoverability.AUTO_RETRY, "context_compress"),
+            # Oversized images are stripped rather than compressed away.
+            (FailureSource.LLM, "image_too_large", "Image too large",
+             Recoverability.AUTO_RETRY, "multimodal_strip"),
+            # Permanent provider-side conditions fail over instead of retrying.
+            (FailureSource.LLM, "billing", "quota exhausted",
+             Recoverability.AUTO_RETRY, "provider_failover"),
+            (FailureSource.LLM, "model_not_found", "no such model",
+             Recoverability.AUTO_RETRY, "provider_failover"),
+            # Credential problems rotate before giving up.
+            (FailureSource.LLM, "auth_error", "invalid api key",
+             Recoverability.AUTO_RETRY, "credential_rotate"),
+            # Malformed output: drop thinking mode first…
+            (FailureSource.LLM, "format_error", "unparseable output",
+             Recoverability.AUTO_RETRY, "thinking_disable"),
+            # …unknown tools get their schema disclosed rather than retried blind.
+            (FailureSource.TOOL, "tool_unknown", "no such tool",
+             Recoverability.AUTO_RECOVER, "tool_schema_expand"),
+            # Anything transient falls through to backoff retry.
+            (FailureSource.LLM, "transient", "connection reset",
+             Recoverability.AUTO_RETRY, "jittered_retry"),
+            (FailureSource.SYSTEM, "system_network", "network down",
+             Recoverability.AUTO_RETRY, "jittered_retry"),
+            (FailureSource.TOOL, "tool_timeout", "timed out",
+             Recoverability.AUTO_RETRY, "jittered_retry"),
+        ],
+    )
+    def test_failure_routes_to_expected_strategy(
+        self, source, category, message, recoverability, expected_key,
+    ) -> None:
+        from leapflow.engine.recovery_budget import RecoveryBudget
+        from leapflow.engine.recovery_coordinator import RecoveryCoordinator
+
+        coord = RecoveryCoordinator(
+            strategies=default_strategies(),
+            budget=RecoveryBudget(total_recovery_actions=32),
+        )
+        coord.budget.start_deadline()
+        envelope = _make_envelope(
+            source=source, category=category, message=message,
+            recoverability=recoverability, tool_name="some_tool",
+        )
+
+        decision = coord.evaluate(envelope)
+
+        assert decision.strategy_key == expected_key
+        assert decision.reason, "every decision must carry an explainable reason"
 
     def test_priorities_are_strictly_increasing(self) -> None:
+        """Ties would make routing order depend on registration order."""
         strategies = default_strategies()
         for i in range(len(strategies) - 1):
             assert strategies[i].priority < strategies[i + 1].priority, (
@@ -458,12 +446,13 @@ class TestStrategyPriorityOrdering:
                 f"lower than {strategies[i+1].key} (priority={strategies[i+1].priority})"
             )
 
-    def test_repeatable_property_correctness(self) -> None:
+    def test_only_idempotent_strategies_are_repeatable(self) -> None:
+        """Repeatable strategies must be safe to re-apply within one turn.
+
+        Compression advances through phases and jittered retry backs off, so
+        both converge. Every other strategy mutates provider/credential/mode
+        state and must fire at most once per turn.
+        """
         strategies = default_strategies()
-        repeatable_keys = {s.key for s in strategies if s.repeatable}
-        non_repeatable_keys = {s.key for s in strategies if not s.repeatable}
-        assert repeatable_keys == {"context_compress", "jittered_retry"}
-        assert non_repeatable_keys == {
-            "multimodal_strip", "provider_failover", "credential_rotate",
-            "thinking_disable", "native_to_text", "tool_schema_expand",
-        }
+        repeatable = {s.key for s in strategies if s.repeatable}
+        assert repeatable == {"context_compress", "jittered_retry"}
