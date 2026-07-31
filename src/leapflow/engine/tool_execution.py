@@ -12,6 +12,17 @@ from typing import Any, Literal, Mapping
 ExecutionPolicy = Literal["read_only", "mutating_idempotent", "mutating_once", "external_side_effect"]
 ExecutionStatus = Literal["reserved", "running", "completed", "failed_retryable", "failed_final"]
 
+# Policies whose failure leaves the effect's fate unknown: the call may already
+# have landed (a delivered message, a committed write) even though it reported an
+# error, so a blind retry can duplicate it. ``mutating_idempotent`` is absent on
+# purpose — re-applying it converges, so flagging it would stall safe retries.
+UNCERTAIN_EFFECT_POLICIES: frozenset[str] = frozenset({"external_side_effect", "mutating_once"})
+
+
+def effect_is_uncertain_on_failure(policy: str) -> bool:
+    """Return whether a failed call under ``policy`` may still have taken effect."""
+    return str(policy or "") in UNCERTAIN_EFFECT_POLICIES
+
 _EXTERNAL_TOOLS = frozenset({
     "shell_run",
     "scm_sync",

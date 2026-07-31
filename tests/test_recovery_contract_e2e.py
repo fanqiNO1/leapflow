@@ -222,27 +222,13 @@ def test_read_only_failure_is_freely_retryable() -> None:
     "side_effect_state",
     [SideEffectState.COMMITTED, SideEffectState.PARTIAL, SideEffectState.UNKNOWN],
 )
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known gap: Side-Effect Gating is specified in AGENTS.md but not "
-        "implemented. FailureEnvelope.side_effect_state is set by "
-        "unified_classifier and then never read — neither RecoveryCoordinator "
-        "nor any of the default strategies consults it, so a tool that already "
-        "applied an effect is retried automatically and can duplicate it. "
-        "Note the severity: execution_policy 'external_side_effect' (an outbound "
-        "IM send, an external API call) maps to UNKNOWN, so the highest-risk "
-        "case is ungated too. Fixing this changes core agent-loop recovery "
-        "behavior and needs a human decision on gate placement and on whether "
-        "UNKNOWN halts; kept as a strict xfail so the gap is tracked rather "
-        "than silently accepted."
-    ),
-)
 def test_applied_side_effects_block_automatic_retry(side_effect_state) -> None:
     """Contract: mutated state permits only user-mediated/checkpoint resumption.
 
     Retrying after an effect landed can send a message twice, write a file
-    twice, or re-charge an external API.
+    twice, or re-charge an external API. ``UNKNOWN`` is included because it is
+    what ``external_side_effect`` maps to — exempting it would leave outbound
+    sends ungated.
     """
     coord = _coordinator(total_recovery_actions=16)
 
@@ -259,12 +245,34 @@ def test_applied_side_effects_block_automatic_retry(side_effect_state) -> None:
         f"{side_effect_state.name} side effects must not be retried automatically; "
         f"got {decision.action.name} from {decision.strategy_key}"
     )
-    assert decision.action in {
-        RecoveryAction.HALT_WITH_CHECKPOINT,
-        RecoveryAction.ASK_USER,
-        RecoveryAction.HALT_CLEAN,
-        RecoveryAction.SKIP_AND_CONTINUE,
-    }
+    assert decision.action == RecoveryAction.HALT_WITH_CHECKPOINT
+    # A gated halt must tell the user what to check, not just stop.
+    assert decision.interaction is not None
+    assert decision.interaction.resumption_key
+    assert decision.interaction.suggested_actions
+    assert "gateway_send" in decision.reason
+
+
+def test_side_effect_gate_does_not_consume_recovery_budget() -> None:
+    """Being blocked is not an attempt; it must not eat the turn's budget."""
+    coord = _coordinator(total_recovery_actions=4)
+    before = coord.budget.remaining()
+
+    decision = coord.evaluate(
+        _envelope(side_effect_state=SideEffectState.COMMITTED, tool_name="file_write")
+    )
+
+    assert decision.action == RecoveryAction.HALT_WITH_CHECKPOINT
+    assert coord.budget.remaining() == before
+
+
+def test_side_effect_gate_is_audited() -> None:
+    """A withheld retry must be visible in the audit trail."""
+    coord = _coordinator(total_recovery_actions=8)
+
+    coord.evaluate(_envelope(side_effect_state=SideEffectState.PARTIAL, tool_name="scm_sync"))
+
+    assert coord.audit_log[-1]["strategy_key"] == "<side_effect_gated>"
 
 
 def test_side_effect_state_survives_the_envelope_roundtrip() -> None:

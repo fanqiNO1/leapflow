@@ -62,7 +62,11 @@ from leapflow.engine.tool_concurrency import (
     ToolCall as ConcurrentToolCall,
     ToolConcurrencyPolicy,
 )
-from leapflow.engine.tool_execution import ToolExecutionLedger, execution_policy_for
+from leapflow.engine.tool_execution import (
+    ToolExecutionLedger,
+    effect_is_uncertain_on_failure,
+    execution_policy_for,
+)
 from leapflow.engine.graph_planner import GraphPlanner
 from leapflow.engine.scheduler import TaskScheduler
 from leapflow.engine.session import SessionController, SessionMode
@@ -204,6 +208,9 @@ def _tool_result_metadata(
             "counts_as_failure", "counts_as_tool_attempt", "ui_hidden", "skipped_reason",
             "blocked_by_tool", "blocked_by_error", "execution_id", "idempotency_key", "execution_status",
             "execution_policy", "tool_call_id",
+            # Must reach the model: a failed side effect whose fate is unknown
+            # needs verification, not a blind retry.
+            "side_effect_uncertain", "retry_guidance",
         ):
             if key in result:
                 metadata[key] = result[key]
@@ -333,6 +340,92 @@ def _tool_failure_text(payload: Dict[str, Any]) -> str:
         if value:
             return str(value)
     return "unknown error"
+
+
+def _terminal_failure_text(decision: Any) -> str:
+    """Render a terminal recovery decision for the user.
+
+    When the decision carries an ``InteractionRequest``, its title, description,
+    and suggested actions are what the user needs in order to act; the raw
+    ``reason`` is written for the audit log. Falling back to ``reason`` alone
+    (the previous behavior) told the user a turn had stopped without saying what
+    to do about it.
+    """
+    interaction = getattr(decision, "interaction", None)
+    if interaction is None:
+        return str(getattr(decision, "reason", "") or "")
+
+    lines = [str(interaction.title or "Input needed to continue")]
+    if interaction.description:
+        lines.append(str(interaction.description))
+    for action in interaction.suggested_actions or ():
+        label = str(getattr(action, "label", "") or "")
+        command = str(getattr(action, "command", "") or "")
+        entry = f"  - {label}" if label else "  -"
+        if command:
+            entry += f": {command}"
+        lines.append(entry)
+    return "\n".join(line for line in lines if line.strip())
+
+
+def _interaction_metadata(decision: Any) -> Dict[str, Any]:
+    """Return the structured InteractionRequest payload, or ``{}``.
+
+    Carried on the stream event so the TUI/gateway can render a typed prompt and
+    resume via ``resumption_key`` instead of parsing the message text.
+    """
+    interaction = getattr(decision, "interaction", None)
+    if interaction is None:
+        return {}
+    return {
+        "interaction": {
+            "request_id": interaction.request_id,
+            "interaction_type": getattr(interaction.interaction_type, "value", str(interaction.interaction_type)),
+            "severity": getattr(interaction.severity, "value", str(interaction.severity)),
+            "title": interaction.title,
+            "description": interaction.description,
+            "suggested_actions": [
+                {
+                    "label": str(getattr(action, "label", "") or ""),
+                    "command": str(getattr(action, "command", "") or ""),
+                    "description": str(getattr(action, "description", "") or ""),
+                    "is_default": bool(getattr(action, "is_default", False)),
+                }
+                for action in interaction.suggested_actions or ()
+            ],
+            "resumption_key": interaction.resumption_key,
+            "timeout_behavior": getattr(
+                interaction.timeout_behavior, "value", str(interaction.timeout_behavior)
+            ),
+            "context": interaction.context_dict,
+        }
+    }
+
+
+def _annotate_uncertain_effect(payload: Dict[str, Any], policy: str) -> Dict[str, Any]:
+    """Mark a failed side-effecting result whose effect may already have landed.
+
+    A timeout or transport error on an outbound send does not mean the message
+    was not delivered, so the model must verify before resending. Without this
+    the failure reads as a plain "did not happen" and the natural next step is a
+    blind retry that duplicates the effect. Batch-level protection already stops
+    the rest of the batch (see ``_should_stop_after_tool_result``); this carries
+    the same knowledge across turns, where the model decides what to do next.
+
+    Advisory by design: only the tool's own state can settle whether the effect
+    landed, so a hard block would also reject legitimate retries (e.g. resending
+    after fixing an argument).
+    """
+    if not _tool_result_counts_as_failure(payload):
+        return payload
+    if not effect_is_uncertain_on_failure(policy):
+        return payload
+    payload["side_effect_uncertain"] = True
+    payload["retry_guidance"] = (
+        "This operation may already have taken effect despite the error. "
+        "Verify the current state before retrying; do not simply repeat the call."
+    )
+    return payload
 
 
 def _should_stop_after_tool_result(tool_name: str, payload: Dict[str, Any]) -> bool:
@@ -2862,7 +2955,7 @@ class AgentEngine:
                             },
                         )
                         self._checkpoint_store.save(checkpoint)
-                    fatal_error = decision.reason
+                    fatal_error = _terminal_failure_text(decision)
                     self._audit_sink.update_outcome(
                         decision.decision_id, "failure",
                         reason="Terminal halt",
@@ -2870,8 +2963,10 @@ class AgentEngine:
                     break
 
                 else:
-                    # ASK_USER, SKIP_AND_CONTINUE, or unknown
-                    fatal_error = decision.reason
+                    # ASK_USER, SKIP_AND_CONTINUE, or unknown. ASK_USER carries an
+                    # InteractionRequest describing what the user must decide;
+                    # surfacing only decision.reason would drop it.
+                    fatal_error = _terminal_failure_text(decision)
                     break
             _clear_indicator()
 
@@ -3355,8 +3450,12 @@ class AgentEngine:
                         continue
                     else:
                         # Terminal: HALT_CLEAN, HALT_WITH_CHECKPOINT, ASK_USER
-                        fatal_error = decision.reason
-                        yield StreamEvent(type="error", content=decision.reason)
+                        fatal_error = _terminal_failure_text(decision)
+                        yield StreamEvent(
+                            type="error",
+                            content=fatal_error,
+                            metadata=_interaction_metadata(decision),
+                        )
                         break
                 _clear_indicator()
 
@@ -3545,9 +3644,13 @@ class AgentEngine:
                             coordinator.on_strategy_outcome(decision.decision_id, True)
                             continue
                         else:
-                            fatal_error = decision.reason
+                            fatal_error = _terminal_failure_text(decision)
                             logger.error("unified_loop_stream: unrecoverable %s: %s", envelope.category, exc)
-                            yield StreamEvent(type="error", content=decision.reason)
+                            yield StreamEvent(
+                                type="error",
+                                content=fatal_error,
+                                metadata=_interaction_metadata(decision),
+                            )
                             break
 
                     content = "".join(content_parts).strip()
@@ -3604,9 +3707,13 @@ class AgentEngine:
                             coordinator.on_strategy_outcome(decision.decision_id, True)
                             continue
                         else:
-                            fatal_error = decision.reason
+                            fatal_error = _terminal_failure_text(decision)
                             logger.error("unified_loop_stream: unrecoverable %s: %s", envelope.category, exc)
-                            yield StreamEvent(type="error", content=decision.reason)
+                            yield StreamEvent(
+                                type="error",
+                                content=fatal_error,
+                                metadata=_interaction_metadata(decision),
+                            )
                             break
                     _clear_indicator()
                     content = (resp.content or "").strip()
@@ -4154,6 +4261,7 @@ class AgentEngine:
                 "execution_policy": policy,
                 "tool_call_id": tool_call_id,
             }
+            _annotate_uncertain_effect(failed_result, policy)
             self._tool_execution_ledger.complete(record, failed_result)
             raise
         if isinstance(result, dict):
@@ -4173,6 +4281,9 @@ class AgentEngine:
                 "execution_policy": policy,
                 "tool_call_id": tool_call_id,
             }
+        # Annotated before the ledger completes so the recorded result and the
+        # copy the model sees carry the same verdict.
+        _annotate_uncertain_effect(result_for_ledger, policy)
         completed = self._tool_execution_ledger.complete(record, result_for_ledger)
         result_for_ledger["execution_status"] = completed.status
         return result_for_ledger
@@ -4409,7 +4520,7 @@ class AgentEngine:
             "already_executed", "duplicate_suppressed", "execution_reused", "execution_skipped",
             "counts_as_failure", "counts_as_tool_attempt", "ui_hidden", "skipped_reason",
             "blocked_by_tool", "blocked_by_error", "tool_call_id", "path", "file_path",
-            "bytes_written",
+            "bytes_written", "side_effect_uncertain",
         ):
             if key in result:
                 metadata[key] = result[key]
