@@ -86,20 +86,12 @@ def test_gateway_core_does_not_import_vendor_sdks() -> None:
     assert violations == [], "vendor SDK imported by gateway core:\n  " + "\n  ".join(violations)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known violation: gateway/validators.py keeps the platform-neutral "
-        "validator registry together with three vendor implementations that "
-        "hardcode Feishu/DingTalk/Telegram endpoints and their distinct error "
-        "JSON shapes. Moving them is deliberately deferred: validate_credentials() "
-        "returns (True, '') when no validator is registered, so relocating "
-        "registration without care would silently skip credential validation. "
-        "Tracked here so the debt stays visible instead of allow-listed."
-    ),
-)
 def test_gateway_core_has_no_vendor_endpoints_or_error_shapes() -> None:
-    """Vendor wire formats must live in the app's pack/adapter, not in core."""
+    """Vendor wire formats must live in the app's pack/adapter, not in core.
+
+    Vendor validators now sit in ``gateway/validators/<platform>.py``, mirroring
+    ``adapters/`` and ``normalizers/``; core keeps only the neutral registry.
+    """
     vendor_endpoint = re.compile(
         r"https?://[^\s\"']*(feishu|larksuite|dingtalk|telegram|slack)", re.IGNORECASE
     )
