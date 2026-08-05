@@ -8,6 +8,7 @@ touches DNS.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -124,9 +125,18 @@ def test_classify_literal_addresses_by_category() -> None:
         "http://10.1.2.3/x": "private",
         "http://192.168.1.1/x": "private",
         "http://169.254.169.254/x": "metadata",
+        "http://100.100.100.200/x": "metadata",
         "http://169.254.10.10/x": "link_local",
         "http://0.0.0.0/x": "unspecified",
         "https://93.184.216.34/x": "public",
+        "http://[::1]/x": "loopback",
+        "http://[fd00:ec2::254]/x": "metadata",
+        "https://[2606:4700::1111]/x": "public",
+        # Shared address space (CGNAT) is not RFC1918 private but is not globally
+        # routable either; treating it as public would expose a whole class of
+        # internal endpoints.
+        "http://100.64.0.1/x": "reserved",
+        "http://198.18.0.1/x": "private",
     }
     for url, expected in cases.items():
         target = asyncio.run(classify_url(url, resolve=False))
@@ -607,6 +617,140 @@ def test_no_transport_available_is_reported_clearly(monkeypatch) -> None:
     assert "httpx" in result["error"]
 
 
+def _redirect(location: str, *, status: int = 302):
+    return wf.FetchOutcome(
+        status=status,
+        final_url=PUBLIC_URL,
+        content_type="text/html",
+        body=b"",
+        truncated=False,
+        transport="fake",
+        elapsed_ms=3,
+        location=location,
+    )
+
+
+# ── redirects: every hop must be re-gated ───────────────────────
+
+def test_redirect_to_internal_target_is_gated(monkeypatch) -> None:
+    """A public URL must not be able to bounce the request into the network.
+
+    If the HTTP client follows redirects itself, the egress gate only ever sees
+    the first hop, and any server able to answer 302 can read loopback services
+    or cloud instance metadata on the agent's behalf.
+    """
+    transport = _FakeTransport(
+        _redirect("http://169.254.169.254/latest/meta-data/iam/security-credentials/"),
+        _outcome(content_type="text/plain", body=b"AWS_SECRET"),
+    )
+    _install(monkeypatch, transport)
+    monkeypatch.setattr(wf, "_approval_gate", None)
+
+    result = _run({"url": PUBLIC_URL})
+
+    assert result["ok"] is False
+    assert result["error_type"] == "blocked_target"
+    assert result["target_category"] == "metadata"
+    assert "Redirected to" in result["error"]
+    assert result["blocked_url"].startswith("http://169.254.169.254/")
+    # The second hop must never have been issued.
+    assert len(transport.requests) == 1
+
+
+def test_redirect_to_loopback_is_gated(monkeypatch) -> None:
+    transport = _FakeTransport(
+        _redirect("http://127.0.0.1:8765/admin"),
+        _outcome(content_type="text/plain", body=b"internal"),
+    )
+    _install(monkeypatch, transport)
+    monkeypatch.setattr(wf, "_approval_gate", None)
+
+    result = _run({"url": PUBLIC_URL})
+
+    assert result["ok"] is False
+    assert result["target_category"] == "loopback"
+    assert len(transport.requests) == 1
+
+
+def test_public_redirect_is_followed_and_reported(monkeypatch) -> None:
+    """Ordinary redirects still work, with the chain visible."""
+    transport = _FakeTransport(
+        _redirect("https://93.184.216.34/moved"),
+        _outcome(body=b'{"price": 7}'),
+    )
+    _install(monkeypatch, transport)
+
+    result = _run({"url": PUBLIC_URL, "select": "price"})
+
+    assert result["ok"] is True
+    assert result["data"] == 7
+    assert result["redirect_chain"] == [PUBLIC_URL, "https://93.184.216.34/moved"]
+    assert len(transport.requests) == 2
+
+
+def test_relative_redirect_is_resolved(monkeypatch) -> None:
+    transport = _FakeTransport(
+        _redirect("/elsewhere"),
+        _outcome(content_type="text/plain", body=b"landed"),
+    )
+    _install(monkeypatch, transport)
+
+    result = _run({"url": PUBLIC_URL})
+
+    assert result["ok"] is True
+    assert transport.requests[1].url == "https://93.184.216.34/elsewhere"
+
+
+def test_redirect_loop_is_reported(monkeypatch) -> None:
+    transport = _FakeTransport(_redirect(PUBLIC_URL))
+    _install(monkeypatch, transport)
+
+    result = _run({"url": PUBLIC_URL})
+
+    assert result["ok"] is False
+    assert result["error_type"] == "redirect_loop"
+
+
+def test_redirect_budget_is_bounded(monkeypatch) -> None:
+    """An endless chain of distinct hops must stop at the configured budget."""
+    hops = iter(range(1, 50))
+
+    class _Chain:
+        name = "chain"
+
+        def __init__(self) -> None:
+            self.requests: list[wf.FetchRequest] = []
+
+        def available(self) -> bool:
+            return True
+
+        async def fetch(self, request):
+            self.requests.append(request)
+            return _redirect(f"https://93.184.216.34/hop{next(hops)}")
+
+    transport = _Chain()
+    monkeypatch.setattr(wf, "transports_for", lambda preference: (transport,))
+    monkeypatch.setattr(wf, "_settings", lambda: _settings(web_max_redirects=3))
+
+    result = _run({"url": PUBLIC_URL})
+
+    assert result["ok"] is False
+    assert result["error_type"] == "too_many_redirects"
+    assert len(transport.requests) == 4  # initial request + 3 redirects
+
+
+def test_transports_do_not_follow_redirects_themselves() -> None:
+    """Auto-follow in the client would bypass the per-hop gate entirely."""
+    import inspect
+
+    httpx_source = inspect.getsource(wf.HttpxTransport.fetch)
+    assert "follow_redirects=False" in httpx_source
+
+    curl_source = inspect.getsource(wf.CurlTransport.fetch)
+    assert '"--location"' not in curl_source
+    assert "redirect_url" in curl_source
+
+
 # ── caching ───────────────────────────────────────────────
 
 def test_second_fetch_is_served_from_cache(monkeypatch, tmp_path) -> None:
@@ -701,6 +845,71 @@ def test_cache_is_consulted_only_after_the_egress_gate(monkeypatch, tmp_path) ->
     second = _run({"url": LOOPBACK_URL})
     assert second["ok"] is False
     assert second["error_type"] == "blocked_target"
+
+
+def test_approval_detail_never_carries_query_secrets(monkeypatch) -> None:
+    """The approval prompt and audit log persist the action detail.
+
+    A query string routinely holds an API key or signed token, so origin+path is
+    the most that may be written down.
+    """
+    transport = _FakeTransport(_outcome(content_type="text/plain", body=b"ok"))
+    _install(monkeypatch, transport)
+    seen: list[ActionDescriptor] = []
+
+    class _Gate:
+        async def evaluate(self, action):
+            seen.append(action)
+            return SimpleNamespace(approved=True)
+
+    monkeypatch.setattr(wf, "_approval_gate", _Gate())
+
+    _run({"url": "http://127.0.0.1:8765/admin?token=SUPERSECRET&x=1#frag"})
+
+    action = seen[0]
+    assert "SUPERSECRET" not in action.detail
+    assert "SUPERSECRET" not in json.dumps(action.metadata)
+    assert action.detail == "http://127.0.0.1:8765/admin"
+    assert action.resource == "http://127.0.0.1:8765"
+
+
+def test_credentialed_url_is_not_echoed_into_approval(monkeypatch) -> None:
+    transport = _FakeTransport(_outcome(content_type="text/plain", body=b"ok"))
+    _install(monkeypatch, transport)
+    seen: list[ActionDescriptor] = []
+
+    class _Gate:
+        async def evaluate(self, action):
+            seen.append(action)
+            return SimpleNamespace(approved=True)
+
+    monkeypatch.setattr(wf, "_approval_gate", _Gate())
+
+    _run({"url": "https://user:hunter2@93.184.216.34/private"})
+
+    action = seen[0]
+    assert "hunter2" not in action.detail
+    assert "hunter2" not in json.dumps(action.metadata)
+
+
+def test_failure_evidence_keeps_status_and_body(monkeypatch) -> None:
+    """A compacted HTTP failure must still explain itself to the model."""
+    from leapflow.engine.context_control import ToolEvidenceBuilder
+
+    failure = {
+        "ok": False,
+        "status": 429,
+        "error": "HTTP 429 from https://api.test",
+        "error_type": "http_error",
+        "retryable": True,
+        "body_excerpt": "Edge: Too Many Requests",
+    }
+    evidence = ToolEvidenceBuilder(max_content_chars=400).build("web_fetch", {}, failure)
+
+    assert evidence["ok"] is False
+    assert evidence["status"] == 429
+    assert evidence["retryable"] is True
+    assert "Edge: Too Many Requests" in evidence["body_excerpt"]
 
 
 # ── loop integration contracts ───────────────────────────────────────

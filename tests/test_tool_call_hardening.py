@@ -285,6 +285,45 @@ def test_shell_gate_blocks_expanded_and_relative_escapes(tmp_path, monkeypatch) 
         reset_tool_context(token)
 
 
+def test_shell_gate_allows_search_list_variables(tmp_path, monkeypatch) -> None:
+    """Expanding a variable must not turn ordinary commands into refusals.
+
+    ``$PATH`` expands to an ``os.pathsep``-joined list that begins with ``/`` but
+    names no file. Treating that as a path operand blocked ``echo $PATH`` and
+    ``PATH=$PATH:./bin npm test``, which have nothing to do with the workspace
+    boundary.
+    """
+    from leapflow.tools.execution_context import (
+        ToolExecutionContext,
+        reset_tool_context,
+        set_tool_context,
+    )
+    from leapflow.tools.shell_tools import _command_workspace_escape
+
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+    monkeypatch.setenv("LEAP_TEST_HOME", str(tmp_path / "outside"))
+
+    token = set_tool_context(
+        ToolExecutionContext.from_strings(workspace_root=str(workspace), session_id="sess-list")
+    )
+    try:
+        for command in (
+            "echo $PATH",
+            "export PATH=$PATH:/usr/local/bin && make",
+            "PATH=$PATH:./node_modules/.bin npm test",
+        ):
+            assert _command_workspace_escape(command, cwd=workspace) is None, command
+
+        # A single-path variable must still be gated.
+        blocked = _command_workspace_escape("cat $LEAP_TEST_HOME/secret", cwd=workspace)
+        assert blocked is not None
+        assert blocked["error_type"] == "outside_workspace"
+    finally:
+        reset_tool_context(token)
+
+
 def test_shell_gate_redirects_leapflow_config_targets(tmp_path) -> None:
     """Refusing a config path must name the capability that serves the goal.
 

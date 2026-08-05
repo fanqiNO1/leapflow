@@ -493,6 +493,15 @@ class StreamRenderer:
         active = self._take_active(metadata, tool_name)
         if tool_name and metadata.get("ui_hidden"):
             return
+        if active is None and tool_name:
+            # Correlation failed (a completion with no tracked start). Report it
+            # anyway with a zero duration: dropping the line would hide a tool the
+            # user's turn actually ran, and silence is the worse failure mode.
+            active = _ActiveTool(
+                name=tool_name,
+                detail=_tool_action_detail(metadata),
+                started_at=time.monotonic(),
+            )
         if tool_name and active is not None:
             duration = time.monotonic() - active.started_at
             self._tool_history.append((tool_name, duration))

@@ -149,9 +149,19 @@ def _expand_operand(token: str) -> str:
     the same file, so a gate comparing raw text would guard the spelling rather
     than the target. Unset variables are left literal by ``expandvars`` and then
     fail the prefix/traversal tests below, which is the safe direction.
+
+    Expansions that are not a single filesystem operand are discarded: a variable
+    holding a search list (``$PATH``) expands to ``os.pathsep``-joined entries
+    that begin with ``/`` but name no file, so treating it as a path would block
+    ordinary commands like ``echo $PATH`` or ``PATH=$PATH:./bin npm test``.
     """
     candidate = token.split("=", 1)[-1]
-    return os.path.expandvars(candidate) if "$" in candidate else candidate
+    if "$" not in candidate:
+        return candidate
+    expanded = os.path.expandvars(candidate)
+    if os.pathsep in expanded or any(char.isspace() for char in expanded):
+        return ""
+    return expanded
 
 
 def _has_parent_traversal(operand: str) -> bool:

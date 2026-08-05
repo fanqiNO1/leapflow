@@ -21,8 +21,6 @@ shell, so the quoting and injection hazards of the pipeline it replaces are gone
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import logging
 import re
 import time
@@ -30,9 +28,10 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Protocol, runtime_checkable
+from urllib.parse import urljoin, urlsplit
 
 from leapflow.security.network import NetworkTarget, UrlRejected, classify_url
-from leapflow.tools.execution_context import current_tool_context
+from leapflow.tools import web_cache
 from leapflow.tools.web_extract import (
     KIND_BINARY,
     KIND_HTML,
@@ -66,8 +65,11 @@ _RETRY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 # and it costs a single extra attempt. Anything outside this set is reported as-is.
 _FAILOVER_STATUSES = frozenset({403, 429})
 _MAX_RETRY_SLEEP_S = 8.0
-_TEXT_BODY_LIMIT = 200_000
-_CACHE_CATEGORY = "web_fetch"
+# Ceilings on what a single tool call may request, independent of the configured
+# defaults: the model can raise timeout/max_bytes per call, and these bound how
+# far. Config sets the normal value; these stop one call from monopolizing a turn.
+_MAX_TIMEOUT_S = 120.0
+_MAX_BYTES_CEILING = 20_000_000
 
 # Module-level gate, installed by the CLI/daemon exactly like the shell and
 # config gates. ``requires_approval`` in the tool's x_leapflow block only informs
@@ -89,18 +91,23 @@ def get_web_approval_gate() -> Any:
 
 @dataclass(frozen=True)
 class FetchRequest:
-    """An outbound read, fully resolved from params plus settings."""
+    """One outbound single-hop read, fully resolved from params plus settings."""
 
     url: str
     timeout_s: float
     max_bytes: int
-    max_redirects: int
     user_agent: str
 
 
 @dataclass(frozen=True)
 class FetchOutcome:
-    """A raw transport result, before content extraction."""
+    """A raw single-hop transport result, before content extraction.
+
+    ``location`` carries the redirect target when the status is 3xx. Transports
+    deliberately do not follow redirects themselves: each hop is a new egress
+    target that must be classified and gated again, which only the orchestrator
+    can do.
+    """
 
     status: int
     final_url: str
@@ -109,6 +116,7 @@ class FetchOutcome:
     truncated: bool
     transport: str
     elapsed_ms: int
+    location: str = ""
 
 
 class TransportUnavailable(RuntimeError):
@@ -140,10 +148,11 @@ class WebTransport(Protocol):
 
 
 def _headers(request: FetchRequest) -> dict[str, str]:
+    # No Accept-Language: pinning one would silently bias which localized version
+    # of a page the agent reads, and the right language is the user's, not ours.
     return {
         "User-Agent": request.user_agent,
         "Accept": _DEFAULT_ACCEPT,
-        "Accept-Language": "en,zh-CN;q=0.9,zh;q=0.8",
     }
 
 
@@ -168,8 +177,9 @@ class HttpxTransport:
         started = time.monotonic()
         try:
             async with httpx.AsyncClient(
-                follow_redirects=True,
-                max_redirects=request.max_redirects,
+                # Never auto-follow: a redirect can point at loopback or cloud
+                # metadata, and a hop the egress gate never saw is a hole in it.
+                follow_redirects=False,
                 timeout=request.timeout_s,
             ) as client:
                 async with client.stream("GET", request.url, headers=_headers(request)) as response:
@@ -197,9 +207,8 @@ class HttpxTransport:
                         truncated=truncated,
                         transport=self.name,
                         elapsed_ms=int((time.monotonic() - started) * 1000),
+                        location=response.headers.get("location", ""),
                     )
-        except httpx.TooManyRedirects as exc:
-            raise TransportFailure("too_many_redirects", str(exc), retryable=False) from exc
         except httpx.TimeoutException as exc:
             raise TransportFailure(
                 "timeout", f"Request timed out after {request.timeout_s}s", retryable=True
@@ -246,13 +255,16 @@ class CurlTransport:
         # body that happens to contain the token cannot shift the metadata.
         sentinel = f"--leapflow-{uuid.uuid4().hex}--"
         argv = [
-            "curl", "--silent", "--show-error", "--location", "--compressed",
-            "--max-redirs", str(request.max_redirects),
+            "curl", "--silent", "--show-error", "--compressed",
+            # No --location: redirects are followed by the orchestrator so each
+            # hop is re-classified against the egress gate. %{redirect_url} still
+            # reports where curl would have gone.
             "--max-time", str(int(max(1, request.timeout_s))),
             "--max-filesize", str(request.max_bytes),
             "--user-agent", request.user_agent,
             "--header", f"Accept: {_DEFAULT_ACCEPT}",
-            "--write-out", f"{sentinel}%{{http_code}}\t%{{content_type}}\t%{{url_effective}}",
+            "--write-out",
+            f"{sentinel}%{{http_code}}\t%{{content_type}}\t%{{url_effective}}\t%{{redirect_url}}",
             request.url,
         ]
         started = time.monotonic()
@@ -291,6 +303,7 @@ class CurlTransport:
         status = int(meta[0]) if meta and meta[0].strip().isdigit() else 0
         content_type = meta[1] if len(meta) > 1 else ""
         final_url = meta[2].strip() if len(meta) > 2 else request.url
+        location = meta[3].strip() if len(meta) > 3 else ""
         truncated = len(body) > request.max_bytes
         return FetchOutcome(
             status=status,
@@ -300,6 +313,7 @@ class CurlTransport:
             truncated=truncated,
             transport=self.name,
             elapsed_ms=elapsed_ms,
+            location=location,
         )
 
 
@@ -314,14 +328,25 @@ def transports_for(preference: str) -> tuple[WebTransport, ...]:
     return tuple(t for t in (httpx_transport, curl_transport) if t.available())
 
 
+def _auditable_url(target: NetworkTarget) -> str:
+    """Return the URL with its query, fragment, and userinfo removed.
+
+    The approval prompt and the audit log both persist an action's detail, and a
+    query string routinely carries API keys or signed tokens. Origin plus path is
+    enough for a human to judge the request and for the audit trail to be useful,
+    so the secret-bearing parts never get written down.
+    """
+    path = urlsplit(target.url).path or "/"
+    return f"{target.origin}{path}"
+
+
 async def _approve_fetch(target: NetworkTarget) -> str:
     """Return a denial reason, or ``""`` when the fetch may proceed.
 
     Fails closed when no gate is installed: an internal target reachable without
     review would let the model read the daemon socket's HTTP neighbors, the local
-    dashboard, or cloud instance metadata. The URL is passed as the action detail
-    but the grant is keyed on the origin, so approving one page trusts the host
-    for the session rather than only that exact URL.
+    dashboard, or cloud instance metadata. The grant is keyed on the origin, so
+    approving one page trusts the host for the session rather than only that URL.
     """
     gate = _approval_gate
     if gate is None:
@@ -334,7 +359,7 @@ async def _approve_fetch(target: NetworkTarget) -> str:
         from leapflow.security.actions import ActionDescriptor
 
         action = ActionDescriptor.network_fetch(
-            target.url,
+            _auditable_url(target),
             origin=target.origin,
             metadata={"tool": "web_fetch", **target.to_metadata()},
         )
@@ -454,127 +479,45 @@ def _settings() -> Any:
     return get_settings()
 
 
-def _cache_slot(url: str, settings: Any) -> tuple[Path, str, str] | None:
-    """Return ``(body_path, workspace_id, session_id)``, or ``None`` if unavailable.
+async def _gate_target(target: NetworkTarget, settings: Any, *, url: str) -> Dict[str, Any] | None:
+    """Return a refusal payload when this target may not be reached.
 
-    Session-scoped and non-syncable: a fetched page is reproducible and may carry
-    per-session context, so it neither belongs to the profile nor should leave the
-    machine. The session scope requires a workspace id too, which also keeps one
-    TUI's fetches out of another's cache. Paths come from ``CacheLayout`` rather
-    than being assembled here, and any failure degrades to "no cache" instead of
-    failing the fetch.
+    Applied to every hop, not just the first: a public URL that redirects to
+    loopback or cloud metadata would otherwise reach it with the gate having only
+    ever seen the public address.
     """
-    ctx = current_tool_context()
-    session_id = getattr(ctx, "session_id", "") or "default"
-    try:
-        from leapflow.cache.manager import CacheManager, CacheScope
-        from leapflow.layout import workspace_id_for_path
-
-        workspace_root = getattr(ctx, "workspace_root", None) or settings.workspace_root
-        workspace_id = workspace_id_for_path(Path(workspace_root))
-        manager = CacheManager(settings.profile_layout.cache, profile_id=settings.profile)
-        directory = manager.path(
-            scope=CacheScope.SESSION,
-            category=_CACHE_CATEGORY,
-            workspace_id=workspace_id,
-            session_id=session_id,
-            source="body",
-        )
-    except Exception:  # noqa: BLE001 - caching is an optimization, never a requirement
-        logger.debug("web_fetch: cache unavailable", exc_info=True)
+    if not (target.is_internal or target.has_credentials):
         return None
-    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:32]
-    return directory / f"{digest}.bin", workspace_id, session_id
-
-
-def _cache_meta_path(body_path: Path) -> Path:
-    return body_path.with_suffix(".meta.json")
-
-
-def _read_cache(url: str, settings: Any) -> FetchOutcome | None:
-    """Return a cached outcome for ``url`` when one is present and fresh."""
-    ttl = float(getattr(settings, "web_cache_ttl_s", 0) or 0)
-    if ttl <= 0:
+    mode = str(getattr(settings, "web_private_targets", "approval") or "approval").lower()
+    if mode == "allow":
         return None
-    slot = _cache_slot(url, settings)
-    if slot is None:
-        return None
-    body_path, _workspace_id, _session_id = slot
-    meta_path = _cache_meta_path(body_path)
-    try:
-        if not (body_path.exists() and meta_path.exists()):
-            return None
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        if time.time() - float(meta.get("fetched_at", 0)) > ttl:
-            return None
-        body = body_path.read_bytes()
-    except (OSError, ValueError, json.JSONDecodeError):
-        logger.debug("web_fetch: unreadable cache entry for %s", url, exc_info=True)
-        return None
-    return FetchOutcome(
-        status=int(meta.get("status", 200)),
-        final_url=str(meta.get("final_url") or url),
-        content_type=str(meta.get("content_type") or ""),
-        body=body,
-        truncated=bool(meta.get("truncated", False)),
-        transport=str(meta.get("transport") or "cache"),
-        elapsed_ms=int(meta.get("elapsed_ms", 0)),
-    )
-
-
-def _write_cache(url: str, target: NetworkTarget, outcome: FetchOutcome, settings: Any) -> Path | None:
-    """Persist a successful body and index it; return the stored path."""
-    ttl = float(getattr(settings, "web_cache_ttl_s", 0) or 0)
-    if ttl <= 0:
-        return None
-    slot = _cache_slot(url, settings)
-    if slot is None:
-        return None
-    body_path, workspace_id, session_id = slot
-    try:
-        body_path.write_bytes(outcome.body)
-        _cache_meta_path(body_path).write_text(
-            json.dumps(
-                {
-                    "url": url,
-                    "final_url": outcome.final_url,
-                    "status": outcome.status,
-                    "content_type": outcome.content_type,
-                    "truncated": outcome.truncated,
-                    "transport": outcome.transport,
-                    "elapsed_ms": outcome.elapsed_ms,
-                    "fetched_at": time.time(),
-                },
-                ensure_ascii=False,
+    if mode == "deny":
+        return {
+            "ok": False,
+            "error": (
+                f"{target.origin} resolves to a {target.category} address and this "
+                "profile is configured to refuse internal targets "
+                "(`web.private_targets=deny`)."
             ),
-            encoding="utf-8",
-        )
-    except OSError:
-        logger.debug("web_fetch: could not write cache for %s", url, exc_info=True)
+            "error_type": "blocked_target",
+            "retryable": False,
+            "target_category": target.category,
+            "url": url,
+            "blocked_url": target.url,
+        }
+    denial = await _approve_fetch(target)
+    if not denial:
         return None
-    try:
-        from leapflow.cache.manager import CacheManager, CacheScope
-
-        manager = CacheManager(settings.profile_layout.cache, profile_id=settings.profile)
-        manager.register(
-            path=body_path,
-            scope=CacheScope.SESSION,
-            category=_CACHE_CATEGORY,
-            source="body",
-            workspace_id=workspace_id,
-            session_id=session_id,
-            content_hash=hashlib.sha256(outcome.body).hexdigest(),
-            expires_at=time.time() + ttl,
-            # A URL with a query string or credentials can itself be the secret,
-            # and fetched content is cheap to re-acquire, so never sync it out.
-            sensitive=bool(target.has_credentials or "?" in url),
-            syncable=False,
-            owner_component="web_fetch",
-            metadata={"url": url, "status": outcome.status, "origin": target.origin},
-        )
-    except Exception:  # noqa: BLE001 - an unindexed cache file is still usable
-        logger.debug("web_fetch: cache index update failed", exc_info=True)
-    return body_path
+    return {
+        "ok": False,
+        "error": denial,
+        "error_type": "blocked_target",
+        "retryable": False,
+        "requires_approval": True,
+        "target_category": target.category,
+        "url": url,
+        "blocked_url": target.url,
+    }
 
 
 async def web_fetch(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -587,90 +530,118 @@ async def web_fetch(params: Dict[str, Any]) -> Dict[str, Any]:
 
     settings = _settings()
     try:
-        timeout_s = min(float(params.get("timeout") or settings.web_timeout_s), 120.0)
+        timeout_s = min(float(params.get("timeout") or settings.web_timeout_s), _MAX_TIMEOUT_S)
     except (TypeError, ValueError):
         timeout_s = float(settings.web_timeout_s)
     try:
-        max_bytes = min(int(params.get("max_bytes") or settings.web_max_bytes), 20_000_000)
+        max_bytes = min(int(params.get("max_bytes") or settings.web_max_bytes), _MAX_BYTES_CEILING)
     except (TypeError, ValueError):
         max_bytes = int(settings.web_max_bytes)
+    max_redirects = max(0, int(getattr(settings, "web_max_redirects", 5)))
 
-    try:
-        target = await classify_url(url)
-    except UrlRejected as rejected:
-        return {
-            "ok": False,
-            "error": rejected.detail,
-            "error_type": rejected.reason,
-            "retryable": rejected.reason == "dns_error",
-            "url": url,
-        }
-
-    if target.is_internal or target.has_credentials:
-        mode = str(getattr(settings, "web_private_targets", "approval") or "approval").lower()
-        if mode == "deny":
+    # Redirects are followed here rather than inside a transport so that every hop
+    # is classified and gated. Following them in the HTTP client would let a public
+    # URL bounce the request to an internal address the gate never inspected.
+    current = url
+    visited: list[str] = []
+    target: NetworkTarget | None = None
+    outcome: FetchOutcome | None = None
+    for hop in range(max_redirects + 1):
+        try:
+            target = await classify_url(current)
+        except UrlRejected as rejected:
             return {
                 "ok": False,
-                "error": (
-                    f"{target.origin} resolves to a {target.category} address and this "
-                    "profile is configured to refuse internal targets "
-                    "(`web.private_targets=deny`)."
-                ),
-                "error_type": "blocked_target",
+                "error": rejected.detail,
+                "error_type": rejected.reason,
+                "retryable": rejected.reason == "dns_error",
+                "url": url,
+                "blocked_url": current if current != url else "",
+            }
+
+        refusal = await _gate_target(target, settings, url=url)
+        if refusal is not None:
+            if hop > 0:
+                refusal["error"] = (
+                    f"Redirected to {target.origin}, which was refused: {refusal['error']}"
+                )
+                refusal["redirect_chain"] = [*visited, current]
+            return refusal
+
+        if hop == 0:
+            # Cache lookup sits after the first gate check, never before: a cached
+            # body must not become a way to read a target approval would refuse.
+            cached = web_cache.read(url, settings)
+            if cached is not None:
+                replay = FetchOutcome(
+                    status=cached.status,
+                    final_url=cached.final_url,
+                    content_type=cached.content_type,
+                    body=cached.body,
+                    truncated=cached.truncated,
+                    transport=cached.transport,
+                    elapsed_ms=cached.elapsed_ms,
+                )
+                return _build_result(params, target, replay, settings, from_cache=True)
+
+        request = FetchRequest(
+            url=current,
+            timeout_s=timeout_s,
+            max_bytes=max_bytes,
+            user_agent=str(settings.web_user_agent or DEFAULT_USER_AGENT),
+        )
+        try:
+            outcome = await _run_transports(
+                request,
+                str(settings.web_transport or "auto").lower(),
+                max(0, int(settings.web_max_retries)),
+            )
+        except TransportUnavailable as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "error_type": "transport_unavailable",
                 "retryable": False,
-                "target_category": target.category,
                 "url": url,
             }
-        if mode != "allow":
-            denial = await _approve_fetch(target)
-            if denial:
-                return {
-                    "ok": False,
-                    "error": denial,
-                    "error_type": "blocked_target",
-                    "retryable": False,
-                    "requires_approval": True,
-                    "target_category": target.category,
-                    "url": url,
-                }
+        except TransportFailure as failure:
+            return {
+                "ok": False,
+                "error": str(failure),
+                "error_type": failure.error_type,
+                "retryable": failure.retryable,
+                "url": url,
+                "origin": target.origin,
+            }
 
-    request = FetchRequest(
-        url=url,
-        timeout_s=timeout_s,
-        max_bytes=max_bytes,
-        max_redirects=int(settings.web_max_redirects),
-        user_agent=str(settings.web_user_agent or DEFAULT_USER_AGENT),
-    )
-    # Cache lookup happens after the egress gate, never before: a cached body must
-    # not become a way to read an internal target that approval would refuse.
-    cached = _read_cache(url, settings)
-    if cached is not None:
-        return _build_result(params, target, cached, settings, from_cache=True)
-    try:
-        outcome = await _run_transports(
-            request,
-            str(settings.web_transport or "auto").lower(),
-            max(0, int(settings.web_max_retries)),
-        )
-    except TransportUnavailable as exc:
+        if not (300 <= outcome.status < 400 and outcome.location):
+            break
+        next_url = urljoin(current, outcome.location)
+        if next_url in visited or next_url == current:
+            return {
+                "ok": False,
+                "error": f"Redirect loop while fetching {url}.",
+                "error_type": "redirect_loop",
+                "retryable": False,
+                "url": url,
+                "redirect_chain": [*visited, current],
+            }
+        visited.append(current)
+        current = next_url
+    else:
         return {
             "ok": False,
-            "error": str(exc),
-            "error_type": "transport_unavailable",
+            "error": f"Exceeded {max_redirects} redirects while fetching {url}.",
+            "error_type": "too_many_redirects",
             "retryable": False,
             "url": url,
-        }
-    except TransportFailure as failure:
-        return {
-            "ok": False,
-            "error": str(failure),
-            "error_type": failure.error_type,
-            "retryable": failure.retryable,
-            "url": url,
-            "origin": target.origin,
+            "redirect_chain": [*visited, current],
         }
 
-    return _build_result(params, target, outcome, settings)
+    result = _build_result(params, target, outcome, settings)
+    if visited:
+        result["redirect_chain"] = [*visited, current]
+    return result
 
 
 def _build_result(
@@ -714,15 +685,27 @@ def _build_result(
 
     stored: Path | None = None
     if not from_cache:
-        stored = _write_cache(target.url, target, outcome, settings)
+        stored = web_cache.write(
+            target.url,
+            outcome.body,
+            status=outcome.status,
+            final_url=outcome.final_url,
+            content_type=outcome.content_type,
+            truncated=outcome.truncated,
+            transport=outcome.transport,
+            elapsed_ms=outcome.elapsed_ms,
+            origin=target.origin,
+            # A URL with a query string or credentials can itself be the secret.
+            sensitive=bool(target.has_credentials or urlsplit(target.url).query),
+            settings=settings,
+        )
 
     if kind == KIND_BINARY:
         # Binary never enters the transcript. When it was cached, hand back the
         # path so file-oriented tools can take over instead of a dead end.
         result["text"] = ""
         if stored is None and from_cache:
-            slot = _cache_slot(target.url, settings)
-            stored = slot[0] if slot else None
+            stored = web_cache.cached_path(target.url, settings)
         if stored is not None:
             result["cache_path"] = str(stored)
             result["note"] = (
@@ -785,7 +768,7 @@ def _build_result(
             )
         return result
 
-    result["text"] = _redact(body_text)[:_TEXT_BODY_LIMIT]
+    result["text"] = _redact(body_text)[: int(getattr(settings, "web_max_bytes", 2_000_000))]
     return result
 
 

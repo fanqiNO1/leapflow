@@ -404,7 +404,7 @@ class ToolEvidenceBuilder:
         navigation is still possible.
         """
         evidence: Dict[str, Any] = {
-            "ok": True,
+            "ok": bool(result.get("ok", True)),
             "kind": "web_fetch_evidence",
             "status": result.get("status"),
             "final_url": result.get("final_url") or result.get("url", ""),
@@ -493,6 +493,14 @@ class ToolEvidenceBuilder:
         for key in ("returncode", "exit_code"):
             if key in result:
                 compact[key] = result[key]
+        # Network failures explain themselves in the response: the status code is
+        # the classification and the body says why (an API error payload, a rate
+        # limit notice), so both must survive compaction for the model to act on.
+        if "status" in result:
+            compact["status"] = result["status"]
+        body_excerpt = result.get("body_excerpt")
+        if body_excerpt:
+            compact["body_excerpt"] = self._head_tail(str(body_excerpt), self._max_content_chars // 2)
         return compact
 
     def _app_connector_evidence(self, result: Dict[str, Any]) -> Dict[str, Any]:

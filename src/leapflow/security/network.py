@@ -25,12 +25,13 @@ from urllib.parse import urlsplit
 # that could read local files would bypass the workspace boundary entirely.
 ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 
-# Cloud instance metadata services. Classified separately from the enclosing
-# link-local range because the consequence is specific and worth naming in an
+# Cloud instance metadata services. Named explicitly, separately from the ranges
+# that enclose them, because the consequence is specific and worth stating in an
 # approval prompt: these endpoints hand out instance credentials.
 _METADATA_ADDRESSES: frozenset[str] = frozenset({
     "169.254.169.254",       # AWS / GCP / Azure / OpenStack IMDS
     "fd00:ec2::254",         # AWS IMDSv2 over IPv6
+    "100.100.100.200",       # Alibaba Cloud ECS metadata
 })
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -77,7 +78,15 @@ class NetworkTarget:
 
 
 def _category_for_address(address: str) -> str:
-    """Classify one resolved IP address into a trust category."""
+    """Classify one resolved IP address into a trust category.
+
+    "public" is decided by ``is_global`` rather than by ``not is_private``: the
+    private-address test misses ranges that are unroutable but not RFC1918, most
+    consequentially the shared address space (100.64.0.0/10) that carries Alibaba
+    Cloud's metadata service. Anything the stdlib does not consider globally
+    routable is therefore treated as internal, which fails closed for ranges we
+    have not enumerated.
+    """
     if address in _METADATA_ADDRESSES:
         return "metadata"
     try:
@@ -94,7 +103,7 @@ def _category_for_address(address: str) -> str:
         return "unspecified"
     if ip.is_private:
         return "private"
-    if ip.is_reserved or ip.is_multicast:
+    if not ip.is_global:
         return "reserved"
     return "public"
 
