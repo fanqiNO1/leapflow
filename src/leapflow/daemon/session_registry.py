@@ -26,12 +26,20 @@ from typing import Any, Callable, Dict, List, Optional
 
 
 class WorkspaceMismatchError(ValueError):
-    """Raised when one session id is reused from a different workspace root."""
+    """Raised when one session id is reused from a different workspace root.
+
+    Reaching this from ordinary use means a client sent a session id it does not
+    own — a defect, not something the user can act on. The only legitimate cause
+    is an explicit ``--resume`` of a session created in another workspace, which
+    is why the guidance names that case instead of telling the user to do what
+    they already did.
+    """
 
     def __init__(self, session_id: str, expected: Path, requested: Path) -> None:
         super().__init__(
-            f"Session {session_id!r} is bound to workspace {expected}; "
-            f"current request uses {requested}. Start a fresh TUI session for this workspace."
+            f"Session {session_id!r} belongs to workspace {expected}, but this request "
+            f"came from {requested}. If you resumed it with --resume, resume it from "
+            f"{expected} instead, or omit --resume to start a session for this workspace."
         )
         self.session_id = session_id
         self.expected = expected
@@ -159,12 +167,14 @@ class SessionRegistry:
         """
         return self._contexts.get(str(session_id or ""))
 
-    def most_recent(self) -> Optional[SessionExecutionContext]:
-        """Return the most recently active session context, if any.
+    def most_recent_any_client(self) -> Optional[SessionExecutionContext]:
+        """Return the most recently active session of *any* client, if any.
 
-        Defines "the current session" for consumers that have no session id of
-        their own. Since the base engine never holds conversation state, this is
-        the only meaningful fallback for observing live activity.
+        Named for what it actually does. It ignores workspace and client
+        identity, so it is only valid for genuinely cross-session views (an
+        aggregate dashboard). Using it to answer "the caller's session" leaks one
+        client's session id and context figures to another, which is how a second
+        TUI ended up sending a session bound to a different workspace.
         """
         if not self._contexts:
             return None

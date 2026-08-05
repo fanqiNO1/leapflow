@@ -59,17 +59,17 @@ def test_registry_get_does_not_create_and_most_recent_tracks_activity() -> None:
     registry = _registry(base)
 
     assert registry.get("absent") is None
-    assert registry.most_recent() is None
+    assert registry.most_recent_any_client() is None
     assert registry.active_count() == 0  # lookups must not materialize engines
 
     first = asyncio.run(registry.acquire("s1", workspace_root="/tmp"))
     second = asyncio.run(registry.acquire("s2", workspace_root="/tmp"))
 
     assert registry.get("s1") is first
-    # s2 was acquired last, so it is the current session.
-    assert registry.most_recent() is second
+    # s2 was acquired last, so it is the most recent across all clients.
+    assert registry.most_recent_any_client() is second
     first.touch()
-    assert registry.most_recent() is first
+    assert registry.most_recent_any_client() is first
 
 
 # ── get_history resolves the right engine ────────────────────────────

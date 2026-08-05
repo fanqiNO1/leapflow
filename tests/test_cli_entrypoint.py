@@ -678,14 +678,18 @@ async def test_daemon_runtime_bridge_recovers_and_resumes_session() -> None:
             self.successes.append(message)
 
     class BrokenClient:
-        async def status(self):
+        async def status(self, session_id: str = ""):
             raise DaemonUnavailableError("socket disappeared")
 
     class RecoveredClient:
         def __init__(self) -> None:
             self.resumed: list[str] = []
+            self.status_sessions: list[str] = []
 
-        async def status(self):
+        async def status(self, session_id: str = ""):
+            # The client scopes status to its own session; the daemon cannot
+            # otherwise know which of several live sessions to describe.
+            self.status_sessions.append(session_id)
             return {"pid": 99, "session_id": "sess-1"}
 
         async def session_resume(self, session_id: str):

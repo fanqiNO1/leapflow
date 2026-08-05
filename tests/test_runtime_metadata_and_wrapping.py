@@ -77,16 +77,40 @@ def test_active_engine_resolves_the_session_engine() -> None:
 
 
 def test_stream_metadata_reports_real_context_usage() -> None:
-    """The status bar reads this; zero here is what showed as ``0/1M``."""
+    """The status bar reads this; zero here is what showed as ``0/1M``.
+
+    The producing engine is passed explicitly. There is no fallback to "whichever
+    engine looks active": on a daemon serving several TUIs that resolves another
+    client's session, and the client adopts the reported id as its own.
+    """
     service, _ = _service_with_session()
+    session_engine = service._active_engine("s1")
 
     chunk = service._chunk_from_event(
-        StreamEvent(type="content", content="hi"), request_id="r1",
+        StreamEvent(type="content", content="hi"), request_id="r1", engine=session_engine,
     )
 
     assert chunk.metadata["context_used"] == _USED_TOKENS
     assert chunk.metadata["llm_context_length"] == _CONTEXT_LENGTH
     assert chunk.metadata["session_id"] == "s1"
+
+
+def test_chunk_metadata_requires_the_producing_engine() -> None:
+    """No engine means no session identity may be attached.
+
+    Guarding the shape rather than the value: an optional engine is what allowed
+    a foreign session id into a client's metadata.
+    """
+    import inspect
+
+    service, _ = _service_with_session()
+    signature = inspect.signature(service._chunk_from_event)
+    assert signature.parameters["engine"].default is inspect.Parameter.empty
+
+    chunk = service._chunk_from_event(
+        StreamEvent(type="content", content="hi"), request_id="r1", engine=None,
+    )
+    assert "session_id" not in chunk.metadata
 
 
 def test_stream_metadata_prefers_the_engine_that_produced_the_event() -> None:

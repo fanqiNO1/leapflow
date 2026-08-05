@@ -113,7 +113,10 @@ class SessionCoordinator:
         cause of an empty LeapBoard. Resolution order:
 
         1. the requested ``session_id``, when that session is live;
-        2. otherwise the most recently active session ("the current session");
+        2. otherwise the most recently active session of *any* client — valid only
+           for cross-session views, never for describing the caller (it leaks one
+           client's session to another; callers that represent a specific client
+           must pass that client's id);
         3. finally the base engine, for in-process mode where it *is* the engine.
         """
         base = getattr(ctx, "engine", None) if ctx is not None else None
@@ -121,7 +124,7 @@ class SessionCoordinator:
         if registry is not None:
             session_ctx = registry.get(session_id) if session_id else None
             if session_ctx is None and not session_id:
-                session_ctx = registry.most_recent()
+                session_ctx = registry.most_recent_any_client()
             if session_ctx is not None:
                 return session_ctx.engine, str(session_ctx.session_id or "")
         if base is None:

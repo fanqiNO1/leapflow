@@ -305,7 +305,7 @@ class _DaemonRuntimeBridge:
             mock_host=self._mock_host,
             status_callback=_status,
         )
-        status = await self.client.status()
+        status = await self.client.status(str(self._session_id_getter() or ""))
         self._metadata_applier(status)
         session_id = str(self._session_id_getter() or "")
         if session_id:
@@ -993,8 +993,20 @@ async def cmd_interactive_daemon(
         nonlocal runtime_turn_active, runtime_turn_max, runtime_turn_waiting
         if metadata.get("pid"):
             runtime_daemon_pid = str(metadata["pid"])
-        if metadata.get("session_id"):
-            active_session_id = str(metadata["session_id"])
+        # A session id is this client's own identity, so it is only ever accepted
+        # from the daemon when we have none yet (first assignment, or right after
+        # an explicit resume). A daemon serving several TUIs can report whichever
+        # session it resolved; adopting that made a second TUI send another
+        # workspace's session id and get rejected on every turn.
+        reported_session = str(metadata.get("session_id") or "")
+        if reported_session and reported_session != active_session_id:
+            if active_session_id:
+                logger.debug(
+                    "ignoring daemon-reported session %s; this client owns %s",
+                    reported_session, active_session_id,
+                )
+            else:
+                active_session_id = reported_session
         if metadata.get("model"):
             runtime_model_name = str(metadata["model"])
         if metadata.get("llm_model"):
@@ -1078,7 +1090,7 @@ async def cmd_interactive_daemon(
     async def _print_daemon_status() -> None:
         try:
             daemon_status = await bridge.call(
-                lambda current_client: current_client.status(),
+                lambda current_client: current_client.status(active_session_id),
                 description="daemon status",
             )
         except Exception as exc:
@@ -1487,7 +1499,7 @@ async def cmd_interactive_daemon(
 
     try:
         _apply_daemon_runtime_metadata(await bridge.call(
-            lambda current_client: current_client.status(),
+            lambda current_client: current_client.status(active_session_id),
             description="daemon status",
         ))
     except Exception as exc:

@@ -235,8 +235,13 @@ class LeapService(Protocol):
         """Ensure a session-analysis watch and run one analysis cycle now."""
         ...
 
-    async def status(self) -> Dict[str, Any]:
-        """Return daemon status (uptime, connections, db path, etc.)."""
+    async def status(self, session_id: str = "") -> Dict[str, Any]:
+        """Return daemon status (uptime, connections, db path, etc.).
+
+        ``session_id`` scopes the reply to the caller's session; without it no
+        session identity or per-session context figures are reported, since any
+        the daemon picked would belong to a different client.
+        """
         ...
 
     async def host_status(self) -> Dict[str, Any]:
