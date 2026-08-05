@@ -282,6 +282,8 @@ class ToolEvidenceBuilder:
             return self._file_list_evidence(result)
         if tool_name in {"shell_run", "gp_shell_run"}:
             return self._shell_evidence(result)
+        if tool_name in {"web_fetch", "gp_web_fetch"}:
+            return self._web_fetch_evidence(result)
         return self._compact_mapping(result)
 
     def _file_read_evidence(self, arguments: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
@@ -380,13 +382,52 @@ class ToolEvidenceBuilder:
                 out.append(prefix + self._compact_entry(node))
 
     def _shell_evidence(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        from leapflow.engine.tool_execution import exit_code_from
+
         return {
             "ok": bool(result.get("ok", True)),
             "kind": "shell_evidence",
-            "exit_code": result.get("exit_code"),
+            # Read under either key: shell tools mirror subprocess' `returncode`,
+            # so looking only for `exit_code` reported null on every success.
+            "exit_code": exit_code_from(result),
             "stdout": self._head_tail(str(result.get("stdout", "")), self._max_content_chars),
             "stderr": self._head_tail(str(result.get("stderr", "")), self._max_content_chars // 2),
         }
+
+    def _web_fetch_evidence(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Compact a fetched page or payload down to task evidence.
+
+        A single page routinely exceeds the whole turn's context budget, so the
+        raw body must never pass through. Status, final URL and content type stay
+        intact because they are what the model reasons about next; the body is
+        head/tail trimmed, and links are capped rather than dropped so follow-up
+        navigation is still possible.
+        """
+        evidence: Dict[str, Any] = {
+            "ok": bool(result.get("ok", True)),
+            "kind": "web_fetch_evidence",
+            "status": result.get("status"),
+            "final_url": result.get("final_url") or result.get("url", ""),
+            "content_type": result.get("content_type", ""),
+            "truncated": bool(result.get("truncated", False)),
+        }
+        for key in ("title", "select", "extractor", "note", "from_cache", "cache_path"):
+            value = result.get(key)
+            if value:
+                evidence[key] = self._compact_value(value)
+        if "data" in result:
+            evidence["data"] = self._compact_value(result["data"])
+        text = str(result.get("text") or "")
+        if text:
+            evidence["text"] = self._head_tail(text, self._max_content_chars)
+        links = result.get("links")
+        if isinstance(links, list) and links:
+            evidence["links"] = [
+                {"text": str(item.get("text", ""))[:120], "url": str(item.get("url", ""))}
+                for item in links[: self._max_items]
+                if isinstance(item, dict)
+            ]
+        return evidence
 
     def _platform_action_evidence(self, arguments: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
         """Compact evidence for platform_action with strong completion markers."""
@@ -452,6 +493,14 @@ class ToolEvidenceBuilder:
         for key in ("returncode", "exit_code"):
             if key in result:
                 compact[key] = result[key]
+        # Network failures explain themselves in the response: the status code is
+        # the classification and the body says why (an API error payload, a rate
+        # limit notice), so both must survive compaction for the model to act on.
+        if "status" in result:
+            compact["status"] = result["status"]
+        body_excerpt = result.get("body_excerpt")
+        if body_excerpt:
+            compact["body_excerpt"] = self._head_tail(str(body_excerpt), self._max_content_chars // 2)
         return compact
 
     def _app_connector_evidence(self, result: Dict[str, Any]) -> Dict[str, Any]:

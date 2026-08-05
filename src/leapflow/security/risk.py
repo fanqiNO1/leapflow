@@ -102,6 +102,8 @@ class DefaultRiskClassifier:
             return self._assess_file_read(action)
         if action.kind == ActionKind.FILE_WRITE.value:
             return self._assess_file_write(action)
+        if action.kind == ActionKind.NETWORK_FETCH.value:
+            return self._assess_network_fetch(action)
         if action.kind == ActionKind.GATEWAY_SEND.value:
             return RiskAssessment(
                 level=RiskLevel.HIGH,
@@ -144,6 +146,71 @@ class DefaultRiskClassifier:
                 allow_permanent=False,
             )
         return RiskAssessment(level=RiskLevel.MEDIUM, score=0.5, reasons=("external_action",))
+
+    # Target categories that mean "this request would reach infrastructure the
+    # user did not intend to expose": loopback holds the daemon socket and the
+    # dashboard, link-local holds cloud instance metadata (credential theft), and
+    # private ranges hold the rest of the user's network.
+    _INTERNAL_TARGETS = frozenset({
+        "loopback", "private", "link_local", "metadata", "unspecified", "reserved",
+    })
+
+    def _assess_network_fetch(self, action: ActionDescriptor) -> RiskAssessment:
+        """Assess an outbound HTTP read.
+
+        Deliberately never CRITICAL and never hardline: policy turns both into an
+        outright block, and the product decision is that internal targets stay
+        reachable through an explicit human approval rather than being refused.
+        HIGH plus ``allow_permanent=False`` is what expresses "ask every session,
+        never remember forever".
+        """
+        category = str(action.metadata.get("target_category") or "unknown")
+        scheme = str(action.metadata.get("scheme") or "").lower()
+        origin = str(action.resource or "")
+
+        if action.metadata.get("has_credentials"):
+            return RiskAssessment(
+                level=RiskLevel.HIGH,
+                score=0.8,
+                reasons=("url_embedded_credentials",),
+                explanation=(
+                    "The URL carries credentials, so fetching it would send them to "
+                    f"{origin} and record them in this turn."
+                ),
+                allow_permanent=False,
+                metadata={"origin": origin, "target_category": category},
+            )
+
+        if category in self._INTERNAL_TARGETS:
+            return RiskAssessment(
+                level=RiskLevel.HIGH,
+                score=0.82,
+                reasons=(f"{category}_network_target", "internal_service_access"),
+                explanation=(
+                    f"{origin} resolves to a {category.replace('_', ' ')} address, which "
+                    "can reach services on this machine or private network rather than "
+                    "the public internet."
+                ),
+                allow_permanent=False,
+                metadata={"origin": origin, "target_category": category},
+            )
+
+        if scheme and scheme != "https":
+            return RiskAssessment(
+                level=RiskLevel.LOW,
+                score=0.3,
+                reasons=("public_network_read", "plaintext_transport"),
+                explanation=f"Reads {origin} over plaintext {scheme}.",
+                metadata={"origin": origin, "target_category": category},
+            )
+
+        return RiskAssessment(
+            level=RiskLevel.LOW,
+            score=0.15,
+            reasons=("public_network_read",),
+            explanation=f"Reads public web content from {origin}.",
+            metadata={"origin": origin, "target_category": category},
+        )
 
     @staticmethod
     def _platform_risk_level(action: ActionDescriptor) -> RiskAssessment | None:

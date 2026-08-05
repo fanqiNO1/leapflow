@@ -135,6 +135,45 @@ Config keys (all via `leap config set …` / TUI `/config`):
 
 ---
 
+## Web Access (`web_fetch`)
+
+Reading the internet is a first-class **read-only** capability, not a shell command. `web_fetch` is disclosed on every turn, so the agent never has to improvise `curl … | python3 -c …` — which is what turned an HTTP 429 into a Python traceback and dragged a plain GET through side-effect gating (batch stop, session-scoped dedup, "this may already have taken effect").
+
+```
+web_fetch(url, select=?, timeout=?, max_bytes=?)
+  → { ok, status, kind, data | text | cache_path, title, links, from_cache, error_type, retryable }
+```
+
+| Behavior | Detail |
+|---|---|
+| **JSON APIs** | Parsed, with an optional dotted `select` (`chart.result.0.meta.regularMarketPrice`) so only the needed branch enters context |
+| **Web pages** | Boilerplate removed, returned as readable text plus extracted links |
+| **Binary** (PDF/images) | Never inlined; written to the session cache and returned as `cache_path` |
+| **HTTP errors** | Reported as `status` + `error_type` + a body excerpt, and marked `retryable` for 429/5xx |
+| **Retry & failover** | Rate limits and 5xx are retried; a client refused 403/429 by one transport is retried on the other (httpx / system curl) |
+| **Egress safety** | URLs resolving to loopback, private, link-local, or cloud-metadata addresses require approval; the grant is scoped to the **origin**, so approving once trusts that host for the session. `file://` and other schemes are refused outright |
+| **Caching** | Session-scoped, TTL'd, never synced off the machine |
+
+Config keys: `web.transport`, `web.timeout_s`, `web.max_bytes`, `web.max_retries`, `web.max_redirects`, `web.user_agent`, `web.extractor`, `web.private_targets`, `web.cache_ttl_s` (`leap config list web`).
+
+**Better HTML extraction (optional).** The built-in reader is dependency-free and always available. For article-grade boilerplate removal:
+
+```bash
+pip install 'leapflow[web]'   # adds trafilatura; used automatically when present
+```
+
+**JavaScript-rendered or bot-protected pages (opt-in, not bundled).** `web_fetch` performs no browser rendering and no anti-bot bypass. If you need them, register a scraping MCP server — LeapFlow already loads MCP servers, so this needs no code change. Add to `~/.leapflow/config/mcp_servers.json`:
+
+```json
+{
+  "scrapling": { "command": "scrapling", "args": ["mcp"] }
+}
+```
+
+Then install it separately (`pip install 'scrapling[ai]'` followed by `scrapling install`, which downloads Chromium — several hundred MB). Its tools appear with an `mcp_` prefix. Deliberately kept outside the default install: it is ~85 MB of wheels plus browsers, and fingerprint spoofing / CAPTCHA bypass carry compliance implications for the sites you fetch, so that choice stays yours rather than shipping on by default.
+
+---
+
 ## Prerequisites
 
 | Component | Version | Purpose |

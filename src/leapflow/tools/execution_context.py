@@ -90,13 +90,17 @@ def is_within_allowed_roots(path: Path, ctx: ToolExecutionContext | None = None)
     return False
 
 
-def _leapflow_managed_hint(path: Path) -> str:
+def leapflow_managed_hint(path: Path) -> str:
     """Return a redirect hint when ``path`` is LeapFlow's own managed state.
 
     A refusal that only says "outside the workspace" leaves the model to guess
     another path, which is how a config change turns into a sequence of blocked
     probes. Classification comes from the layout descriptor rather than string
     matching, so it follows the path tree instead of duplicating it.
+
+    Public because the shell gate refuses the same targets through a different
+    entry point; a hint that only the file tools emit would leave the shell path
+    telling the model nothing about what to use instead.
     """
     try:
         from leapflow.config import get_settings
@@ -132,7 +136,7 @@ def workspace_scope_error(path: Path, *, operation: str) -> dict[str, Any] | Non
     ctx = current_tool_context()
     if ctx is None or is_within_allowed_roots(path, ctx):
         return None
-    hint = _leapflow_managed_hint(path)
+    hint = leapflow_managed_hint(path)
     return {
         "ok": False,
         "error": (

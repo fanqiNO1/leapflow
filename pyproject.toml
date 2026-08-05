@@ -20,6 +20,10 @@ classifiers = [
 ]
 dependencies = [
     "openai>=1.40",
+    # Declared explicitly rather than relied on through openai: web_fetch imports
+    # it directly, so a transitive-only dependency would break the moment openai
+    # changed its own HTTP client.
+    "httpx>=0.27",
     "msgpack>=1.0.8",
     "duckdb>=1.0.0",
     "pyyaml>=6.0",
@@ -40,6 +44,9 @@ dev = [
 ]
 hub = ["modelscope-hub>=0.1.0"]
 dashboard = ["aiohttp>=3.9"]
+# Better main-content extraction for web_fetch. Optional because the stdlib
+# extractor always ships: this upgrades quality, it does not enable the feature.
+web = ["trafilatura>=2.2"]
 
 [project.scripts]
 leap = "leapflow.__main__:main"

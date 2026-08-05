@@ -36,6 +36,10 @@ _READ_ONLY_TOOLS = {
     "skills_list",
     "skill_view",
     "memory_search",
+    # Network reads: a GET has no side effect, so the loop must not treat it as a
+    # mutation. Egress safety is enforced by the tool's own target gate, not by
+    # pretending the call mutates state.
+    "web_fetch",
     # Verification/inspection tools: read-oriented for the loop even though some
     # names contain a mutating signal (e.g. test_run) or execute via a gated
     # underlying tool (test_run/lint_check delegate to the shell_run gate).

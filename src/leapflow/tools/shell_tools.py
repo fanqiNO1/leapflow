@@ -21,6 +21,7 @@ from typing import Any, Dict, FrozenSet, Protocol, runtime_checkable
 from leapflow.tools.execution_context import (
     current_tool_context,
     is_within_allowed_roots,
+    leapflow_managed_hint,
     resolve_workspace_path,
     workspace_scope_error,
 )
@@ -140,16 +141,53 @@ async def _approve_command(command: str, cwd: str | None) -> tuple[bool, str]:
         return False, "Dangerous command requires approval (denied)"
 
 
-def _command_workspace_escape(command: str) -> dict[str, Any] | None:
-    """Reject absolute path operands outside the active workspace.
+def _expand_operand(token: str) -> str:
+    """Return the inspectable path operand carried by a shell token.
 
-    Shell is intentionally a broad escape hatch, so this is a conservative P0
-    guard rather than a full shell parser: it catches explicit absolute / ~ path
-    arguments that would let a daemon-backed turn read another TUI's workspace.
+    Strips a leading ``--flag=`` and expands variable references, because the
+    shell expands them at execution time: ``$HOME/x`` and ``/Users/me/x`` reach
+    the same file, so a gate comparing raw text would guard the spelling rather
+    than the target. Unset variables are left literal by ``expandvars`` and then
+    fail the prefix/traversal tests below, which is the safe direction.
+
+    Expansions that are not a single filesystem operand are discarded: a variable
+    holding a search list (``$PATH``) expands to ``os.pathsep``-joined entries
+    that begin with ``/`` but name no file, so treating it as a path would block
+    ordinary commands like ``echo $PATH`` or ``PATH=$PATH:./bin npm test``.
+    """
+    candidate = token.split("=", 1)[-1]
+    if "$" not in candidate:
+        return candidate
+    expanded = os.path.expandvars(candidate)
+    if os.pathsep in expanded or any(char.isspace() for char in expanded):
+        return ""
+    return expanded
+
+
+def _has_parent_traversal(operand: str) -> bool:
+    """Return whether a relative operand walks upward out of its base directory."""
+    return ".." in Path(operand).parts
+
+
+def _command_workspace_escape(command: str, cwd: Path | None = None) -> dict[str, Any] | None:
+    """Reject path operands that resolve outside the active workspace.
+
+    Shell is intentionally a broad escape hatch, so this stays a conservative
+    guard rather than a full shell parser. It does normalize what the shell
+    itself would expand before deciding: variable references (``$HOME``,
+    ``${HOME}``) and relative traversal (``../..``) address exactly the same
+    files as an absolute path, so inspecting only literal ``/`` or ``~`` tokens
+    would let a daemon-backed turn read another TUI's workspace through a
+    different spelling.
+
+    Command substitution (``$(...)``, backticks) and similar indirection remain
+    out of reach by design; the hardline patterns, approval gate, and execution
+    ledger are the defenses there.
     """
     ctx = current_tool_context()
     if ctx is None:
         return None
+    base = cwd if cwd is not None else ctx.workspace_root
     try:
         tokens = shlex.split(command)
     except ValueError:
@@ -157,21 +195,31 @@ def _command_workspace_escape(command: str) -> dict[str, Any] | None:
     for token in tokens:
         if token.startswith(("http://", "https://")):
             continue
-        candidate = token.split("=", 1)[-1]
-        if not candidate.startswith(("/", "~")):
+        operand = _expand_operand(token)
+        if not operand:
             continue
-        path = Path(candidate).expanduser().resolve()
-        if not is_within_allowed_roots(path, ctx):
+        if operand.startswith(("/", "~")):
+            path = Path(operand)
+        elif _has_parent_traversal(operand):
+            path = base / operand
+        else:
+            continue
+        resolved = path.expanduser().resolve()
+        if not is_within_allowed_roots(resolved, ctx):
             return {
                 "ok": False,
                 "error": (
                     "shell_run command references a path outside the active workspace. "
-                    f"Path: {path}; workspace root: {ctx.workspace_root}."
+                    f"Path: {resolved}; workspace root: {ctx.workspace_root}. "
+                    "This boundary cannot be lifted by approval; work inside the workspace, "
+                    "or ask the user to open a session in that directory."
+                    + leapflow_managed_hint(resolved)
                 ),
                 "error_type": "outside_workspace",
                 "retryable": False,
                 "workspace_root": str(ctx.workspace_root),
-                "resolved_path": str(path),
+                "resolved_path": str(resolved),
+                "operand": token,
                 "session_id": ctx.session_id,
             }
     return None
@@ -202,7 +250,7 @@ async def shell_run(params: Dict[str, Any]) -> Dict[str, Any]:
         if scope_error:
             return scope_error
 
-    command_scope_error = _command_workspace_escape(str(command))
+    command_scope_error = _command_workspace_escape(str(command), cwd=cwd_path)
     if command_scope_error:
         return command_scope_error
 

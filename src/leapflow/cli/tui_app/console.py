@@ -132,7 +132,13 @@ class LeapConsole:
         self._console = Console(
             theme=_build_rich_theme(theme),
             highlight=False,
-            soft_wrap=True,
+            # Rich must wrap to the console width itself. With soft_wrap=True it
+            # emits one long line and leaves wrapping to whoever owns the screen;
+            # under prompt_toolkit's patch_stdout that renderer clips at the
+            # window edge instead, so long answers lost their tail. Width is
+            # detected per access from the terminal file descriptors, so this
+            # keeps following terminal resizes.
+            soft_wrap=False,
         )
 
     @property

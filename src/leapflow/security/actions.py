@@ -24,6 +24,7 @@ class ActionKind(str, Enum):
     SKILL_PROMOTE = "skill.promote"
     APP_INSTALL = "app.install"
     RUNTIME_CONFIGURE = "runtime.configure"
+    NETWORK_FETCH = "network.fetch"
     EXTERNAL_ACTION = "external.action"
 
 
@@ -177,6 +178,33 @@ class ActionDescriptor:
             metadata=merged,
         )
 
+    @classmethod
+    def network_fetch(
+        cls,
+        url: str,
+        *,
+        origin: str,
+        method: str = "GET",
+        metadata: dict[str, Any] | None = None,
+    ) -> "ActionDescriptor":
+        """Describe an outbound HTTP read before it leaves the machine.
+
+        ``resource`` is the origin rather than the full URL so a session grant
+        means "this host is trusted for now" instead of expiring on the next
+        path or query string, which would turn progressive trust into a prompt
+        per request.
+        """
+        merged = dict(metadata or {})
+        merged.update({"url": url, "method": method, "origin": origin})
+        return cls(
+            kind=ActionKind.NETWORK_FETCH.value,
+            summary=f"Fetch {method} {origin}",
+            detail=url,
+            effect=ActionEffect.READ.value,
+            resource=origin,
+            metadata=merged,
+        )
+
     def signature(self) -> str:
         """Return a stable signature suitable for session/profile grants."""
         payload = {
@@ -237,4 +265,9 @@ def _normalize_detail(kind: str, detail: str) -> str:
     text = re.sub(r"\s+", " ", detail.strip())
     if kind in {ActionKind.GATEWAY_SEND.value, ActionKind.PLATFORM_ACTION.value}:
         return "<platform-payload>"
+    if kind == ActionKind.NETWORK_FETCH.value:
+        # Collapsed on purpose: the grant is scoped by origin (the resource), so
+        # keeping the full URL here would mint a separate grant per path and
+        # query string and re-prompt for every request to an approved host.
+        return "<network-target>"
     return text[:4000]

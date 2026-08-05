@@ -16,6 +16,7 @@ import json
 import os
 import re
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from rich.text import Text
@@ -157,10 +158,19 @@ def _is_permission_recovery_metadata(metadata: dict[str, Any] | None) -> bool:
     )
 
 
-def _truncate_detail(text: str, *, limit: int = _TOOL_OUTPUT_LIMIT) -> str:
+def _truncate_detail(text: str, *, limit: int = _TOOL_OUTPUT_LIMIT, keep_tail: bool = False) -> str:
     compact = " ".join(text.split())
     if len(compact) <= limit:
         return compact
+    if keep_tail:
+        # Failure text names its cause at the end (a traceback's last line), so a
+        # head-only cut would leave the user reading "Traceback (most recent call
+        # last): File ..." and nothing about what actually went wrong. The head
+        # keeps just enough to identify the output; the tail gets the rest so a
+        # typical exception line survives intact rather than being cut mid-word.
+        head = max(1, (limit - 1) // 4)
+        tail = max(1, limit - 1 - head)
+        return compact[:head] + "…" + compact[-tail:]
     return compact[: limit - 1] + "…"
 
 
@@ -274,12 +284,16 @@ def _tool_result_detail(metadata: dict[str, Any] | None) -> str:
     if metadata.get("ok") is False:
         exit_code = metadata.get("exit_code")
         prefix = f"exit={exit_code} " if exit_code is not None else ""
+        # error_preview first: the tool already clipped it to the informative end
+        # of the output, while stderr_preview starts at the top of the dump.
         detail = (
-            _metadata_text(metadata, "stderr_preview")
-            or _metadata_text(metadata, "error_preview")
+            _metadata_text(metadata, "error_preview")
+            or _metadata_text(metadata, "stderr_preview")
             or _metadata_text(metadata, "result_preview")
         )
-        return _truncate_detail(prefix + detail, limit=_TOOL_OUTPUT_LIMIT) if detail or prefix else "failed"
+        if not (detail or prefix):
+            return "failed"
+        return _truncate_detail(prefix + detail, limit=_TOOL_OUTPUT_LIMIT, keep_tail=True)
     detail = (
         _metadata_text(metadata, "stdout_preview")
         or _metadata_text(metadata, "content_preview")
@@ -306,6 +320,15 @@ def _format_elapsed(seconds: float) -> str:
     return f"{minutes}m{secs:.0f}s"
 
 
+@dataclass
+class _ActiveTool:
+    """One in-flight tool call, tracked independently of its siblings."""
+
+    name: str
+    detail: str
+    started_at: float
+
+
 class StreamRenderer:
     """Accumulates streaming output and renders on finish.
 
@@ -326,9 +349,12 @@ class StreamRenderer:
         self._pending: str = ""
         self._thinking_buffer: str = ""
         self._start_time: float = 0.0
-        self._tool_start_time: float = 0.0
-        self._active_tool: str = ""
-        self._active_tool_detail: str = ""
+        # Keyed by tool_call_id so a parallel batch tracks each call separately;
+        # a single shared slot attributed every line in a batch to whichever call
+        # started last and dropped the siblings' lines entirely.
+        self._active_tools: dict[str, _ActiveTool] = {}
+        self._active_order: list[str] = []
+        self._tool_seq: int = 0
         self._tool_history: list[tuple[str, float]] = []
         self._permission_block_reason: str = ""
 
@@ -363,12 +389,12 @@ class StreamRenderer:
         self._buffer = ""
         self._pending = ""
         self._thinking_buffer = ""
-        self._active_tool = ""
-        self._active_tool_detail = ""
+        self._active_tools = {}
+        self._active_order = []
+        self._tool_seq = 0
         self._tool_history = []
         self._permission_block_reason = ""
         self._start_time = time.monotonic()
-        self._tool_start_time = 0.0
 
     def feed(self, chunk: str) -> None:
         """Append a text chunk to the pending buffer.
@@ -398,10 +424,56 @@ class StreamRenderer:
         self._pending = ""
         metadata = metadata or {}
         tool_name = _metadata_text(metadata, "normalized_tool_name") or name
-        self._active_tool = tool_name
-        self._active_tool_detail = _tool_action_detail(metadata)
-        self._tool_start_time = time.monotonic()
+        key = self._new_tool_key(metadata, tool_name)
+        self._active_tools[key] = _ActiveTool(
+            name=tool_name,
+            detail=_tool_action_detail(metadata),
+            started_at=time.monotonic(),
+        )
+        self._active_order.append(key)
+        pending = len(self._active_order)
+        if pending > 1:
+            # A parallel batch really has N calls running; showing only the last
+            # one would under-report the work in flight.
+            return f"{_tool_icon(tool_name)} {tool_name} +{pending - 1}"
         return f"{_tool_icon(tool_name)} {tool_name}"
+
+    def _new_tool_key(self, metadata: dict[str, Any], tool_name: str) -> str:
+        """Return a unique tracking key for a starting tool call.
+
+        Prefers the engine's ``tool_call_id`` so a completion can find its own
+        start inside a parallel batch. Callers that emit no id get a synthetic
+        unique key: reusing the tool name would make a second concurrent call to
+        the same tool overwrite the first and lose its line.
+        """
+        call_id = _metadata_text(metadata, "tool_call_id")
+        if call_id:
+            return call_id
+        self._tool_seq += 1
+        return f"{tool_name}#{self._tool_seq}"
+
+    def _take_active(self, metadata: dict[str, Any], tool_name: str) -> _ActiveTool | None:
+        """Pop the tracked start matching this completion, if any."""
+        call_id = _metadata_text(metadata, "tool_call_id")
+        key = call_id if call_id in self._active_tools else ""
+        if not key:
+            # No id match: pair with the oldest in-flight call of the same name,
+            # which is the right choice for both sequential and unlabelled calls.
+            key = next(
+                (
+                    candidate
+                    for candidate in self._active_order
+                    if self._active_tools.get(candidate) is not None
+                    and self._active_tools[candidate].name == tool_name
+                ),
+                "",
+            )
+        if not key:
+            return None
+        active = self._active_tools.pop(key, None)
+        if key in self._active_order:
+            self._active_order.remove(key)
+        return active
 
     def tool_finished(
         self,
@@ -411,19 +483,30 @@ class StreamRenderer:
     ) -> None:
         """Mark a tool call as finished; print one compact audit line."""
         metadata = metadata or {}
-        tool_name = _metadata_text(metadata, "normalized_tool_name") or name or self._active_tool
+        tool_name = (
+            _metadata_text(metadata, "normalized_tool_name")
+            or name
+            or (self._active_tools[self._active_order[-1]].name if self._active_order else "")
+        )
         original_tool_name = _metadata_text(metadata, "original_tool_name")
         alias_detail = original_tool_name if original_tool_name and original_tool_name != tool_name else ""
+        active = self._take_active(metadata, tool_name)
         if tool_name and metadata.get("ui_hidden"):
-            self._active_tool = ""
-            self._active_tool_detail = ""
-            self._tool_start_time = 0.0
             return
-        if tool_name and self._tool_start_time > 0:
-            duration = time.monotonic() - self._tool_start_time
+        if active is None and tool_name:
+            # Correlation failed (a completion with no tracked start). Report it
+            # anyway with a zero duration: dropping the line would hide a tool the
+            # user's turn actually ran, and silence is the worse failure mode.
+            active = _ActiveTool(
+                name=tool_name,
+                detail=_tool_action_detail(metadata),
+                started_at=time.monotonic(),
+            )
+        if tool_name and active is not None:
+            duration = time.monotonic() - active.started_at
             self._tool_history.append((tool_name, duration))
             ok = metadata.get("ok", True)
-            action_detail = self._active_tool_detail or _tool_action_detail(metadata)
+            action_detail = active.detail or _tool_action_detail(metadata)
             result_detail = _tool_result_detail(metadata) or _truncate_detail(output, limit=_TOOL_OUTPUT_LIMIT)
             line = Text()
             status_style = "leap.tool" if ok else "leap.error"
@@ -454,9 +537,6 @@ class StreamRenderer:
                 recovery_line.append("    ↳ recovery: ", style="leap.tool")
                 recovery_line.append(_truncate_detail(recovery_hint, limit=_TOOL_OUTPUT_LIMIT), style="leap.tool")
                 self._console.print(recovery_line)
-        self._active_tool = ""
-        self._active_tool_detail = ""
-        self._tool_start_time = 0.0
 
     def finish(self, *, command: Any | None = None) -> None:
         """Render all accumulated content to the console."""
