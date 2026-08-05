@@ -70,8 +70,80 @@ class ContextBudgetDecision:
     notice: str = ""
 
 
+# Estimator self-calibration. The character heuristic cannot match a real
+# tokenizer, and the residual error scales with the window: on a 1M budget a 15%
+# underestimate is ~150K tokens of invisible headroom loss, which either trips
+# provider overflow or wastes the window. Rather than shipping a tokenizer per
+# vendor (a dependency that goes stale exactly like the capability table), the
+# estimator learns its own correction from provider-reported prompt_tokens.
+_CALIBRATION_SMOOTHING = 0.25
+_CALIBRATION_MIN_FACTOR = 0.5
+_CALIBRATION_MAX_FACTOR = 2.5
+_CALIBRATION_MIN_SAMPLE_TOKENS = 200
+
+
 class ContextBudgetEstimator:
-    """Estimate provider-visible prompt tokens including tool schemas."""
+    """Estimate provider-visible prompt tokens including tool schemas.
+
+    Self-calibrating: ``observe_actual`` feeds back a provider-reported prompt
+    token count so the character heuristic converges on the active model and
+    language mix. Uncalibrated behaviour is unchanged, so this only ever narrows
+    the gap between the estimate and the number the provider actually charges.
+    """
+
+    def __init__(self) -> None:
+        self._calibration: float = 1.0
+        self._samples: int = 0
+
+    @property
+    def calibration_factor(self) -> float:
+        """Current correction applied to raw heuristic estimates."""
+        return self._calibration
+
+    @property
+    def calibration_samples(self) -> int:
+        """How many provider observations have shaped the current factor."""
+        return self._samples
+
+    def observe_actual(self, *, estimated: int, actual: int) -> None:
+        """Fold a provider-reported prompt token count into the calibration.
+
+        ``estimated`` is a value this estimator produced, so it already carries
+        the current factor. It is divided back out before comparing: measuring
+        the corrected estimate against the actual would make the observed ratio
+        approach 1.0 as soon as calibration started working, dragging the factor
+        back toward its uncalibrated value. The comparison must always be against
+        the raw heuristic.
+
+        Uses an exponential moving average so a single outlier cannot swing the
+        factor, and clamps the result: a wildly wrong factor would be worse than
+        the raw heuristic, and the observed ratio can be distorted by
+        provider-side prompt caching or injected system content.
+
+        Tiny prompts are ignored — fixed per-request overhead dominates them and
+        would bias the factor upward for every later estimate.
+        """
+        if estimated < _CALIBRATION_MIN_SAMPLE_TOKENS or actual <= 0:
+            return
+        raw = estimated / self._calibration if self._samples else float(estimated)
+        if raw <= 0:
+            return
+        observed = actual / raw
+        if not (_CALIBRATION_MIN_FACTOR <= observed <= _CALIBRATION_MAX_FACTOR):
+            return
+        if self._samples == 0:
+            self._calibration = observed
+        else:
+            self._calibration += _CALIBRATION_SMOOTHING * (observed - self._calibration)
+        self._calibration = min(
+            _CALIBRATION_MAX_FACTOR, max(_CALIBRATION_MIN_FACTOR, self._calibration),
+        )
+        self._samples += 1
+
+    def _calibrated(self, raw: int) -> int:
+        if self._samples == 0 or raw <= 0:
+            return raw
+        return max(1, int(round(raw * self._calibration)))
 
     def estimate_messages(self, messages: Sequence[Dict[str, Any]]) -> int:
         """Estimate token usage for chat messages and tool-call envelopes."""
@@ -84,7 +156,7 @@ class ContextBudgetEstimator:
             total += self._estimate_value(message.get("content", ""))
             total += self._estimate_tool_calls(message.get("tool_calls", []))
             total += self._estimate_value(message.get("tool_call_id", ""))
-        return max(1, total)
+        return max(1, self._calibrated(total))
 
     def estimate_tools(self, tools: Any) -> int:
         """Estimate token usage for native function/tool schemas."""
@@ -94,7 +166,7 @@ class ContextBudgetEstimator:
             text = json.dumps(tools, ensure_ascii=False, default=str, sort_keys=True)
         except (TypeError, ValueError):
             text = str(tools)
-        return _TOOL_SCHEMA_OVERHEAD_TOKENS + self._estimate_text(text)
+        return self._calibrated(_TOOL_SCHEMA_OVERHEAD_TOKENS + self._estimate_text(text))
 
     def snapshot(
         self,

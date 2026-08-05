@@ -2535,6 +2535,10 @@ class AgentEngine:
         """Prefer provider prompt usage when available and learn observed limits."""
         provider_prompt = int(usage.get("prompt_tokens", 0) or 0)
         if provider_prompt > 0:
+            # Calibrate before overwriting: the snapshot still holds this turn's
+            # estimate, so the pair (estimate, actual) is the only signal that can
+            # correct the character heuristic for this model and language mix.
+            self._calibrate_budget_estimator(provider_prompt)
             self._last_context_tokens = provider_prompt
             self._last_context_snapshot = {
                 **self._last_context_snapshot,
@@ -2544,6 +2548,25 @@ class AgentEngine:
             }
         if self._model_capabilities and model and usage:
             self._model_capabilities.update_from_usage(model, usage)
+
+    def _calibrate_budget_estimator(self, provider_prompt: int) -> None:
+        """Feed this turn's (estimate, actual) pair to the budget estimator."""
+        snapshot = self._last_context_snapshot or {}
+        # Skip a snapshot already replaced by a provider count, otherwise the
+        # estimator would calibrate against its own previous observation.
+        if snapshot.get("provider_prompt_tokens"):
+            return
+        estimated = int(snapshot.get("total_tokens", 0) or 0)
+        if estimated <= 0:
+            return
+        estimator = getattr(self._context_window_controller, "estimator", None)
+        observe = getattr(estimator, "observe_actual", None)
+        if observe is None:
+            return
+        try:
+            observe(estimated=estimated, actual=provider_prompt)
+        except Exception:  # noqa: BLE001 - calibration must never break a turn
+            logger.debug("budget estimator calibration failed", exc_info=True)
 
     def _compact_tool_result(self, tool_name: str, arguments: Dict[str, Any] | None, result: Any) -> Any:
         """Return compact tool evidence for LLM replay."""
