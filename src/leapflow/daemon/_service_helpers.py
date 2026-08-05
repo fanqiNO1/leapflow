@@ -38,12 +38,22 @@ def memory_entry_to_dict(entry: MemoryEntry) -> dict[str, Any]:
 # ── Engine / context metadata ────────────────────────────────────────
 
 def engine_context_metadata(engine: Any | None, settings: Any) -> dict[str, Any]:
-    """Return safe context-budget metadata for daemon status and stream events."""
+    """Return safe context-budget metadata for daemon status and stream events.
+
+    ``llm_model`` rides along because the TUI is a separate process: its status
+    bar seeds the model name at startup and can only learn about a change from
+    metadata the daemon sends back. Deriving it here means every status/stream
+    path reports the model actually in use, including after a mid-turn
+    ``config_set``, instead of relying on a one-off change notification.
+    """
     context_length = max(0, int(getattr(settings, "llm_context_length", 0) or 0))
     metadata: dict[str, Any] = {
         "llm_context_length": context_length,
         "context_used": 0,
     }
+    model = str(getattr(settings, "llm_model", "") or "")
+    if model:
+        metadata["llm_model"] = model
     if engine is None:
         return metadata
     metadata["context_used"] = max(0, int(getattr(engine, "context_token_count", 0) or 0))

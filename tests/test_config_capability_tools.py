@@ -353,3 +353,37 @@ def test_a_broken_gate_denies_rather_than_opens(cfg_home) -> None:
 
     assert result["ok"] is False
     assert _guardrail_is_on(), "a gate error must not let the write through"
+
+
+# ── The status bar must learn about the change ─────────────────────────
+
+
+def test_stream_metadata_carries_the_active_model() -> None:
+    """A daemon-mode TUI caches the model at startup and only updates from this.
+
+    Symptom this prevents: ``config_get`` reports the new model while the status
+    bar still shows the old one. The change notification in the chat loop is
+    change-detection based and a write has already refreshed the signature, so
+    the model has to travel on ordinary metadata instead.
+    """
+    from types import SimpleNamespace
+
+    from leapflow.daemon._service_helpers import engine_context_metadata
+
+    metadata = engine_context_metadata(
+        None, SimpleNamespace(llm_context_length=1_000_000, llm_model="qwen3.8-max"),
+    )
+
+    assert metadata["llm_model"] == "qwen3.8-max"
+    assert metadata["llm_context_length"] == 1_000_000
+
+
+def test_stream_metadata_omits_an_empty_model() -> None:
+    """An unset model must not blank out whatever the bar already shows."""
+    from types import SimpleNamespace
+
+    from leapflow.daemon._service_helpers import engine_context_metadata
+
+    metadata = engine_context_metadata(None, SimpleNamespace(llm_context_length=0, llm_model=""))
+
+    assert "llm_model" not in metadata
