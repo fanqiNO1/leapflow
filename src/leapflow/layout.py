@@ -511,11 +511,22 @@ class PathLayout:
     def workspace_manifest_path(self, workspace_root: Path) -> Path:
         return workspace_root / ".leapflow" / "workspace.yaml"
 
-    def write_workspace_manifest(self, workspace_root: Path) -> Path:
-        """Write the workspace-local manifest and return its path."""
+    def write_workspace_manifest(self, workspace_root: Path) -> Path | None:
+        """Write the workspace-local manifest; return its path, or ``None`` if skipped.
+
+        Skipped when the workspace's ``.leapflow`` directory *is* the LeapFlow
+        home (i.e. the workspace root is the home's parent, typically ``$HOME``).
+        Writing there would drop a workspace marker into the global home
+        alongside ``config/``, ``profiles/`` and ``secrets/`` — the two
+        directories collapse onto one path and the layout stops being readable.
+        The profile-side manifest (addressed by ``workspace_id``) is written
+        unconditionally by the caller, so nothing is lost by skipping this copy.
+        """
         workspace_root = workspace_root.expanduser().resolve()
-        workspace_id = workspace_id_for_path(workspace_root)
         path = self.workspace_manifest_path(workspace_root)
+        if path.parent.resolve() == self.root.resolve():
+            return None
+        workspace_id = workspace_id_for_path(workspace_root)
         now = datetime.now(timezone.utc).isoformat()
         existing: dict[str, Any] = {}
         if path.exists():

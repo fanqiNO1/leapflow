@@ -76,10 +76,8 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 "Read text file content with adaptive context governance. For large or unfamiliar files, "
                 "prefer mode='outline' or mode='symbols' first, then use mode='raw' "
                 "with start_line/max_lines for the specific range you actually need. "
-                "Do not probe `<workspace>/.leapflow/config.json`; LeapFlow uses structured "
-                "config under `~/.leapflow/config/user.yaml`, "
-                "`~/.leapflow/profiles/<profile>/config/*.yaml`, and optional "
-                "`<workspace>/.leapflow/config.yaml`."
+                "For LeapFlow's own settings, use config_list / config_get / config_set — "
+                "its config files are outside the workspace and not readable here."
             ),
             "parameters": {
                 "type": "object",
@@ -693,6 +691,80 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "x_leapflow": {"category": "terminal", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
         },
     },
+    # ── LeapFlow settings (never read config files; these take keys, not paths) ──
+    {
+        "type": "function",
+        "function": {
+            "name": "config_list",
+            "description": (
+                "List LeapFlow's own writable settings (model, provider, daemon, memory, "
+                "perception, gateway, …) with current values. Use this to discover the exact "
+                "key before changing anything. Optionally narrow by `category`. This is the "
+                "only correct way to inspect LeapFlow configuration — never read config files "
+                "from disk."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "Optional category filter, e.g. 'LLM Provider' or 'Runtime'"},
+                    "limit": {"type": "integer", "description": "Max fields to return (default 60)"},
+                },
+            },
+            "x_leapflow": {"category": "config", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "config_get",
+            "description": (
+                "Read one LeapFlow setting by key (e.g. 'llm.model', 'daemon.log_level'), "
+                "returning its current value, type, scopes, and whether a change needs a "
+                "daemon restart. Never read LeapFlow config files from disk — use this."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Dot-separated config key, e.g. 'llm.model'"},
+                },
+                "required": ["key"],
+            },
+            "x_leapflow": {"category": "config", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "config_set",
+            "description": (
+                "Change one LeapFlow setting by key, e.g. switch the model with "
+                "key='llm.model'. Values are validated and coerced; credentials are stored in "
+                "the vault automatically. Call config_list or config_get first if unsure of "
+                "the key. The result states whether a `leap daemon restart` is required. "
+                "Never edit LeapFlow config files directly."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Dot-separated config key, e.g. 'llm.model'"},
+                    "value": {"description": "New value; coerced to the field's declared type"},
+                    "scope": {"type": "string", "enum": ["profile", "workspace"], "description": "Where to persist (default: profile)"},
+                },
+                "required": ["key", "value"],
+            },
+            "x_leapflow": {
+                "category": "config",
+                "risk_level": "medium",
+                "schema_cost": "low",
+                "requires_approval": True,
+                "mutates_state": True,
+                # Re-setting the same value converges, so a replay is safe: this keeps
+                # the change out of the uncertain-effect path that would otherwise stall
+                # a legitimate retry.
+                "idempotency_scope": "turn",
+            },
+        },
+    },
 ] + HUB_TOOL_DEFINITIONS + GATEWAY_TOOL_DEFINITIONS
 
 
@@ -1060,6 +1132,27 @@ TOOL_HANDLERS["memory_search"] = _memory_search_handler
 TOOL_HANDLERS["memory_add"] = _memory_add_handler
 TOOL_HANDLERS["gp_memory_search"] = _memory_search_handler
 TOOL_HANDLERS["gp_memory_add"] = _memory_add_handler
+
+
+# ────────────────────────────────────────────────────────────────
+# LeapFlow settings: delegate to ConfigService so the model changes settings by
+# key instead of guessing at config file paths (which the workspace sandbox
+# rightly refuses). Registered here alongside the other late-bound handlers.
+# ────────────────────────────────────────────────────────────────
+
+from leapflow.tools.config_tools import (  # noqa: E402 - late import keeps module import cheap
+    config_get_handler as _config_get_handler,
+    config_list_handler as _config_list_handler,
+    config_set_handler as _config_set_handler,
+)
+
+for _cfg_name, _cfg_handler in (
+    ("config_list", _config_list_handler),
+    ("config_get", _config_get_handler),
+    ("config_set", _config_set_handler),
+):
+    TOOL_HANDLERS[_cfg_name] = _cfg_handler
+    TOOL_HANDLERS[f"gp_{_cfg_name}"] = _cfg_handler
 
 
 # ────────────────────────────────────────────────────

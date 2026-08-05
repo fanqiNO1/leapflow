@@ -1248,6 +1248,13 @@ class Context:
         from leapflow.tools.registry_bootstrap import set_memory_manager
         set_memory_manager(self.memory)
 
+        # ── Config tools: bind this Context so a config write reloads the live
+        # session, the same way `/config set` does. Without it the write lands on
+        # disk while the in-process settings keep the old value, and an immediate
+        # read-back looks like the write failed.
+        from leapflow.tools.config_tools import set_config_context
+        set_config_context(self)
+
         # ── Gateway server (late-bound tool wiring) ──
         from leapflow.gateway.server import GatewayServer
         from leapflow.gateway.router import GatewayRouter
@@ -1341,6 +1348,11 @@ class Context:
         self.gateway_server.discover_manifests()
         set_gateway_server(self.gateway_server)
         set_gateway_approval_gate(self._approval_orchestrator)
+        # Config writes are gated too: several writable keys weaken safety
+        # machinery (guardrail.enabled, confirm.default_level, codegen.sandbox),
+        # so config_set must not be able to disable its own supervision.
+        from leapflow.tools.config_tools import set_config_approval_gate
+        set_config_approval_gate(self._approval_orchestrator)
 
         self._register_gateway_normalizers(settings)
 
