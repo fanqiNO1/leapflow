@@ -161,14 +161,40 @@ def test_hub_and_gateway_tools_are_explicitly_classified_as_heavy() -> None:
         assert manifests[name].is_core is False
 
 
-def test_file_read_schema_discourages_workspace_config_probe() -> None:
+def test_file_read_schema_redirects_config_reads_to_the_config_tools() -> None:
+    """The redirect must name the capability, not enumerate config paths.
+
+    The previous wording forbade one specific path and then listed the real ones,
+    which both failed to stop the probing (the model simply tried another path)
+    and handed it fresh targets. With ``config_*`` tools available the guidance is
+    a pointer to them, and no LeapFlow path belongs in this description.
+    """
     file_read_def = next(
         item for item in TOOL_DEFINITIONS
         if item.get("function", {}).get("name") == "file_read"
     )
     description = str(file_read_def["function"].get("description", ""))
 
-    assert "Do not probe `<workspace>/.leapflow/config.json`" in description
-    assert "~/.leapflow/config/user.yaml" in description
-    assert "~/.leapflow/profiles/<profile>/config/*.yaml" in description
-    assert "<workspace>/.leapflow/config.yaml" in description
+    for tool in ("config_list", "config_get", "config_set"):
+        assert tool in description
+    # No config path may be advertised here — that is what invited the probing.
+    for leaked in ("~/.leapflow", ".leapflow/config.json", "config/user.yaml", "profiles/"):
+        assert leaked not in description
+
+
+def test_config_tools_are_core_and_writes_are_not() -> None:
+    """Reading settings must be always-available; writing must not be.
+
+    A config read the model cannot see is the whole reason it fell back to file
+    probing, so ``config_get``/``config_list`` belong in the CORE floor. The
+    write is a mutation and stays behind progressive disclosure.
+    """
+    plan = DisclosurePlanner().plan(
+        TOOL_DEFINITIONS,
+        DisclosureRuntimeState(native_tools_enabled=True),
+    )
+    names = _tool_names(plan)
+
+    assert "config_get" in names
+    assert "config_list" in names
+    assert "config_set" not in names

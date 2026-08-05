@@ -1325,6 +1325,20 @@ async def cmd_interactive_daemon(
                 _apply_daemon_runtime_metadata({"host_backend": payload["result"]})
                 _update_status()
 
+            # A config mutation changes runtime state the status bar shows. The TUI
+            # is a separate process, so its cached model/context values only move
+            # when the daemon reports them back; without this the bar keeps showing
+            # the model captured at startup even though the change already applies.
+            if str(payload.get("view")) == "config" and payload.get("changed_keys"):
+                runtime_update: dict[str, Any] = {}
+                if payload.get("model"):
+                    runtime_update["llm_model"] = payload["model"]
+                if payload.get("llm_context_length") is not None:
+                    runtime_update["llm_context_length"] = payload["llm_context_length"]
+                if runtime_update:
+                    _apply_daemon_runtime_metadata(runtime_update)
+                    _update_status()
+
             if str(payload.get("view")) == "dashboard":
                 if payload.get("mode") == "open":
                     await _open_dashboard(payload)

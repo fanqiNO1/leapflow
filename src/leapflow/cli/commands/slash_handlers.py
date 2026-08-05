@@ -474,7 +474,12 @@ def _config_mutation_payload(ctx: "Context", service: Any, result: Any) -> dict[
         "changed_keys": list(result.changed_keys),
         "warnings": list(getattr(result, "warnings", ()) or ()),
         "reloaded": reloaded,
+        # Runtime values the status bar renders. A daemon-mode TUI is a separate
+        # process and cannot see the reload, so it needs them echoed back here;
+        # context length travels with the model because switching models usually
+        # changes it too.
         "model": ctx.settings.llm_model,
+        "llm_context_length": int(getattr(ctx.settings, "llm_context_length", 0) or 0),
     }
 
 

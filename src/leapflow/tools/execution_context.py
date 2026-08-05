@@ -90,17 +90,56 @@ def is_within_allowed_roots(path: Path, ctx: ToolExecutionContext | None = None)
     return False
 
 
+def _leapflow_managed_hint(path: Path) -> str:
+    """Return a redirect hint when ``path`` is LeapFlow's own managed state.
+
+    A refusal that only says "outside the workspace" leaves the model to guess
+    another path, which is how a config change turns into a sequence of blocked
+    probes. Classification comes from the layout descriptor rather than string
+    matching, so it follows the path tree instead of duplicating it.
+    """
+    try:
+        from leapflow.config import get_settings
+
+        layout = getattr(get_settings(), "layout", None)
+        if layout is None:
+            return ""
+        descriptor = layout.describe_path(path)
+    except Exception:  # noqa: BLE001 - a hint must never break the refusal itself
+        return ""
+
+    category = str(getattr(descriptor, "category", "") or "")
+    if category in {"config", "mcp_config", "workspace_manifest"}:
+        return (
+            " This is LeapFlow's own configuration: use the config_list / config_get / "
+            "config_set tools instead of reading or editing these files."
+        )
+    if category == "secret_vault":
+        return (
+            " This is LeapFlow's credential vault and is never readable as a file: "
+            "set credentials with config_set (e.g. key='llm.api_key')."
+        )
+    return ""
+
+
 def workspace_scope_error(path: Path, *, operation: str) -> dict[str, Any] | None:
-    """Return a structured error when ``path`` escapes the active workspace."""
+    """Return a structured error when ``path`` escapes the active workspace.
+
+    The workspace boundary is a hard gate evaluated at the tool entry point: it
+    is deliberately not routed through ApprovalGate, so the message must not
+    imply that approving something will unblock it.
+    """
     ctx = current_tool_context()
     if ctx is None or is_within_allowed_roots(path, ctx):
         return None
+    hint = _leapflow_managed_hint(path)
     return {
         "ok": False,
         "error": (
             f"{operation} path is outside the active workspace. "
             f"Resolved path: {path}; workspace root: {ctx.workspace_root}. "
-            "Open a TUI in that workspace or ask explicitly for an external path with approval."
+            "This boundary cannot be lifted by approval; work inside the workspace, "
+            "or ask the user to open a session in that directory." + hint
         ),
         "error_type": "outside_workspace",
         "retryable": False,

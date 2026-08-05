@@ -29,6 +29,7 @@ class ApprovalCoordinator:
             from leapflow.security.approval import SessionAwareGate
             from leapflow.security.actions import ActionDescriptor
             from leapflow.security.orchestrator import ApprovalOrchestrator
+            from leapflow.tools.config_tools import set_config_approval_gate
             from leapflow.tools.gateway_tool import set_gateway_approval_gate
             from leapflow.tools.registry_bootstrap import set_file_read_gate, set_file_write_gate
             from leapflow.tools.shell_tools import set_approval_gate
@@ -44,6 +45,9 @@ class ApprovalCoordinator:
             ctx._approval_orchestrator = orchestrator
             set_approval_gate(orchestrator)
             set_gateway_approval_gate(orchestrator)
+            # Config writes go through the same daemon-side approval path, so a
+            # daemon session cannot change settings unattended either.
+            set_config_approval_gate(orchestrator)
 
             class _FileReadGate:
                 def __init__(self) -> None:

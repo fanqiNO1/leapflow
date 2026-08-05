@@ -44,6 +44,11 @@ async def test_config_slash_updates_model_and_hot_reloads(tmp_path) -> None:
         assert payload["reloaded"] is True
         assert ctx.settings.llm_model == "qwen3.7-plus"
         assert "model: qwen3.7-plus" in ctx.settings.profile_layout.llm_config_path.read_text(encoding="utf-8")
+        # The status bar lives in a separate TUI process and can only learn the new
+        # model from this payload, so a mutation must echo the runtime values back.
+        assert payload["model"] == "qwen3.7-plus"
+        assert payload["llm_context_length"] == int(ctx.settings.llm_context_length)
+        assert payload["changed_keys"], "the TUI keys its status refresh off changed_keys"
 
         payload = await command_execute(ctx, "config", "set memory.working_max_tokens 12000")
         assert payload["ok"] is True
