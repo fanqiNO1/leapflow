@@ -296,7 +296,7 @@ class RuntimeLeapService:
                         content="Configuration reloaded in leapd.",
                         event_type="status",
                         metadata={
-                            **engine_context_metadata(getattr(ctx, "engine", None), ctx.settings),
+                            **engine_context_metadata(self._active_engine(), ctx.settings),
                             "llm_model": getattr(ctx.settings, "llm_model", ""),
                             "request_id": request_id,
                         },
@@ -365,7 +365,9 @@ class RuntimeLeapService:
                         stream = engine.run_stream(message, enable_thinking=enable_thinking, request_id=request_id)
                     else:
                         stream = engine.run_stream(message, enable_thinking=enable_thinking)
-                    async for chunk in self._stream_engine_events(stream, approval_queue, request_id=request_id):
+                    async for chunk in self._stream_engine_events(
+                        stream, approval_queue, request_id=request_id, engine=engine,
+                    ):
                         request_record["chunks"].append(chunk)
                         yield chunk
                     request_record["status"] = "completed"
@@ -414,6 +416,7 @@ class RuntimeLeapService:
         approval_queue: asyncio.Queue[StreamChunk],
         *,
         request_id: str = "",
+        engine: Any = None,
     ) -> AsyncIterator[StreamChunk]:
         engine_task: asyncio.Task[Any] | None = asyncio.create_task(anext(stream))
         approval_task: asyncio.Task[StreamChunk] | None = asyncio.create_task(approval_queue.get())
@@ -432,7 +435,9 @@ class RuntimeLeapService:
                         engine_task = None
                         break
                     stream_event = normalize_stream_event(event)
-                    yield self._chunk_from_event(stream_event, request_id=request_id)
+                    yield self._chunk_from_event(
+                        stream_event, request_id=request_id, engine=engine,
+                    )
                     engine_task = asyncio.create_task(anext(stream))
         finally:
             for task in (engine_task, approval_task):
@@ -445,17 +450,42 @@ class RuntimeLeapService:
                 except Exception:
                     logger.debug("daemon: failed to close engine stream", exc_info=True)
 
-    def _chunk_from_event(self, event: StreamEvent, *, request_id: str = "") -> StreamChunk:
+    def _active_engine(self, session_id: str = "") -> Any:
+        """Return the engine holding live conversation state.
+
+        Single entry point for "the engine to report on". ``ctx.engine`` is only a
+        template used to build per-session engines and never accumulates a
+        conversation, so reading it yields zero turns and zero context — which
+        has surfaced repeatedly as an empty LeapBoard and a status bar stuck at
+        ``0/<limit>``. Anything assembling runtime metadata must come through
+        here rather than reaching for ``ctx.engine`` directly.
+        """
+        ctx = self._ctx
+        if ctx is None:
+            return None
+        engine, _ = self._session_coordinator.resolve_session_engine(ctx, session_id)
+        return engine
+
+    def _chunk_from_event(
+        self, event: StreamEvent, *, request_id: str = "", engine: Any = None,
+    ) -> StreamChunk:
+        """Wrap an engine stream event as an RPC chunk with runtime metadata.
+
+        ``engine`` must be the engine that produced the event — the per-session
+        one. Falling back to ``ctx.engine`` reports the base engine, which never
+        carries a conversation, so context usage reads as 0 and the client's
+        status bar sits at ``0/<limit>`` for the whole session.
+        """
         ctx = self.context
-        engine = getattr(ctx, "engine", None)
+        active = engine if engine is not None else self._active_engine()
         metadata = dict(event.metadata or {})
-        session_id = getattr(engine, "_current_session_id", "") if engine else ""
+        session_id = getattr(active, "_current_session_id", "") if active else ""
         if request_id:
             metadata.setdefault("request_id", request_id)
         if session_id:
             metadata.setdefault("session_id", str(session_id))
-        if engine is not None:
-            metadata.update(engine_context_metadata(engine, getattr(ctx, "settings", self._settings)))
+        if active is not None:
+            metadata.update(engine_context_metadata(active, getattr(ctx, "settings", self._settings)))
         return StreamChunk(
             request_id=request_id, content=event.content,
             done=False, event_type=event.type, metadata=metadata,
@@ -669,7 +699,9 @@ class RuntimeLeapService:
     async def status(self) -> dict[str, Any]:
         ctx = self._ctx
         settings = getattr(ctx, "settings", self._settings) if ctx is not None else self._settings
-        engine = getattr(ctx, "engine", None) if ctx is not None else None
+        # Report on the session engine, not the base template: the latter has no
+        # conversation, so context usage would always read as zero.
+        engine = self._active_engine()
         db_holder = getattr(ctx, "_db_holder", None) if ctx is not None else None
         layout = settings.layout
         profile_layout = settings.profile_layout
