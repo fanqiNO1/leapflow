@@ -34,6 +34,15 @@ class ModelCapabilities:
     supports_thinking: bool = False
     supports_streaming_tools: bool = False
     tokens_per_image: int = _IMAGE_TOKEN_ESTIMATE
+    # Whether ``context_length`` is trustworthy enough to cap the user's
+    # configured budget. A version-specific entry is authoritative; a
+    # family-wide fallback such as "qwen" is not, because it carries whatever
+    # the family's largest model happened to support when the entry was written
+    # and would silently shrink the window for every later generation. Model
+    # names always outrun a static table, so an unrecognised or merely
+    # family-matched model defers to the configured budget instead of being
+    # clamped by stale data.
+    authoritative: bool = True
 
 
 @runtime_checkable
@@ -43,6 +52,13 @@ class CapabilitySource(Protocol):
     def resolve(self, model: str, base_url: str = "") -> Optional[ModelCapabilities]: ...
 
 
+# Version-specific entries are authoritative: the number belongs to that exact
+# model. Family-wide entries (matching every generation of a vendor's line) are
+# marked non-authoritative — they inform feature flags but must not cap a
+# configured budget, since a newer generation usually has a larger window than
+# whatever was current when the entry was added. New model names are expected to
+# miss this table entirely and fall through to the configured budget; keeping the
+# list current is a convenience, never a correctness requirement.
 _KNOWN_MODELS: List[tuple[str, ModelCapabilities]] = [
     # OpenAI
     (r"gpt-4o", ModelCapabilities(context_length=128_000, max_output_tokens=16_384,
@@ -64,12 +80,16 @@ _KNOWN_MODELS: List[tuple[str, ModelCapabilities]] = [
     (r"claude-4", ModelCapabilities(context_length=200_000, max_output_tokens=16_384,
                                      supports_tools=True, supports_vision=True,
                                      supports_thinking=True)),
-    # DeepSeek
-    (r"deepseek", ModelCapabilities(context_length=128_000, max_output_tokens=8_192,
-                                     supports_tools=True, supports_thinking=True)),
-    # Qwen
-    (r"qwen", ModelCapabilities(context_length=131_072, max_output_tokens=8_192,
-                                 supports_tools=True, supports_thinking=True)),
+    # Family-wide fallbacks: feature flags only, context length not authoritative.
+    (r"gpt-", ModelCapabilities(max_output_tokens=32_768, supports_tools=True,
+                                supports_vision=True, authoritative=False)),
+    (r"claude-", ModelCapabilities(max_output_tokens=16_384, supports_tools=True,
+                                    supports_vision=True, supports_thinking=True,
+                                    authoritative=False)),
+    (r"deepseek", ModelCapabilities(max_output_tokens=8_192, supports_tools=True,
+                                     supports_thinking=True, authoritative=False)),
+    (r"qwen", ModelCapabilities(max_output_tokens=8_192, supports_tools=True,
+                                 supports_thinking=True, authoritative=False)),
 ]
 
 
@@ -86,7 +106,9 @@ class ModelCapabilityRegistry:
     def __init__(self, *, default: Optional[ModelCapabilities] = None) -> None:
         self._overrides: Dict[str, ModelCapabilities] = {}
         self._learned: Dict[str, Dict[str, Any]] = {}
-        self._default = default or ModelCapabilities()
+        # The fallback carries no model-specific knowledge, so its context length
+        # must never cap a configured budget.
+        self._default = default or ModelCapabilities(authoritative=False)
 
     def register(self, model: str, caps: ModelCapabilities) -> None:
         """Register an explicit capability override for a model."""
@@ -110,6 +132,11 @@ class ModelCapabilityRegistry:
                 supports_thinking=pattern_caps.supports_thinking,
                 supports_streaming_tools=pattern_caps.supports_streaming_tools,
                 tokens_per_image=pattern_caps.tokens_per_image,
+                # A learned length comes from a real response, so it is
+                # authoritative even when the pattern was only a family guess.
+                authoritative=(
+                    True if "context_length" in learned else pattern_caps.authoritative
+                ),
             )
 
         if pattern_caps:
@@ -119,6 +146,7 @@ class ModelCapabilityRegistry:
             return ModelCapabilities(
                 context_length=learned.get("context_length", self._default.context_length),
                 max_output_tokens=learned.get("max_output_tokens", self._default.max_output_tokens),
+                authoritative="context_length" in learned,
             )
 
         return self._default

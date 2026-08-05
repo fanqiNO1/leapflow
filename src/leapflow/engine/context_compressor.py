@@ -34,9 +34,38 @@ TokenCountFn = Callable[[str], int]
 # per-model magic numbers — the formulas produce smooth curves that
 # work across 32K → 2M+ context windows.
 
-_TRIM_CEILING_CHARS = 50_000
+_TRIM_CEILING_CHARS = 120_000
 _TRIM_CONTEXT_DIVISOR = 50
 _TRIM_BUDGET_ACTIVATION_RATIO = 0.15
+
+# Tool-result budget scaling. The divisor is picked so a 128K window lands near
+# the historical 3000-char budget, keeping small windows behaving as before while
+# large ones actually widen: 128K/40 ~ 3.2K, 1M/40 -> 25K (ceiling-bound).
+_RESULT_CONTEXT_DIVISOR = 40
+_RESULT_CEILING_CHARS = 40_000
+_RESULT_FLOOR_CHARS = 800
+
+
+def adaptive_tool_result_chars(base: int, context_length: int) -> int:
+    """Return the per-tool result budget for a given context window.
+
+    Scales in both directions, unlike a plain ``min(base, ...)`` which can only
+    shrink: that form pinned every large window to ``base`` (a 1M window still
+    truncated each tool result at 3000 chars, i.e. 0.3% of the window, making
+    this the tightest link in the truncation chain regardless of how much room
+    was left).
+
+    Small windows still contract — a 32K model must not spend a tenth of its
+    window on one tool result — and the floor keeps results meaningful rather
+    than letting the proportion collapse to nothing.
+    """
+    base = max(1, int(base))
+    if context_length <= 0:
+        return base
+    proportional = int(context_length) // _RESULT_CONTEXT_DIVISOR
+    if proportional < base:
+        return max(_RESULT_FLOOR_CHARS, proportional)
+    return min(_RESULT_CEILING_CHARS, proportional)
 
 
 def estimate_text_tokens(text: str) -> int:

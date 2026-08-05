@@ -238,7 +238,10 @@ class ContextWindowController:
         return head + [notice] + tail
 
 
-_EVIDENCE_CEILING_CHARS = 8_000
+# Evidence scaling. The ceiling was low enough that a 1M window hit it almost
+# immediately, so evidence stopped growing with the budget long before the
+# window was under pressure.
+_EVIDENCE_CEILING_CHARS = 24_000
 _EVIDENCE_CONTEXT_DIVISOR = 32
 
 

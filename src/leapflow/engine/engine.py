@@ -1738,13 +1738,45 @@ class AgentEngine:
         return dict(self._last_context_snapshot)
 
     def _active_context_length(self) -> int:
-        """Return the runtime context length for the active model/provider."""
-        if self._model_capabilities is not None:
-            try:
-                return max(1, int(self._model_capabilities.resolve(self._settings.llm_model).context_length))
-            except Exception:
-                logger.debug("model capability lookup failed", exc_info=True)
-        return max(1, int(self._settings.llm_context_length))
+        """Return the runtime context budget for the active model/provider.
+
+        ``llm_context_length`` is the *configured budget* and the registry holds
+        *model capability*, so the effective window is the smaller of the two —
+        but only when the registry entry actually describes this model. A
+        family-wide entry carries whatever the vendor's line supported when it
+        was written, and clamping to it silently shrank the window for every
+        later generation (a 1M-class model matching "qwen" ran on 131K, i.e. 13%
+        of its window, with every compression ratio computed against that wrong
+        denominator). Model names always outrun a static table, so a
+        non-authoritative match defers to the configured budget instead.
+
+        Overshooting a model's real limit is recoverable: the provider reports
+        overflow and recovery routes it to context compression. Silently running
+        at a fraction of the window is not — nothing surfaces it.
+        """
+        budget = max(1, int(getattr(self._settings, "llm_context_length", 0) or 1))
+        if self._model_capabilities is None:
+            return budget
+        try:
+            caps = self._model_capabilities.resolve(self._settings.llm_model)
+        except Exception:
+            logger.debug("model capability lookup failed", exc_info=True)
+            return budget
+        if not getattr(caps, "authoritative", True):
+            return budget
+        known = max(1, int(getattr(caps, "context_length", 0) or 1))
+        return min(budget, known)
+
+    @property
+    def active_context_length(self) -> int:
+        """Effective context budget in use, for status reporting.
+
+        Exposed so clients report the window compression actually runs against.
+        Reading ``settings.llm_context_length`` instead shows the configured
+        budget, which differs whenever an authoritative capability caps it — the
+        status bar then claims a window the engine is not using.
+        """
+        return self._active_context_length()
 
     def _begin_turn_context(self, user_text: str) -> None:
         """Reset turn-scoped state and build the stable task contract."""

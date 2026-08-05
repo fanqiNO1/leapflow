@@ -18,6 +18,7 @@ from leapflow.platform.event_bus import EventBus
 from leapflow.platform.mock import MockBridge
 from leapflow.config import Settings, _build_settings_from_env
 from leapflow.config_loader import config_signature, load_config_bundle
+from leapflow.engine.context_compressor import adaptive_tool_result_chars
 from leapflow.engine.engine import AgentEngine, build_default_registry
 from leapflow.engine.graph_planner import GraphPlanner
 from leapflow.engine.intent_classifier import (
@@ -671,7 +672,9 @@ class Context:
             return
 
         context_length = self._effective_llm_context_length(settings)
-        dynamic_result_budget = min(settings.max_tool_result_chars, context_length // 20)
+        dynamic_result_budget = adaptive_tool_result_chars(
+            settings.max_tool_result_chars, context_length,
+        )
         if dynamic_result_budget != settings.max_tool_result_chars:
             logger.info(
                 "Dynamic tool result budget: %d (context=%d)",
