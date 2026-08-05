@@ -180,9 +180,14 @@ async def config_get_handler(args: Dict[str, Any]) -> Dict[str, Any]:
 async def _approve_write(key: str, *, scope: str, secret: bool, hot_reload: str) -> str:
     """Return a denial reason, or ``""`` when the write may proceed.
 
+    Goes through the orchestrator's native ``evaluate(ActionDescriptor)`` rather
+    than the shell-oriented ``check()``, so a config change is classified as
+    ``runtime.configure`` and picks up risk assessment, policy, existing grants,
+    and the audit trail for free.
+
     Fails closed when no gate is installed: an unguarded path here would let the
-    model turn off its own guardrails. The value is never passed to the gate, so a
-    credential cannot reach an approval prompt or the audit trail.
+    model turn off its own guardrails. The value is never included, so a
+    credential cannot reach an approval prompt or the audit log.
     """
     gate = _approval_gate
     if gate is None:
@@ -190,25 +195,35 @@ async def _approve_write(key: str, *, scope: str, secret: bool, hot_reload: str)
             "Config changes require an approval gate, which is not available in this "
             "session. Ask the user to run `leap config set` / `/config set` instead."
         )
-    summary = f"Change LeapFlow setting {key} (scope={scope})"
-    metadata = {
-        "tool": "config_set",
-        "config_key": key,
-        "scope": scope,
-        "secret": secret,
-        "hot_reload": hot_reload,
-    }
     try:
-        approved = await gate.check(key, summary, "config_set", metadata)
-    except TypeError:
-        # Older gate signature (path, content, mode).
-        approved = await gate.check(key, summary, "config_set")
+        from leapflow.security.actions import ActionDescriptor, ActionEffect, ActionKind
+
+        action = ActionDescriptor(
+            kind=ActionKind.RUNTIME_CONFIGURE.value,
+            summary=f"Change LeapFlow setting {key} (scope={scope})",
+            detail=f"config_set {key} scope={scope}",
+            effect=ActionEffect.CONFIGURE.value,
+            resource=key,
+            metadata={
+                "tool": "config_set",
+                "config_key": key,
+                "scope": scope,
+                "secret": secret,
+                "hot_reload": hot_reload,
+            },
+        )
+        result = await gate.evaluate(action)
     except Exception:  # noqa: BLE001 - a broken gate must not become an open door
-        logger.warning("config_set: approval gate failed; denying", exc_info=True)
+        logger.warning("config_set: approval evaluation failed; denying", exc_info=True)
         return "Config change denied: the approval gate could not be consulted."
-    if approved:
+
+    if getattr(result, "approved", False):
         return ""
-    return str(getattr(gate, "denial_message", "") or f"Config change denied by approval gate: {key}")
+    return str(
+        getattr(result, "denial_message", "")
+        or getattr(result, "reason", "")
+        or f"Config change denied by approval gate: {key}"
+    )
 
 
 async def config_set_handler(args: Dict[str, Any]) -> Dict[str, Any]:

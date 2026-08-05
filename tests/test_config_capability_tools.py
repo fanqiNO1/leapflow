@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -47,24 +48,38 @@ def cfg_home(monkeypatch, tmp_path):
     config_tools.set_config_approval_gate(None)
 
 
+class _Result:
+    """Mirrors the fields of security.orchestrator.ApprovalResult that we read."""
+
+    def __init__(self, approved: bool, denial_message: str = "") -> None:
+        self.approved = approved
+        self.denial_message = denial_message
+        self.reason = denial_message
+
+
 class _AllowGate:
-    """Approves every config write and records what it was asked about."""
+    """Approves every config write and records the action it was asked about.
+
+    Implements ``evaluate(ActionDescriptor)`` — the orchestrator's real interface.
+    An earlier version of this fake accepted the shell-style ``check(...)``
+    signature, which let the tests pass while the production call raised
+    TypeError against the actual orchestrator.
+    """
 
     def __init__(self) -> None:
-        self.denial_message = ""
-        self.calls: list[tuple[str, dict]] = []
+        self.actions: list[Any] = []
 
-    async def check(self, key, summary, mode, metadata=None):
-        self.calls.append((str(key), dict(metadata or {})))
-        return True
+    async def evaluate(self, action):
+        self.actions.append(action)
+        return _Result(True)
 
 
 class _DenyGate:
     def __init__(self, message: str = "denied for test") -> None:
-        self.denial_message = message
+        self.message = message
 
-    async def check(self, key, summary, mode, metadata=None):
-        return False
+    async def evaluate(self, action):
+        return _Result(False, self.message)
 
 
 class _ReloadingContext:
@@ -329,20 +344,113 @@ def test_gate_sees_the_key_but_never_the_value(cfg_home) -> None:
         config_tools.config_set_handler({"key": "llm.api_key", "value": "sk-secret-value"})
     )
 
-    assert gate.calls
-    key, metadata = gate.calls[-1]
-    assert key == "llm.api_key"
-    assert metadata["secret"] is True
-    assert "sk-secret-value" not in str(gate.calls)
+    assert gate.actions
+    action = gate.actions[-1]
+    assert action.resource == "llm.api_key"
+    assert action.kind == "runtime.configure"
+    assert action.metadata["secret"] is True
+    assert "sk-secret-value" not in f"{action.summary}{action.detail}{action.metadata}"
+
+
+def test_gate_is_called_through_its_real_interface(cfg_home) -> None:
+    """Regression: the tool must use evaluate(ActionDescriptor), not check().
+
+    ApprovalOrchestrator.check() takes a single command string, so calling it with
+    the file-write signature raised TypeError at runtime while a fake accepting
+    that signature kept the tests green.
+    """
+    from leapflow.security.orchestrator import ApprovalOrchestrator
+
+    assert hasattr(ApprovalOrchestrator, "evaluate")
+    gate = _AllowGate()
+    config_tools.set_config_approval_gate(gate)
+
+    result = asyncio.run(
+        config_tools.config_set_handler({"key": "llm.model", "value": "qwen3.8-max"})
+    )
+
+    assert result["ok"] is True
+    assert gate.actions, "the gate must be consulted via evaluate()"
+
+
+def test_a_gate_with_only_the_shell_signature_is_denied(cfg_home) -> None:
+    """A gate lacking evaluate() must fail closed, not silently allow."""
+
+    class _ShellOnlyGate:
+        async def check(self, command):
+            return True
+
+    config_tools.set_config_approval_gate(_ShellOnlyGate())
+
+    result = asyncio.run(
+        config_tools.config_set_handler({"key": "guardrail.enabled", "value": False})
+    )
+
+    assert result["ok"] is False
+    assert _guardrail_is_on()
+
+
+def test_write_works_against_the_real_orchestrator(cfg_home) -> None:
+    """End-to-end through the production ApprovalOrchestrator, not a fake.
+
+    This is the check the fakes could not make: the tool previously called the
+    shell-oriented ``check(path, content, mode, meta)``, which the orchestrator
+    does not accept, so every config_set failed with a TypeError at runtime while
+    a signature-matching fake kept the suite green. It also confirms a config
+    change is classified ``runtime.configure`` and rated HIGH, so it reaches a
+    human rather than being auto-allowed.
+    """
+    from leapflow.security.approval import ApprovalDecision
+    from leapflow.security.orchestrator import ApprovalOrchestrator
+
+    class _AutoAllow:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        async def request_approval(self, request):
+            self.requests.append(request)
+            return ApprovalDecision.ALLOW_ONCE
+
+    prompt = _AutoAllow()
+    config_tools.set_config_approval_gate(ApprovalOrchestrator(prompt))
+    # Bind a reloading context so the read-back sees the write; without it the
+    # in-process settings keep the old value (covered separately above).
+    config_tools.set_config_context(_ReloadingContext())
+
+    result = asyncio.run(
+        config_tools.config_set_handler({"key": "llm.model", "value": "qwen3.8-max"})
+    )
+
+    assert result["ok"] is True, result.get("error")
+    assert asyncio.run(config_tools.config_get_handler({"key": "llm.model"}))["value"] == "qwen3.8-max"
+    assert len(prompt.requests) == 1, "a config change must reach the human prompt"
+    assert str(prompt.requests[0].risk.level).endswith("HIGH")
+
+
+def test_real_orchestrator_denial_blocks_the_write(cfg_home) -> None:
+    """A declined prompt must leave the setting untouched."""
+    from leapflow.security.approval import ApprovalDecision
+    from leapflow.security.orchestrator import ApprovalOrchestrator
+
+    class _AutoDeny:
+        async def request_approval(self, request):
+            return ApprovalDecision.DENY
+
+    config_tools.set_config_approval_gate(ApprovalOrchestrator(_AutoDeny()))
+
+    result = asyncio.run(
+        config_tools.config_set_handler({"key": "guardrail.enabled", "value": False})
+    )
+
+    assert result["ok"] is False
+    assert _guardrail_is_on()
 
 
 def test_a_broken_gate_denies_rather_than_opens(cfg_home) -> None:
     """A gate that raises must not degrade into an open door."""
 
     class _BrokenGate:
-        denial_message = ""
-
-        async def check(self, *args, **kwargs):
+        async def evaluate(self, action):
             raise RuntimeError("gate exploded")
 
     config_tools.set_config_approval_gate(_BrokenGate())
