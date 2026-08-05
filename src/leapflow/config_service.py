@@ -169,6 +169,15 @@ _FIELD_DESCRIPTIONS = {
     "agent.reentry_send_rate_per_hour": "Max autonomous outbound sends per originating chat per hour (0 = unlimited); backstops send storms.",
     "agent.reentry_send_global_budget": "Lifetime cap on total autonomous outbound sends per daemon (0 = unlimited).",
     "agent.reentry_send_verified_at": "Number of human approvals in a send scope before it reaches VERIFIED trust and may be auto-approved (non-destructive replies only).",
+    "web.transport": "HTTP transport for web_fetch. auto tries httpx then the system curl; a client refused with 403/429 by one transport is retried on the next. Pin to httpx or curl to make behavior reproducible.",
+    "web.timeout_s": "Per-request timeout in seconds for web_fetch.",
+    "web.max_bytes": "Response body cap in bytes for web_fetch; larger bodies are truncated and flagged.",
+    "web.max_retries": "Retries for rate limits, 5xx, and timeouts. Safe by construction because web_fetch is a read.",
+    "web.max_redirects": "Maximum redirects web_fetch will follow before failing.",
+    "web.user_agent": "User agent sent by web_fetch. Empty uses a browser-style default, because many CDNs answer 429/403 to library agents; set your own string to identify honestly.",
+    "web.extractor": "HTML reader for web_fetch. auto prefers trafilatura when the `web` extra is installed (`pip install 'leapflow[web]'`) and falls back to the built-in stdlib reader; stdlib pins the dependency-free reader.",
+    "web.private_targets": "How web_fetch treats URLs resolving to loopback, private, link-local, or cloud-metadata addresses. approval asks the user each session (default), deny refuses without prompting (for unattended deployments), allow permits them silently and is only appropriate on a trusted network.",
+    "web.cache_ttl_s": "Seconds a fetched body is reused from the session cache (0 disables caching). Entries are session-scoped and never synced.",
 }
 
 _SECTION_CATEGORIES = {
@@ -209,6 +218,7 @@ _SECTION_CATEGORIES = {
     "prediction": "World Model",
     "curiosity": "World Model",
     "replay": "World Model",
+    "web": "Web Access",
 }
 
 _VALUE_HINTS = {
@@ -216,6 +226,9 @@ _VALUE_HINTS = {
     "daemon.log_level": "DEBUG|INFO|WARNING|ERROR",
     "recording.mode": "video|default|vision_only",
     "signal.channels": "all or comma-separated channel names",
+    "web.transport": "auto|httpx|curl",
+    "web.extractor": "auto|stdlib",
+    "web.private_targets": "approval|deny|allow",
 }
 
 _PARTIAL_RELOAD_SECTIONS = frozenset({"runtime", "mock", "gateway", "hub", "scheduler", "observer", "cua", "use", "dashboard"})

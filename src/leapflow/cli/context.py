@@ -1353,6 +1353,10 @@ class Context:
         # so config_set must not be able to disable its own supervision.
         from leapflow.tools.config_tools import set_config_approval_gate
         set_config_approval_gate(self._approval_orchestrator)
+        # Outbound fetches to internal targets (loopback, private ranges, cloud
+        # instance metadata) need the same review; public reads stay unprompted.
+        from leapflow.tools.web_fetch import set_web_approval_gate
+        set_web_approval_gate(self._approval_orchestrator)
 
         self._register_gateway_normalizers(settings)
 

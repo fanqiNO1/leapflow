@@ -33,6 +33,7 @@ class ApprovalCoordinator:
             from leapflow.tools.gateway_tool import set_gateway_approval_gate
             from leapflow.tools.registry_bootstrap import set_file_read_gate, set_file_write_gate
             from leapflow.tools.shell_tools import set_approval_gate
+            from leapflow.tools.web_fetch import set_web_approval_gate
 
             existing = getattr(ctx, "_approval_orchestrator", None)
             gate = SessionAwareGate(_DaemonApprovalGate(self))
@@ -48,6 +49,8 @@ class ApprovalCoordinator:
             # Config writes go through the same daemon-side approval path, so a
             # daemon session cannot change settings unattended either.
             set_config_approval_gate(orchestrator)
+            # Same for outbound fetches that resolve to internal addresses.
+            set_web_approval_gate(orchestrator)
 
             class _FileReadGate:
                 def __init__(self) -> None:

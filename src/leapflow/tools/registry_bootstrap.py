@@ -245,7 +245,17 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "shell_run",
-            "description": "Execute a shell command with timeout protection.",
+            "description": (
+                "Execute a one-shot shell command with timeout protection. Runs in the "
+                "active workspace; paths resolving outside it are refused. Reach for a "
+                "structured tool first when one fits — web_fetch for anything over "
+                "HTTP(S), git_query/scm_sync for git, code_search/file_find/file_read for "
+                "the repo, config_get/config_set for LeapFlow's own settings — because "
+                "those report typed results, while a failed shell command can only be "
+                "diagnosed from its exit code and stderr. Every shell run counts as an "
+                "external side effect, so a failure stops the rest of the batch and is "
+                "not retried automatically."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -254,6 +264,21 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                     "timeout": {"type": "number", "description": "Timeout in seconds (default: 30, max: 120)"},
                 },
                 "required": ["command"],
+            },
+            "x_leapflow": {
+                # Declared rather than inferred: without this block the category and
+                # risk came from keyword matching on the name/description, and the
+                # execution policy came from a separate hardcoded name list. The most
+                # dangerous tool in the registry should state its own contract.
+                "category": "shell",
+                "risk_level": "external",
+                "schema_cost": "low",
+                "requires_approval": True,
+                "mutates_state": True,
+                "effect_scope": "external",
+                # An arbitrary command may not be replayable, so identity is scoped to
+                # the session rather than the turn.
+                "idempotency_scope": "session",
             },
         },
     },
@@ -765,6 +790,53 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             },
         },
     },
+    # ── Web access (read-only; never shell out to curl for this) ──
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": (
+                "Read a URL over HTTP(S) and get back extracted, context-sized content: "
+                "parsed JSON for API endpoints, readable text plus links for web pages. "
+                "Use this for anything on the internet — prices, docs, releases, articles "
+                "— instead of running curl through shell_run: it reports real HTTP status "
+                "codes, retries rate limits on its own, and is a plain read so a retry is "
+                "always safe. For JSON APIs pass `select` with a dotted path (e.g. "
+                "'chart.result.0.meta') to return just that part instead of the whole "
+                "payload."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "http(s) URL to read"},
+                    "select": {
+                        "type": "string",
+                        "description": (
+                            "Optional dotted path into a JSON response, list indices "
+                            "allowed, e.g. 'chart.result.0.meta.regularMarketPrice'"
+                        ),
+                    },
+                    "timeout": {"type": "number", "description": "Timeout in seconds (default from config)"},
+                    "max_bytes": {"type": "integer", "description": "Response size cap in bytes"},
+                },
+                "required": ["url"],
+            },
+            "x_leapflow": {
+                "category": "network",
+                # read_only is the point of this tool: a GET is not a side effect, so
+                # it must not inherit shell's batch-stop, session-scoped dedup, or
+                # "may already have taken effect" retry guidance.
+                "risk_level": "read_only",
+                "schema_cost": "low",
+                # Public reads run unprompted; the handler still routes internal and
+                # credential-bearing targets through the approval gate, since this
+                # flag only informs disclosure and does not gate execution.
+                "requires_approval": False,
+                "mutates_state": False,
+                "idempotency_scope": "turn",
+            },
+        },
+    },
 ] + HUB_TOOL_DEFINITIONS + GATEWAY_TOOL_DEFINITIONS
 
 
@@ -1153,6 +1225,17 @@ for _cfg_name, _cfg_handler in (
 ):
     TOOL_HANDLERS[_cfg_name] = _cfg_handler
     TOOL_HANDLERS[f"gp_{_cfg_name}"] = _cfg_handler
+
+
+# ────────────────────────────────────────────────────────────────
+# Web access: a read-only HTTP capability so reaching the internet does not
+# require an improvised `curl | python3 -c` pipeline through the shell gate.
+# ────────────────────────────────────────────────────────────────
+
+from leapflow.tools.web_fetch import web_fetch as _web_fetch_handler  # noqa: E402
+
+TOOL_HANDLERS["web_fetch"] = _web_fetch_handler
+TOOL_HANDLERS["gp_web_fetch"] = _web_fetch_handler
 
 
 # ────────────────────────────────────────────────────

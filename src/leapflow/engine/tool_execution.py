@@ -23,6 +23,25 @@ def effect_is_uncertain_on_failure(policy: str) -> bool:
     """Return whether a failed call under ``policy`` may still have taken effect."""
     return str(policy or "") in UNCERTAIN_EFFECT_POLICIES
 
+
+def exit_code_from(result: Any) -> int | None:
+    """Return a process exit code from a tool result under either key name.
+
+    Shell-shaped tools mirror ``subprocess``' own ``returncode`` attribute, while
+    the model-facing evidence and the TUI read ``exit_code``. Reading only one
+    name silently dropped the code from both surfaces, so the mapping lives here
+    once instead of being re-guessed per consumer.
+    """
+    if not isinstance(result, Mapping):
+        return None
+    for key in ("exit_code", "returncode"):
+        value = result.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+    return None
+
 _EXTERNAL_TOOLS = frozenset({
     "shell_run",
     "scm_sync",

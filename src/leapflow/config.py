@@ -356,6 +356,19 @@ class Settings:
     tools_lint_command: str = ""  # empty => auto-detect (ruff/eslint/go vet/clippy)
     tools_terminal_session_enabled: bool = False  # persistent shell sessions (opt-in, high risk)
     tools_verify_edits: bool = True  # post-edit syntax check (advisory) for edit_file/file_write
+
+    # web_fetch: first-class read-only HTTP access, so reading a public page is
+    # not a side-effecting shell command. Limits are config-driven because the
+    # right timeout/size depends on the network and the target, not on LeapFlow.
+    web_transport: str = "auto"            # auto | httpx | curl
+    web_timeout_s: float = 20.0
+    web_max_bytes: int = 2_000_000         # response body cap before truncation
+    web_max_retries: int = 2               # retries for 429/5xx/timeouts (read-only, so safe)
+    web_max_redirects: int = 5
+    web_user_agent: str = ""               # empty => built-in browser-style default
+    web_extractor: str = "auto"            # auto (trafilatura when installed) | stdlib
+    web_private_targets: str = "approval"  # approval | deny | allow
+    web_cache_ttl_s: float = 900.0
     agent_validate_tool_args: bool = True  # pre-execution required-argument validation + self-repair
     context_hard_limit_ratio: float = 0.92
     context_warning_ratio: float = 0.75
@@ -849,6 +862,15 @@ def _build_settings_from_env(
     tools_lint_command = os.getenv("LEAPFLOW_TOOLS_LINT_COMMAND", "").strip()
     tools_terminal_session_enabled = os.getenv("LEAPFLOW_TOOLS_TERMINAL_SESSION_ENABLED", "0").strip().lower() in ("1", "true", "yes")
     tools_verify_edits = os.getenv("LEAPFLOW_TOOLS_VERIFY_EDITS", "1").strip().lower() in ("1", "true", "yes")
+    web_transport = os.getenv("LEAPFLOW_WEB_TRANSPORT", "auto").strip().lower() or "auto"
+    web_timeout_s = float(os.getenv("LEAPFLOW_WEB_TIMEOUT_S", "20"))
+    web_max_bytes = int(os.getenv("LEAPFLOW_WEB_MAX_BYTES", "2000000"))
+    web_max_retries = int(os.getenv("LEAPFLOW_WEB_MAX_RETRIES", "2"))
+    web_max_redirects = int(os.getenv("LEAPFLOW_WEB_MAX_REDIRECTS", "5"))
+    web_user_agent = os.getenv("LEAPFLOW_WEB_USER_AGENT", "").strip()
+    web_extractor = os.getenv("LEAPFLOW_WEB_EXTRACTOR", "auto").strip().lower() or "auto"
+    web_private_targets = os.getenv("LEAPFLOW_WEB_PRIVATE_TARGETS", "approval").strip().lower() or "approval"
+    web_cache_ttl_s = float(os.getenv("LEAPFLOW_WEB_CACHE_TTL_S", "900"))
     agent_validate_tool_args = os.getenv("LEAPFLOW_AGENT_VALIDATE_TOOL_ARGS", "1").strip().lower() in ("1", "true", "yes")
     context_hard_limit_ratio = float(os.getenv("LEAPFLOW_CONTEXT_HARD_LIMIT_RATIO", "0.92"))
     context_warning_ratio = float(os.getenv("LEAPFLOW_CONTEXT_WARNING_RATIO", "0.75"))
@@ -1175,6 +1197,15 @@ def _build_settings_from_env(
         tools_lint_command=tools_lint_command,
         tools_terminal_session_enabled=tools_terminal_session_enabled,
         tools_verify_edits=tools_verify_edits,
+        web_transport=web_transport,
+        web_timeout_s=web_timeout_s,
+        web_max_bytes=web_max_bytes,
+        web_max_retries=web_max_retries,
+        web_max_redirects=web_max_redirects,
+        web_user_agent=web_user_agent,
+        web_extractor=web_extractor,
+        web_private_targets=web_private_targets,
+        web_cache_ttl_s=web_cache_ttl_s,
         agent_validate_tool_args=agent_validate_tool_args,
         context_hard_limit_ratio=context_hard_limit_ratio,
         context_warning_ratio=context_warning_ratio,

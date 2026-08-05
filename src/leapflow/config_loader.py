@@ -239,7 +239,7 @@ def _validate_known_sections(
         "context", "error", "session", "stale", "default", "circuit",
         "rpc", "use", "cua", "copilot", "notification", "live",
         "gateway", "hub", "privacy", "approval", "cache", "logging",
-        "observer", "scheduler",
+        "observer", "scheduler", "web",
     }
     for key, value in parsed.items():
         if key in known_sections and key != "version" and not isinstance(value, Mapping):

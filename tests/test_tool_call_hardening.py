@@ -235,3 +235,83 @@ def test_workspace_context_resolves_relative_paths_and_blocks_cross_workspace(tm
         assert blocked_shell["workspace_root"] == str(workspace.resolve())
     finally:
         reset_tool_context(token)
+
+
+def test_shell_gate_blocks_expanded_and_relative_escapes(tmp_path, monkeypatch) -> None:
+    """The gate must judge the resolved target, not how the operand is spelled.
+
+    A guard that only inspects literal ``/``/``~`` operands passes ``$HOME/...``
+    and ``../../..`` straight through, so the same file is reachable by choosing
+    a different spelling and the workspace boundary stops being a boundary.
+    """
+    from leapflow.tools.execution_context import (
+        ToolExecutionContext,
+        reset_tool_context,
+        set_tool_context,
+    )
+    from leapflow.tools.shell_tools import shell_run
+
+    workspace = tmp_path / "work"
+    other = tmp_path / "other"
+    workspace.mkdir()
+    (workspace / "sub").mkdir()
+    other.mkdir()
+    (workspace / "alpha.txt").write_text("inside", encoding="utf-8")
+    (other / "secret.txt").write_text("outside", encoding="utf-8")
+    monkeypatch.setenv("LEAP_TEST_OUTSIDE", str(other))
+
+    token = set_tool_context(
+        ToolExecutionContext.from_strings(workspace_root=str(workspace), session_id="sess-gate")
+    )
+    try:
+        for command in (
+            "cat $LEAP_TEST_OUTSIDE/secret.txt",
+            "cat ${LEAP_TEST_OUTSIDE}/secret.txt",
+            "cat ../other/secret.txt",
+            "cat --file=$LEAP_TEST_OUTSIDE/secret.txt",
+            "cd $LEAP_TEST_OUTSIDE && cat secret.txt",
+        ):
+            result = asyncio.run(shell_run({"command": command}))
+            assert result["ok"] is False, command
+            assert result["error_type"] == "outside_workspace", command
+            assert result["resolved_path"].startswith(str(other.resolve())), command
+
+        # Traversal that stays inside must still run: the gate judges the resolved
+        # target, so `sub/../alpha.txt` is an ordinary in-workspace read.
+        inside = asyncio.run(shell_run({"command": "cat sub/../alpha.txt"}))
+        assert inside["ok"] is True
+        assert inside["stdout"].strip() == "inside"
+    finally:
+        reset_tool_context(token)
+
+
+def test_shell_gate_redirects_leapflow_config_targets(tmp_path) -> None:
+    """Refusing a config path must name the capability that serves the goal.
+
+    Without the redirect the model only learns "not here" and moves the same
+    probe to another spelling, which is the loop the config tools exist to end.
+    """
+    from leapflow.tools.execution_context import (
+        ToolExecutionContext,
+        reset_tool_context,
+        set_tool_context,
+    )
+    from leapflow.tools.shell_tools import _command_workspace_escape
+    from leapflow.config import get_settings
+
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    config_path = get_settings().layout.global_config_dir / "user.yaml"
+
+    token = set_tool_context(
+        ToolExecutionContext.from_strings(workspace_root=str(workspace), session_id="sess-hint")
+    )
+    try:
+        error = _command_workspace_escape(f"cat {config_path}", cwd=workspace)
+    finally:
+        reset_tool_context(token)
+
+    assert error is not None
+    assert error["error_type"] == "outside_workspace"
+    assert "config_get" in error["error"]
+    assert "cannot be lifted by approval" in error["error"]

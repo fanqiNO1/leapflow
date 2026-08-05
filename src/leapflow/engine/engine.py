@@ -66,6 +66,7 @@ from leapflow.engine.tool_execution import (
     ToolExecutionLedger,
     effect_is_uncertain_on_failure,
     execution_policy_for,
+    exit_code_from,
 )
 from leapflow.engine.graph_planner import GraphPlanner
 from leapflow.engine.scheduler import TaskScheduler
@@ -143,14 +144,23 @@ def _normalize_tool_call(tool_call: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _single_line_preview(value: Any, *, limit: int) -> str:
-    """Return a compact single-line preview for UI metadata."""
+def _single_line_preview(value: Any, *, limit: int, keep_tail: bool = False) -> str:
+    """Return a compact single-line preview for UI metadata.
+
+    ``keep_tail`` preserves both ends. Diagnostic text states its cause last — a
+    traceback's final line, a compiler's error summary — so a head-only cut shows
+    the least informative part of exactly the output a user needs to read.
+    """
     if value is None:
         return ""
     text = value if isinstance(value, str) else json.dumps(value, default=str, ensure_ascii=False)
     compact = " ".join(text.split())
     if len(compact) <= limit:
         return compact
+    if keep_tail:
+        head = max(1, (limit - 1) * 2 // 5)
+        tail = max(1, limit - 1 - head)
+        return compact[:head] + "…" + compact[-tail:]
     return compact[: limit - 1] + "…"
 
 
@@ -159,8 +169,15 @@ def _tool_args_metadata(
     arguments: Dict[str, Any] | None,
     *,
     original_tool_name: str | None = None,
+    tool_call_id: str = "",
 ) -> Dict[str, Any]:
-    """Build safe, compact tool-start metadata for streaming UIs."""
+    """Build safe, compact tool-start metadata for streaming UIs.
+
+    ``tool_call_id`` is included so a UI can correlate a start with its own
+    completion: a parallel batch emits several starts before any finishes, and
+    without the id a renderer can only track "the last tool", which mislabels
+    every line in the batch.
+    """
     args = dict(arguments or {})
     original_name = original_tool_name or tool_name
     metadata: Dict[str, Any] = {
@@ -169,6 +186,8 @@ def _tool_args_metadata(
         "normalized_tool_name": tool_name,
         "args_summary": _single_line_preview(args, limit=_TOOL_ARGS_PREVIEW_LIMIT),
     }
+    if tool_call_id:
+        metadata["tool_call_id"] = tool_call_id
     resolution = _resolve_tool_name(original_name, args)
     metadata.update(resolution.to_metadata())
     metadata["tool_name"] = tool_name
@@ -188,9 +207,15 @@ def _tool_result_metadata(
     result: Any,
     *,
     original_tool_name: str | None = None,
+    tool_call_id: str = "",
 ) -> Dict[str, Any]:
     """Build safe, compact tool-completion metadata for streaming UIs."""
-    metadata = _tool_args_metadata(tool_name, arguments, original_tool_name=original_tool_name)
+    metadata = _tool_args_metadata(
+        tool_name,
+        arguments,
+        original_tool_name=original_tool_name,
+        tool_call_id=tool_call_id,
+    )
     if tool_name in {"platform_action", "gp_platform_action"} and arguments:
         for key in ("platform", "action"):
             value = arguments.get(key)
@@ -199,7 +224,10 @@ def _tool_result_metadata(
     metadata["ok"] = True
     if isinstance(result, dict):
         metadata["ok"] = bool(result.get("ok", True))
-        for key in ("exit_code", "path", "lines", "truncated", "bytes_written"):
+        exit_code = exit_code_from(result)
+        if exit_code is not None:
+            metadata["exit_code"] = exit_code
+        for key in ("path", "lines", "truncated", "bytes_written"):
             if key in result:
                 metadata[key] = result[key]
         for key in (
@@ -232,6 +260,9 @@ def _tool_result_metadata(
                 metadata[f"{key}_preview"] = _single_line_preview(
                     value,
                     limit=_TOOL_RESULT_PREVIEW_LIMIT,
+                    # On failure these fields carry the diagnosis, and the cause is
+                    # at the end of them.
+                    keep_tail=metadata["ok"] is False and key in {"stderr", "error", "stdout"},
                 )
         # App Connector recovery metadata for TUI transparency
         recovery_hint = result.get("recovery_hint")
@@ -3549,6 +3580,7 @@ class AgentEngine:
                                 normalized_name,
                                 tc.arguments,
                                 original_tool_name=original_name,
+                                tool_call_id=str(tc.id),
                             ),
                         )
                     results = await self._execute_tools_concurrent(
@@ -3578,6 +3610,7 @@ class AgentEngine:
                                     tc.arguments,
                                     item.get("result"),
                                     original_tool_name=original_name,
+                                    tool_call_id=str(tc.id),
                                 ),
                                 **self._tool_context_metadata(normalized_name, tc.arguments, item.get("result")),
                             },
