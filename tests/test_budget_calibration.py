@@ -139,6 +139,13 @@ def test_snapshot_ratio_reflects_calibration() -> None:
 
 
 # ── Wiring: the engine must calibrate before overwriting the estimate ────
+#
+# These build the engine with object.__new__ and assign the attributes the method
+# reads. That is deliberate for the ordering contracts below, but it cannot catch
+# a wrong attribute *name* — an earlier version of these tests asserted against
+# `_context_window_controller`, a name the engine never defines, so the feature
+# raised AttributeError on every real turn while the suite stayed green. The real
+# instance test at the end of this file is what closes that hole; keep it.
 
 
 def test_engine_calibrates_from_provider_usage() -> None:
@@ -152,7 +159,7 @@ def test_engine_calibrates_from_provider_usage() -> None:
 
     estimator = ContextBudgetEstimator()
     engine = object.__new__(AgentEngine)
-    engine._context_window_controller = SimpleNamespace(estimator=estimator)
+    engine._context_controller = SimpleNamespace(estimator=estimator)
     engine._model_capabilities = None
     engine._last_context_snapshot = {"total_tokens": 10_000, "context_length": 1_000_000}
     engine._last_context_tokens = 0
@@ -170,7 +177,7 @@ def test_engine_does_not_calibrate_against_a_provider_snapshot() -> None:
 
     estimator = ContextBudgetEstimator()
     engine = object.__new__(AgentEngine)
-    engine._context_window_controller = SimpleNamespace(estimator=estimator)
+    engine._context_controller = SimpleNamespace(estimator=estimator)
     engine._model_capabilities = None
     engine._last_context_snapshot = {
         "total_tokens": 6_500,
@@ -193,7 +200,7 @@ def test_calibration_failure_never_breaks_the_turn() -> None:
             raise RuntimeError("boom")
 
     engine = object.__new__(AgentEngine)
-    engine._context_window_controller = SimpleNamespace(estimator=_Exploding())
+    engine._context_controller = SimpleNamespace(estimator=_Exploding())
     engine._model_capabilities = None
     engine._last_context_snapshot = {"total_tokens": 10_000, "context_length": 1_000_000}
     engine._last_context_tokens = 0
@@ -201,3 +208,80 @@ def test_calibration_failure_never_breaks_the_turn() -> None:
     AgentEngine._record_provider_usage(engine, "m", {"prompt_tokens": 6_500})
 
     assert engine._last_context_tokens == 6_500, "usage recording must still complete"
+
+
+# ── The hole the mocks left: a real engine, the production code path ─────
+
+
+def _real_engine(tmp_path):
+    """Build an actual AgentEngine, so attribute wiring is exercised for real."""
+    from conftest import StubLLM, make_settings
+    from leapflow.engine.engine import AgentEngine, build_default_registry
+    from leapflow.engine.intent_classifier import Intent
+    from leapflow.memory import (
+        EpisodicMemoryProvider,
+        SemanticMemoryProvider,
+        WorkingMemoryProvider,
+    )
+    from leapflow.platform.mock import MockBridge
+
+    class _Classifier:
+        async def classify(self, user_text: str) -> Intent:
+            return Intent(label="complex", reason="test")
+
+    settings = make_settings(str(tmp_path))
+    rpc = MockBridge()
+    llm = StubLLM(["ok"])
+    wm = WorkingMemoryProvider(max_tokens=1024)
+    lt = SemanticMemoryProvider(source=settings.duckdb_path)
+    imm = EpisodicMemoryProvider()
+    registry = build_default_registry(rpc, llm, wm, lt)
+    engine = AgentEngine(settings, rpc, llm, wm, lt, imm, registry, _Classifier())
+    return engine, lt
+
+
+def test_real_engine_calibrates_on_the_production_path(tmp_path) -> None:
+    """The regression test for the outage: a real engine, a realistic snapshot.
+
+    Every existing calibration test either mocked the controller attribute or
+    left the snapshot empty, and an empty snapshot returns early before the
+    controller is ever read. A turn with a real context estimate is the only
+    shape that reaches the wiring, and it raised AttributeError on every round.
+    """
+    engine, store = _real_engine(tmp_path)
+    try:
+        engine._last_context_snapshot = {"total_tokens": 10_000, "context_length": 1_000_000}
+
+        engine._record_provider_usage("qwen3.8-max", {"prompt_tokens": 6_500})
+
+        assert engine._context_controller.estimator.calibration_samples == 1
+        # The overwrite must also have happened; it used to be unreachable.
+        assert engine._last_context_tokens == 6_500
+        assert engine._last_context_snapshot["provider_prompt_tokens"] == 6_500
+    finally:
+        store.close()
+
+
+def test_telemetry_helper_absorbs_its_own_defects(tmp_path) -> None:
+    """A bookkeeping defect must not propagate into the provider-error path.
+
+    The outage was a local AttributeError escaping into the LLM call's except
+    block, where it was classified as a provider condition and driven through
+    recovery. The helper now contains anything it raises.
+    """
+    engine, store = _real_engine(tmp_path)
+    try:
+        def _boom(*args, **kwargs):
+            raise AttributeError("'AgentEngine' object has no attribute '_whatever'")
+
+        engine._record_provider_usage = _boom
+        recorded = []
+
+        engine._record_llm_call_telemetry(
+            SimpleNamespace(usage={"prompt_tokens": 6_500}, model="m"),
+            recovery=SimpleNamespace(record_api_success=lambda: recorded.append(True)),
+        )
+
+        assert recorded == [True], "the success signal must survive a telemetry defect"
+    finally:
+        store.close()

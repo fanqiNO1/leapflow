@@ -1222,7 +1222,7 @@ class AgentEngine:
         self._unified_classifier = UnifiedErrorClassifier(self._error_classifier)
         self._recovery_coordinator = RecoveryCoordinator()  # Re-created per turn
         self._checkpoint_store = InMemoryCheckpointStore()
-        self._audit_sink = JsonlAuditSink()  # In-memory; path-based if layout available
+        self._audit_sink = JsonlAuditSink(self._recovery_audit_path())
 
         # Apply startup-time tool configuration derived from settings.
         self._configure_tool_defaults()
@@ -2531,6 +2531,47 @@ class AgentEngine:
         snap["prefix_commitment"] = state.as_dict()
         snap["prefix_committed"] = state.committed
 
+    def _recovery_audit_path(self) -> Any:
+        """Return the profile-owned path for the recovery audit trail, if declared.
+
+        Recovery decisions are the only record of why a turn stopped, and an
+        in-memory sink loses them with the turn — which is how an incident became
+        undiagnosable after the fact. Falls back to ``None`` (memory only) when no
+        profile layout is available, so an embedded engine still works.
+        """
+        layout = getattr(self._settings, "profile_layout", None)
+        path = getattr(layout, "audit_log_path", None)
+        return path
+
+    def _record_llm_call_telemetry(self, resp: Any, *, recovery: Any = None) -> None:
+        """Record usage and budget calibration for a provider call that succeeded.
+
+        Deliberately self-contained: this is bookkeeping, and a defect in it must
+        never be mistaken for a provider failure. It used to run inside the
+        provider call's ``try`` block, where one mistyped attribute name became an
+        ``AttributeError`` that the LLM classifier read as a context overflow (the
+        name contained "context"), sending every round through compression,
+        failover, and credential rotation before halting the turn with an
+        unrelated message. Telemetry now fails loudly in the log and silently to
+        the turn.
+
+        The success signal is recorded first so a bookkeeping defect cannot also
+        cost the loop its error-counter reset.
+        """
+        try:
+            if recovery is not None:
+                recovery.record_api_success()
+            usage = getattr(resp, "usage", None) or {}
+            self._usage_tracker.record_api_call(
+                usage,
+                provider=getattr(self._llm, "active_provider_name", ""),
+                model=getattr(resp, "model", "") or "",
+            )
+            if int(usage.get("prompt_tokens", 0) or 0) > 0:
+                self._record_provider_usage(getattr(resp, "model", "") or "", usage)
+        except Exception:  # noqa: BLE001 - telemetry must never fail a turn
+            logger.warning("llm call telemetry recording failed", exc_info=True)
+
     def _record_provider_usage(self, model: str, usage: Dict[str, Any]) -> None:
         """Prefer provider prompt usage when available and learn observed limits."""
         provider_prompt = int(usage.get("prompt_tokens", 0) or 0)
@@ -2559,7 +2600,7 @@ class AgentEngine:
         estimated = int(snapshot.get("total_tokens", 0) or 0)
         if estimated <= 0:
             return
-        estimator = getattr(self._context_window_controller, "estimator", None)
+        estimator = getattr(self._context_controller, "estimator", None)
         observe = getattr(estimator, "observe_actual", None)
         if observe is None:
             return
@@ -3006,16 +3047,6 @@ class AgentEngine:
                     compressed, stream=False, enable_thinking=planned_enable_thinking,
                     **tools_kwarg,
                 )
-                recovery.record_api_success()
-                usage = resp.usage or {}
-                self._usage_tracker.record_api_call(
-                    usage,
-                    provider=getattr(self._llm, 'active_provider_name', ''),
-                    model=resp.model or '',
-                )
-                provider_prompt = usage.get("prompt_tokens", 0)
-                if provider_prompt > 0:
-                    self._record_provider_usage(resp.model or '', usage)
             except Exception as exc:
                 _clear_indicator()
                 classified = self._error_classifier.classify(exc)
@@ -3026,6 +3057,12 @@ class AgentEngine:
                 envelope = self._unified_classifier.classify_llm_error(
                     exc, provider=getattr(self._llm, 'provider', ''),
                     model=getattr(self._llm, 'model', ''),
+                )
+                # Always with the traceback: this used to be the only record of a
+                # failed round, and it was not written anywhere.
+                logger.error(
+                    "unified_loop: llm call failed (%s/%s)",
+                    envelope.category, envelope.failure_code, exc_info=True,
                 )
                 coordinator = self._recovery_coordinator
                 try:
@@ -3096,6 +3133,7 @@ class AgentEngine:
                     fatal_error = _terminal_failure_text(decision)
                     break
             _clear_indicator()
+            self._record_llm_call_telemetry(resp, recovery=recovery)
 
             content = (resp.content or "").strip()
             if self._sanitizer:
@@ -3524,16 +3562,6 @@ class AgentEngine:
                         compressed, stream=False, enable_thinking=planned_enable_thinking,
                         **tools_kwarg,
                     )
-                    turn_recovery.record_api_success()
-                    usage = resp.usage or {}
-                    self._usage_tracker.record_api_call(
-                        usage,
-                        provider=getattr(self._llm, 'active_provider_name', ''),
-                        model=resp.model or '',
-                    )
-                    provider_prompt = usage.get("prompt_tokens", 0)
-                    if provider_prompt > 0:
-                        self._record_provider_usage(resp.model or '', usage)
                 except Exception as exc:
                     _clear_indicator()
                     turn_recovery.record_api_error()
@@ -3542,6 +3570,12 @@ class AgentEngine:
                     envelope = self._unified_classifier.classify_llm_error(
                         exc, provider=getattr(self._llm, 'provider', ''),
                         model=getattr(self._llm, 'model', ''),
+                    )
+                    # The native-tools round previously logged nothing here, so a
+                    # repeating failure left no trace at all in the daemon log.
+                    logger.error(
+                        "unified_loop_stream: llm call failed (%s/%s)",
+                        envelope.category, envelope.failure_code, exc_info=True,
                     )
                     coordinator = self._recovery_coordinator
                     try:
@@ -3592,6 +3626,7 @@ class AgentEngine:
                         )
                         break
                 _clear_indicator()
+                self._record_llm_call_telemetry(resp, recovery=turn_recovery)
 
                 content = (resp.content or "").strip()
                 if self._sanitizer:
@@ -3801,16 +3836,6 @@ class AgentEngine:
                         resp = await self._llm.achat(
                             compressed, stream=False, enable_thinking=planned_enable_thinking,
                         )
-                        turn_recovery.record_api_success()
-                        usage = resp.usage or {}
-                        self._usage_tracker.record_api_call(
-                            usage,
-                            provider=getattr(self._llm, 'active_provider_name', ''),
-                            model=resp.model or '',
-                        )
-                        provider_prompt = usage.get("prompt_tokens", 0)
-                        if provider_prompt > 0:
-                            self._last_context_tokens = provider_prompt
                     except Exception as exc:
                         _clear_indicator()
                         turn_recovery.record_api_error()
@@ -3860,6 +3885,7 @@ class AgentEngine:
                             )
                             break
                     _clear_indicator()
+                    self._record_llm_call_telemetry(resp, recovery=turn_recovery)
                     content = (resp.content or "").strip()
                     if self._sanitizer:
                         content = self._sanitizer.sanitize(content)

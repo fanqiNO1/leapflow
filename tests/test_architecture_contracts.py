@@ -250,3 +250,35 @@ def test_module_imports_standalone(module_name: str) -> None:
     needs aiohttp/duckdb/an LLM at import time breaks unrelated entry points.
     """
     assert importlib.import_module(module_name) is not None
+
+
+def test_engine_self_attributes_all_exist() -> None:
+    """Every ``self._x`` the engine reads must actually be defined somewhere.
+
+    A mistyped attribute name is invisible until the line runs, and the agent
+    loop wraps most of its work in broad ``except Exception`` handlers, so such a
+    typo surfaces as a misclassified recovery failure rather than a crash. One
+    of them (``_context_window_controller``, never assigned anywhere) made every
+    turn halt while the suite stayed green.
+
+    Names assigned anywhere in the module count as defined, including on frames
+    and per-session clones; this catches the typo case, not lifecycle ordering.
+    """
+    import re
+    from pathlib import Path
+
+    import leapflow.engine.engine as engine_module
+
+    source = Path(engine_module.__file__).read_text(encoding="utf-8")
+    read = set(re.findall(r"self\.(_[a-z][a-z0-9_]*)", source))
+    assigned = set(re.findall(r"self\.(_[a-z][a-z0-9_]*)\s*(?::[^=\n]+)?=", source))
+    # Attributes may also be set from outside (session_factory clones engines).
+    for module in ("leapflow.engine.session_factory", "leapflow.engine.agent_loop"):
+        mod = importlib.import_module(module)
+        assigned |= set(
+            re.findall(r"engine\.(_[a-z][a-z0-9_]*)\s*=", Path(mod.__file__).read_text(encoding="utf-8"))
+        )
+    on_class = {name for name in read if hasattr(engine_module.AgentEngine, name)}
+
+    undefined = sorted(read - assigned - on_class)
+    assert not undefined, f"engine reads attributes that are never assigned: {undefined}"

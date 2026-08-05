@@ -398,7 +398,13 @@ class RecoveryCoordinator:
                 self._state.compress_phase_index = phase_index
 
     def _make_terminal(self, envelope: FailureEnvelope, *, reason: str) -> RecoveryDecision:
-        """Create a HALT_CLEAN terminal decision."""
+        """Create a HALT_CLEAN terminal decision carrying what the user should do.
+
+        A terminal decision is the last thing a stopped turn can say, so it always
+        carries an ``InteractionRequest``: the raw ``reason`` is written for the
+        audit log and reads as internal jargon ("No applicable recovery strategy
+        found") when shown alone. The request names the failure and the next step.
+        """
         return RecoveryDecision.create(
             envelope=envelope,
             action=RecoveryAction.HALT_CLEAN,
@@ -406,6 +412,37 @@ class RecoveryCoordinator:
             strategy_key="<terminal>",
             retry_semantics=RetrySemantics(consumes_retry_budget=False),
             budget_cost=0,
+            interaction=self._terminal_interaction(envelope, reason),
+        )
+
+    def _terminal_interaction(self, envelope: FailureEnvelope, reason: str) -> InteractionRequest:
+        """Build the user-facing request that accompanies a terminal halt."""
+        hint = getattr(getattr(envelope, "provider_hint", None), "hint_text", "") or ""
+        failure = envelope.failure_code or envelope.category or "unknown failure"
+        attempted = ", ".join(self._guard.used_strategies())
+        description = envelope.message or reason
+        if hint:
+            description = f"{description} {hint}"
+        if attempted:
+            description = f"{description} Recovery already tried: {attempted}."
+        actions = [
+            SuggestedAction(label="Rephrase or narrow the request and try again", is_default=True),
+            SuggestedAction(label="Check the daemon log for the full error", command="leap daemon logs"),
+        ]
+        return InteractionRequest.create(
+            interaction_type=InteractionType.RETRY_CHOICE,
+            severity=Severity.ERROR,
+            title=f"This turn stopped: {failure}",
+            description=description,
+            suggested_actions=tuple(actions),
+            context={
+                "category": envelope.category,
+                "failure_code": envelope.failure_code,
+                "source": getattr(envelope.source, "value", str(envelope.source)),
+                "reason": reason,
+            },
+            resumption_key=envelope.envelope_id,
+            timeout_behavior=TimeoutBehavior.PERSIST,
         )
 
     def _consume_type_budget(self, decision: RecoveryDecision) -> None:
