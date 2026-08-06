@@ -159,14 +159,14 @@ def write_pid_file(runtime_dir: Path, pid: Optional[int] = None) -> None:
     """Write the daemon PID file and metadata."""
     runtime_dir.mkdir(parents=True, exist_ok=True)
     actual_pid = pid or os.getpid()
-    (runtime_dir / "leapd.pid").write_text(str(actual_pid))
+    (runtime_dir / "leapd.pid").write_text(str(actual_pid), encoding="utf-8")
 
     meta = {
         "pid": actual_pid,
         "start_time": time.time(),
         "version": "1",
     }
-    (runtime_dir / "leapd.json").write_text(json.dumps(meta))
+    (runtime_dir / "leapd.json").write_text(json.dumps(meta), encoding="utf-8")
     logger.info("daemon: wrote pid=%d to %s", actual_pid, runtime_dir / "leapd.pid")
 
 
@@ -202,6 +202,8 @@ def send_signal(runtime_dir: Path, sig: DaemonSignal = DaemonSignal.SIGTERM) -> 
         return False
     try:
         os.kill(pid, sig.value)
+        if sys.platform == "win32":
+            _wait_process_exit(pid, timeout_ms=5000)
         return True
     except OSError:
         return False
@@ -291,6 +293,8 @@ def spawn_daemon(settings: object, *, mock_host: bool = False) -> subprocess.Pop
     if mock_host:
         command.append("--mock-host")
     command.extend(["daemon", "serve", "--internal"])
+    env = os.environ.copy()
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     log_file = open(log_path, "ab")
     try:
         if sys.platform == "win32":  # pragma: no cover - platform specific
@@ -304,6 +308,7 @@ def spawn_daemon(settings: object, *, mock_host: bool = False) -> subprocess.Pop
                 stderr=subprocess.STDOUT,
                 start_new_session=False,
                 creationflags=creationflags,
+                env=env,
             )
         else:
             proc = subprocess.Popen(
@@ -313,6 +318,7 @@ def spawn_daemon(settings: object, *, mock_host: bool = False) -> subprocess.Pop
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
                 close_fds=True,
+                env=env,
             )
     finally:
         log_file.close()
@@ -345,7 +351,7 @@ def _wait_until_stopped(runtime_dir: Path, *, deadline: float, interval_s: float
 def _read_pid(path: Path) -> Optional[int]:
     """Read PID from file, returning None if missing/invalid."""
     try:
-        return int(path.read_text().strip())
+        return int(path.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return None
 
@@ -353,9 +359,29 @@ def _read_pid(path: Path) -> Optional[int]:
 def _read_meta(path: Path) -> Optional[dict]:
     """Read daemon metadata JSON."""
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
         return None
+
+
+def _wait_process_exit(pid: int, timeout_ms: int = 5000) -> None:
+    """Block until the process fully exits (Windows only). Best-effort."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        SYNCHRONIZE = 0x00100000
+        handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+        if not handle:
+            return
+        try:
+            kernel32.WaitForSingleObject(handle, timeout_ms)
+        finally:
+            kernel32.CloseHandle(handle)
+    except (OSError, AttributeError):
+        pass
 
 
 # Windows kernel32 constants for the exit-code liveness probe below.

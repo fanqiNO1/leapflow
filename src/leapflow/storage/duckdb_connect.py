@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -25,8 +26,8 @@ logger = logging.getLogger(__name__)
 
 LOCK_KEYWORDS = frozenset({"lock", "locked", "exclusive", "cannot set lock"})
 
-_CONNECT_RETRIES = int(os.getenv("LEAPFLOW_DB_CONNECT_RETRIES", "3"))
-_CONNECT_BACKOFF_S = float(os.getenv("LEAPFLOW_DB_CONNECT_BACKOFF_S", "0.5"))
+_CONNECT_RETRIES = int(os.getenv("LEAPFLOW_DB_CONNECT_RETRIES", "5" if sys.platform == "win32" else "3"))
+_CONNECT_BACKOFF_S = float(os.getenv("LEAPFLOW_DB_CONNECT_BACKOFF_S", "1.0" if sys.platform == "win32" else "0.5"))
 
 
 class DatabaseLockedError(RuntimeError):

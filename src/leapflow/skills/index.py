@@ -208,7 +208,7 @@ class SkillIndex:
         if not self._snapshot_path.exists():
             return None
         try:
-            data = json.loads(self._snapshot_path.read_text())
+            data = json.loads(self._snapshot_path.read_text(encoding="utf-8"))
             # Convert list[str] back to tuple for frozen dataclass
             entries: List[SkillEntry] = []
             for raw in data:
@@ -225,7 +225,7 @@ class SkillIndex:
         try:
             self._skills_dir.mkdir(parents=True, exist_ok=True)
             data = [dataclasses.asdict(e) for e in entries]
-            self._snapshot_path.write_text(json.dumps(data, ensure_ascii=False))
+            self._snapshot_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass  # Non-critical — next scan will rebuild
 

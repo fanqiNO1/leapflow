@@ -82,7 +82,7 @@ class TcpLoopbackTransport(DaemonTransport):
 
     def _read_port(self, runtime_dir: Path) -> int:
         port_path = self._port_path(runtime_dir)
-        return int(port_path.read_text().strip())
+        return int(port_path.read_text(encoding="utf-8").strip())
 
     async def start_server(
         self,
@@ -98,7 +98,7 @@ class TcpLoopbackTransport(DaemonTransport):
         addr = server.sockets[0].getsockname()
         port = addr[1]
         port_path = self._port_path(runtime_dir)
-        port_path.write_text(str(port))
+        port_path.write_text(str(port), encoding="utf-8")
         return server
 
     async def connect(self, runtime_dir: Path) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:

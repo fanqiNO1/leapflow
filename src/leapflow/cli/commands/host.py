@@ -94,7 +94,7 @@ def _read_pid_file() -> Optional[int]:
     if not pid_file.exists():
         return None
     try:
-        pid = int(pid_file.read_text().strip())
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
         # Check if process is alive
         os.kill(pid, 0)
         return pid
@@ -111,7 +111,7 @@ def _write_pid_file(pid: int) -> None:
     """Write PID to daemon pid file."""
     pid_file = _daemon_pid_file()
     pid_file.parent.mkdir(parents=True, exist_ok=True)
-    pid_file.write_text(str(pid))
+    pid_file.write_text(str(pid), encoding="utf-8")
 
 
 def _remove_pid_file() -> None:
@@ -279,7 +279,7 @@ async def _cmd_start() -> int:
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         start_new_session = False
 
-    with open(log_file, "a") as lf:
+    with open(log_file, "a", encoding="utf-8") as lf:
         proc = subprocess.Popen(
             [sys.executable, "-c", daemon_script],
             stdout=lf,

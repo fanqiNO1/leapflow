@@ -5,11 +5,13 @@
 
 ### News
 
-- **2026-07-31**: v0.0.6 released — side-effect-gated recovery (checkpointed halts with structured `InteractionRequest`), uncertain-effect reporting for failed outbound calls, centralized logging with an independent daemon log level, session-bound LeapBoard analysis, platform-neutral gateway validators, and end-to-end architecture contract tests with the CI gate restored.
+- **2026-08-06**: v0.0.8 released — Cross-platform Windows support (DaemonTransport protocol with TCP loopback IPC), real journey test layer with cassette-backed CI (6 e2e journeys, cost-bounded), community Windows fixes (@fanqiNO1). 1,540 tests.
+- **2026-08-06**: v0.0.7 released — 1M-class context windows end-to-end, self-calibrating token estimator, internal-defect failure category, concurrent-TUI session identity isolation. 1,442 tests.
 
 <details>
 <summary>Previous releases</summary>
 
+- **2026-07-31**: v0.0.6 released — side-effect-gated recovery (checkpointed halts with structured `InteractionRequest`), uncertain-effect reporting for failed outbound calls, centralized logging with an independent daemon log level, session-bound LeapBoard analysis, platform-neutral gateway validators, and end-to-end architecture contract tests with the CI gate restored.
 - **2026-07-28**: v0.0.5 released — adaptive-depth execution for long-horizon tasks, built-in coding tools, per-session daemon concurrency, improved TUI stability, and hardened leapd recovery/status diagnostics.
 - **2026-07-16**: **LeapBoard** — general-purpose monitoring web dashboard (Watch→Finding + Server-Driven UI); `/board` entry, live session analysis, and finance/sentiment/research templates.
 - **2026-07-16**: v0.0.4 released — protocol-driven recovery coordinator with budget-constrained strategies, unified error classification, checkpoint-based cross-turn resumption, structured audit trail, and tool execution idempotency ledger.
