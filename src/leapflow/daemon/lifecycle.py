@@ -3,7 +3,7 @@
 Handles the leapd daemon lifecycle:
 
 1. **Discovery** — check if a daemon is running for a given profile
-2. **Lock acquisition** — ``fcntl.flock`` on ``leapd.lock`` for leader election
+2. **Lock acquisition** — ``lock_fd`` on ``leapd.lock`` for leader election
 3. **PID file** — ``leapd.pid`` tracks the daemon process
 4. **Health check** — probe ``leapd.sock`` for liveness
 5. **Stale cleanup** — detect and remove orphaned PID/socket files
@@ -18,7 +18,6 @@ Usage::
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
@@ -28,8 +27,11 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
+
+from leapflow.utils.file_lock import lock_fd, unlock_fd
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +117,7 @@ class DaemonLock:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         try:
             self._fd = os.open(str(self._path), os.O_CREAT | os.O_RDWR)
-            fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_fd(self._fd, blocking=False)
             return True
         except (OSError, IOError):
             if self._fd is not None:
@@ -127,7 +129,7 @@ class DaemonLock:
         """Release the lock."""
         if self._fd is not None:
             try:
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
+                unlock_fd(self._fd)
                 os.close(self._fd)
             except OSError:
                 pass
@@ -138,6 +140,20 @@ class DaemonLock:
 
     def __exit__(self, *_: object) -> None:
         self.release()
+
+
+class DaemonSignal(Enum):
+    """Daemon stop signals, resolved per platform at class-definition time.
+
+    POSIX keeps the two-step semantics (SIGTERM graceful, SIGKILL forced).
+    Windows has no SIGKILL and no deliverable signals — any os.kill()
+    terminates unconditionally — so SIGKILL resolves to SIGTERM there and
+    becomes its alias: referencing DaemonSignal.SIGKILL still works, it
+    just carries the same effect.
+    """
+
+    SIGTERM = signal.SIGTERM
+    SIGKILL = signal.SIGKILL if sys.platform != "win32" else signal.SIGTERM
 
 
 def write_pid_file(runtime_dir: Path, pid: Optional[int] = None) -> None:
@@ -180,13 +196,13 @@ def cleanup_stale(runtime_dir: Path) -> bool:
     return True
 
 
-def send_signal(runtime_dir: Path, sig: int = signal.SIGTERM) -> bool:
+def send_signal(runtime_dir: Path, sig: DaemonSignal = DaemonSignal.SIGTERM) -> bool:
     """Send a signal to the running daemon. Returns True if sent."""
     pid = _read_pid(runtime_dir / "leapd.pid")
     if pid is None or not _process_alive(pid):
         return False
     try:
-        os.kill(pid, sig)
+        os.kill(pid, sig.value)
         return True
     except OSError:
         return False
@@ -231,7 +247,7 @@ def stop_daemon(
             return StopDaemonResult(pid=pid, stopped=True, stale_cleaned=stale_cleaned)
 
     _notify(f"Sending SIGTERM to pid {pid}...")
-    signal_sent = send_signal(runtime_dir, signal.SIGTERM)
+    signal_sent = send_signal(runtime_dir, DaemonSignal.SIGTERM)
     if not signal_sent and not DaemonInfo.discover(runtime_dir).is_running:
         stale_cleaned = cleanup_stale(runtime_dir)
         return StopDaemonResult(pid=pid, stopped=True, stale_cleaned=stale_cleaned)
@@ -245,7 +261,7 @@ def stop_daemon(
     forced = False
     if force:
         _notify(f"Still running; escalating to SIGKILL (force) and waiting up to {force_timeout_s:.0f}s...")
-        forced = send_signal(runtime_dir, signal.SIGKILL)
+        forced = send_signal(runtime_dir, DaemonSignal.SIGKILL)
         kill_deadline = time.time() + max(0.1, force_timeout_s)
         if forced and _wait_until_stopped(runtime_dir, deadline=kill_deadline, interval_s=interval):
             stale_cleaned = cleanup_stale(runtime_dir)
@@ -330,6 +346,12 @@ def _read_meta(path: Path) -> Optional[dict]:
         return None
 
 
+# Windows kernel32 constants for the exit-code liveness probe below.
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_STILL_ACTIVE = 259
+_ERROR_ACCESS_DENIED = 5
+
+
 def _process_alive(pid: int) -> bool:
     """Return True if the process with the given PID is still running.
 
@@ -339,22 +361,44 @@ def _process_alive(pid: int) -> bool:
     our own exited children first so a terminated daemon is correctly reported
     as gone. For processes that are not our children, reaping is a no-op and we
     fall back to the ``os.kill`` liveness probe.
+
+    Windows has no zombie/reap machinery, and its ``os.kill(pid, 0)`` probe
+    succeeds for an exited process while any handle to it remains open, so it
+    queries the real exit code via ``GetExitCodeProcess`` instead.
     """
-    try:
-        reaped, _ = os.waitpid(pid, os.WNOHANG)
-        if reaped == pid:
-            return False  # our child has exited and was just reaped
-    except (ChildProcessError, OSError):
-        pass  # not our child, or already reaped by subprocess/init
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # exists but owned by another user
-    except OSError:
-        return False
-    return True
+    if sys.platform != "win32":
+        try:
+            reaped, _ = os.waitpid(pid, os.WNOHANG)
+            if reaped == pid:
+                return False  # our child has exited and was just reaped
+        except (ChildProcessError, OSError):
+            pass  # not our child, or already reaped by subprocess/init
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True  # exists but owned by another user
+        except OSError:
+            return False
+        return True
+    else:
+        # Windows: no zombies, and os.kill(pid, 0) stays true while any handle
+        # to the exited process is open, so read the real exit code instead.
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            # Access denied means the process exists but belongs to another user.
+            return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
+        try:
+            exit_code = ctypes.c_ulong(_STILL_ACTIVE)
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == _STILL_ACTIVE  # any other value: already exited
+        finally:
+            kernel32.CloseHandle(handle)
 
 
 def _sock_healthy(sock_path: Path) -> bool:

@@ -356,13 +356,20 @@ class MemoryManager:
                 continue
             has_path_scope = True
             try:
-                candidate = str(Path(str(value)).expanduser().resolve())
+                candidate = Path(str(value)).expanduser().resolve()
             except (OSError, RuntimeError, ValueError):
-                candidate = str(value)
-            if workspace_root and (
-                candidate == workspace_root or candidate.startswith(workspace_root + "/")
-            ):
-                return True
+                candidate = Path(str(value))
+            if workspace_root:
+                try:
+                    root_path = Path(workspace_root).expanduser().resolve()
+                except (OSError, RuntimeError, ValueError):
+                    root_path = Path(workspace_root)
+                try:
+                    in_workspace = candidate == root_path or candidate.is_relative_to(root_path)
+                except (OSError, ValueError):
+                    in_workspace = False
+                if in_workspace:
+                    return True
         if workspace_root and has_path_scope:
             return False
         haystack = " ".join([

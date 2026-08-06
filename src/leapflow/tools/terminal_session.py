@@ -21,6 +21,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -28,6 +29,7 @@ from collections import deque
 from typing import Any, Deque, Dict, Optional
 
 from leapflow.tools.execution_context import current_tool_context, resolve_workspace_path, workspace_scope_error
+from leapflow.utils.process_group import ProcessGroup
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,21 @@ def set_terminal_sessions_enabled(enabled: bool) -> None:
     _ENABLED = bool(enabled)
 
 
+def _candidate_shells() -> list[str]:
+    """Interactive shells in platform preference order."""
+    if sys.platform == "win32":
+        return ["powershell", "pwsh"]
+    return [os.environ.get("SHELL") or "/bin/bash"]
+
+
+def _resolve_shell(requested: str) -> str:
+    """First usable shell: the requested one if present, else platform candidates."""
+    for shell in ([requested] if requested else []) + _candidate_shells():
+        if shutil.which(shell) or os.path.exists(shell):
+            return shell
+    return _candidate_shells()[-1]
+
+
 def _redact(text: str) -> str:
     try:
         from leapflow.security.redact import redact_sensitive_text
@@ -63,6 +80,14 @@ class _Session:
         self.proc = proc
         self.shell = shell
         self.cwd = cwd
+        # Attach immediately after spawn so everything the shell starts inherits
+        # group membership; a failure only degrades _terminate to proc-only kills.
+        try:
+            self.group: Optional[ProcessGroup] = ProcessGroup()
+            self.group.attach(proc.pid)
+        except OSError:
+            logger.debug("terminal session: process group unavailable", exc_info=True)
+            self.group = None
         self.created_at = time.monotonic()
         self.last_activity = self.created_at
         self._buffer: Deque[str] = deque()
@@ -114,9 +139,7 @@ def _terminate(session: "_Session") -> None:
             session.proc.stdin.close()
     except OSError:
         pass
-    try:
-        os.killpg(os.getpgid(session.proc.pid), signal.SIGTERM)
-    except (ProcessLookupError, OSError):
+    if session.group is None or not session.group.terminate(signal.SIGTERM):
         try:
             session.proc.terminate()
         except (ProcessLookupError, OSError):
@@ -164,9 +187,7 @@ async def terminal_open(params: Dict[str, Any]) -> Dict[str, Any]:
         if len(_SESSIONS) >= _MAX_SESSIONS:
             return {"ok": False, "error": f"Too many terminal sessions (max {_MAX_SESSIONS}); close some first.", "failure_code": "too_many_sessions"}
 
-    shell = str(params.get("shell") or os.environ.get("SHELL") or "/bin/bash")
-    if shutil.which(shell) is None and not os.path.exists(shell):
-        shell = "/bin/sh"
+    shell = _resolve_shell(str(params.get("shell") or ""))
     raw_cwd = params.get("cwd") or None
     if raw_cwd:
         cwd_path = resolve_workspace_path(raw_cwd, default=".")

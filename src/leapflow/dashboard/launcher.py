@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import secrets
-import signal
 import socket
 import subprocess
 import sys
@@ -21,6 +20,8 @@ import time
 import webbrowser
 from pathlib import Path
 from typing import Any, Optional
+
+from leapflow.daemon.lifecycle import DaemonSignal
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +208,7 @@ def _retire_stale_server(settings: Any) -> None:
     pid = int(state.get("pid") or 0)
     if port and pid > 0 and is_port_open(bind, port) and _pid_is_dashboard_server(pid):
         try:
-            os.kill(pid, signal.SIGTERM)
+            os.kill(pid, DaemonSignal.SIGTERM.value)
         except OSError:
             logger.debug("dashboard: stale server pid=%s not signalable", pid, exc_info=True)
         else:

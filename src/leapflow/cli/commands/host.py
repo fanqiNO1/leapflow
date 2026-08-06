@@ -11,7 +11,6 @@ import logging
 import os
 import platform as platform_mod
 import shutil
-import signal
 import subprocess
 import sys
 import time
@@ -19,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from leapflow.config import load_config
+from leapflow.daemon.lifecycle import DaemonSignal
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +146,7 @@ async def _stop_leapd_if_running(settings: object) -> bool:
     info = DaemonInfo.discover(runtime_dir)
     if not info.is_running:
         return False
-    if send_signal(runtime_dir, signal.SIGTERM):
+    if send_signal(runtime_dir, DaemonSignal.SIGTERM):
         _ok(f"Sent SIGTERM to leapd (PID {info.pid})")
         return True
     _warn("leapd is running but could not be signalled")
@@ -313,7 +313,7 @@ async def _cmd_stop() -> int:
 
     # Send SIGTERM for graceful shutdown
     try:
-        os.kill(pid, signal.SIGTERM)
+        os.kill(pid, DaemonSignal.SIGTERM.value)
         _info(f"Sent SIGTERM to PID {pid}, waiting for shutdown...")
         # Wait up to 5s for process to exit
         for _ in range(50):
@@ -326,7 +326,7 @@ async def _cmd_stop() -> int:
             # Force kill if still alive
             _warn("Process did not exit gracefully, sending SIGKILL")
             try:
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, DaemonSignal.SIGKILL.value)
             except OSError:
                 pass
     except OSError:

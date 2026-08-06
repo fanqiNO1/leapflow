@@ -24,7 +24,6 @@ Access pattern: client-direct read/write (advisory file lock). No daemon needed.
 """
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import logging
 import os
@@ -39,6 +38,7 @@ from leapflow.memory.protocol import (
     MemoryQuery,
     MemoryToolSchema,
 )
+from leapflow.utils.file_lock import lock_fd
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ def _atomic_write(path: Path, content: str) -> None:
     lock_path = path.with_name(f"{path.name}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        lock_fd(lock_file, blocking=True)
         _write_text_unlocked(path, content)
 
 
@@ -97,7 +97,7 @@ def _locked_update(path: Path, update: Callable[[str], str]) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(f"{path.name}.lock")
     with open(lock_path, "a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        lock_fd(lock_file, blocking=True)
         current = _read_text(path) or _MEMORY_HEADER
         updated = update(current)
         if updated != current:
