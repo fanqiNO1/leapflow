@@ -1714,7 +1714,11 @@ async def test_runtime_service_serializes_engine_chat_streams(tmp_path) -> None:
         return [event async for event in service.engine_chat(message)]
 
     first, second = await asyncio.gather(collect("one"), collect("two"))
-    status = await service.status()
+    # Status is scoped to the caller's session: a session-less call cannot know
+    # which of several live sessions to describe, and reporting "the most recent"
+    # would hand one client another's session id and context figures.
+    status = await service.status("sess-daemon")
+    anonymous_status = await service.status()
 
     # The blocked turn now receives an immediate 'queued' status chunk before it
     # acquires the engine lock; filter those out to assert on the engine stream.
@@ -1736,6 +1740,11 @@ async def test_runtime_service_serializes_engine_chat_streams(tmp_path) -> None:
     assert first_engine[0].metadata["session_id"] == "sess-daemon"
     assert second_engine[0].metadata["context_used"] == 2_048
     assert status["context_used"] == 2_048
+    assert status["session_id"] == "sess-daemon"
+    # A caller that names no session gets no session identity and no per-session
+    # figures, rather than somebody else's.
+    assert anonymous_status["session_id"] == ""
+    assert anonymous_status["context_used"] == 0
     assert status["context_budget_snapshot"]["total_tokens"] == 2_048
     assert status["context_posture"] == "research"
     assert status["turn_admission"]["max_concurrent"] == 1

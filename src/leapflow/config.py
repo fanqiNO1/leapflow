@@ -372,7 +372,7 @@ class Settings:
     agent_validate_tool_args: bool = True  # pre-execution required-argument validation + self-repair
     context_hard_limit_ratio: float = 0.92
     context_warning_ratio: float = 0.75
-    tool_evidence_max_chars: int = 1200
+    tool_evidence_max_chars: int = 4000
     repeated_read_limit: int = 2
     long_task_convergence_round: int = 12
     # Adaptive convergence ceiling: on high-difficulty tasks the effective
@@ -874,7 +874,7 @@ def _build_settings_from_env(
     agent_validate_tool_args = os.getenv("LEAPFLOW_AGENT_VALIDATE_TOOL_ARGS", "1").strip().lower() in ("1", "true", "yes")
     context_hard_limit_ratio = float(os.getenv("LEAPFLOW_CONTEXT_HARD_LIMIT_RATIO", "0.92"))
     context_warning_ratio = float(os.getenv("LEAPFLOW_CONTEXT_WARNING_RATIO", "0.75"))
-    tool_evidence_max_chars = int(os.getenv("LEAPFLOW_TOOL_EVIDENCE_MAX_CHARS", "1200"))
+    tool_evidence_max_chars = int(os.getenv("LEAPFLOW_TOOL_EVIDENCE_MAX_CHARS", "4000"))
     repeated_read_limit = int(os.getenv("LEAPFLOW_REPEATED_READ_LIMIT", "2"))
     long_task_convergence_round = int(os.getenv("LEAPFLOW_LONG_TASK_CONVERGENCE_ROUND", "12"))
     convergence_round_ceiling = int(os.getenv("LEAPFLOW_CONVERGENCE_ROUND_CEILING", "40"))

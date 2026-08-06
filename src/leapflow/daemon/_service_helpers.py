@@ -56,6 +56,12 @@ def engine_context_metadata(engine: Any | None, settings: Any) -> dict[str, Any]
         metadata["llm_model"] = model
     if engine is None:
         return metadata
+    # Prefer the engine's effective budget over the configured one: an
+    # authoritative model capability can cap the configured value, and reporting
+    # the config would claim a window compression is not actually using.
+    effective = getattr(engine, "active_context_length", 0)
+    if isinstance(effective, int) and effective > 0:
+        metadata["llm_context_length"] = effective
     metadata["context_used"] = max(0, int(getattr(engine, "context_token_count", 0) or 0))
     snapshot = getattr(engine, "context_budget_snapshot", {})
     if callable(snapshot):

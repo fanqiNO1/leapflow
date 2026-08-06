@@ -21,6 +21,11 @@ from leapflow.engine.failure_envelope import (
 
 logger = logging.getLogger(__name__)
 
+# Category for failures caused by a defect in LeapFlow rather than by a provider,
+# a tool, or the environment. Kept distinct so it is never confused with a
+# provider condition that recovery strategies could plausibly repair.
+INTERNAL_DEFECT_CATEGORY = "internal_defect"
+
 # Default mapping from ErrorCategory to (Recoverability, default_failure_class)
 _DEFAULT_MAPPINGS: dict[str, tuple[Recoverability, str]] = {
     ErrorCategory.TRANSIENT.value: (Recoverability.AUTO_RETRY, "transient"),
@@ -38,7 +43,28 @@ _DEFAULT_MAPPINGS: dict[str, tuple[Recoverability, str]] = {
     ErrorCategory.IMAGE_TOO_LARGE.value: (Recoverability.AUTO_RECOVER, "image_too_large"),
     ErrorCategory.SSL_ERROR.value: (Recoverability.NON_RECOVERABLE, "ssl_error"),
     ErrorCategory.PERMANENT.value: (Recoverability.NON_RECOVERABLE, "permanent"),
+    # Defects in LeapFlow itself. Registered so the mapping is discoverable, but
+    # reached through exception type rather than message text (see below).
+    INTERNAL_DEFECT_CATEGORY: (Recoverability.NON_RECOVERABLE, "internal_defect"),
 }
+
+# Exception types that always mean "LeapFlow has a bug", never "the provider or
+# the network did something". They must bypass the provider taxonomy entirely:
+# ``ErrorClassifier`` categorizes by substring on the exception message, so a
+# mistyped attribute name that happened to contain "context" was classified as a
+# context overflow and driven through compression, provider failover, and
+# credential rotation before halting the turn with an unrelated reason. Matching
+# on Python's own exception hierarchy is exact, unlike matching on message text.
+_INTERNAL_DEFECT_TYPES: tuple[type[BaseException], ...] = (
+    AttributeError,
+    NameError,
+    TypeError,
+    IndexError,
+    KeyError,
+    ImportError,
+    AssertionError,
+    NotImplementedError,
+)
 
 
 class RecoverabilityRegistry:
@@ -92,6 +118,42 @@ class UnifiedErrorClassifier:
             self._classifier = ErrorClassifier()
         self._registry = registry or RecoverabilityRegistry()
 
+    def classify_internal_defect(
+        self,
+        exc: Exception,
+        *,
+        provider: str = "",
+        model: str = "",
+    ) -> FailureEnvelope:
+        """Classify an exception that indicates a defect in LeapFlow itself.
+
+        Reported as non-recoverable on purpose: no retry, compression, failover,
+        or credential rotation can fix a programming error, and attempting them
+        wastes the turn and misattributes the cause. The envelope names the
+        exception type so the halt message is actionable.
+        """
+        detail = f"{type(exc).__name__}: {exc}"
+        logger.error("internal defect surfaced during an LLM call: %s", detail, exc_info=True)
+        return FailureEnvelope.create(
+            source=FailureSource.SYSTEM,
+            category=INTERNAL_DEFECT_CATEGORY,
+            failure_class="internal_defect",
+            failure_code=f"internal_{type(exc).__name__.lower()}",
+            message=detail[:500],
+            recoverability=Recoverability.NON_RECOVERABLE,
+            side_effect_state=SideEffectState.NONE,
+            context=FailureContext.from_dict_args(
+                tool_name="",
+                arguments={"provider": provider, "model": model} if provider or model else None,
+            ),
+            provider_hint=RecoveryHint(
+                hint_text=(
+                    f"This is a defect in LeapFlow ({type(exc).__name__}), not a provider or "
+                    "network problem. Retrying will not help; the traceback is in the daemon log."
+                )
+            ),
+        )
+
     def classify_llm_error(
         self,
         exc: Exception,
@@ -103,7 +165,15 @@ class UnifiedErrorClassifier:
 
         Uses the existing ErrorClassifier internally to determine the category,
         then maps to the appropriate recoverability and constructs a FailureEnvelope.
+
+        Exceptions that indicate a LeapFlow defect are routed away from the
+        provider taxonomy first: the provider classifier reads message text, so a
+        local bug would otherwise be assigned whatever provider condition its
+        message happens to resemble.
         """
+        if isinstance(exc, _INTERNAL_DEFECT_TYPES):
+            return self.classify_internal_defect(exc, provider=provider, model=model)
+
         category = self._classifier.classify(exc)
         category_str = category.value
 

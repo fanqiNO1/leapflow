@@ -451,14 +451,17 @@ class RuntimeLeapService:
                     logger.debug("daemon: failed to close engine stream", exc_info=True)
 
     def _active_engine(self, session_id: str = "") -> Any:
-        """Return the engine holding live conversation state.
+        """Return the engine holding a caller's live conversation state.
 
-        Single entry point for "the engine to report on". ``ctx.engine`` is only a
-        template used to build per-session engines and never accumulates a
-        conversation, so reading it yields zero turns and zero context — which
-        has surfaced repeatedly as an empty LeapBoard and a status bar stuck at
-        ``0/<limit>``. Anything assembling runtime metadata must come through
-        here rather than reaching for ``ctx.engine`` directly.
+        ``ctx.engine`` is only a template used to build per-session engines and
+        never accumulates a conversation, so reading it yields zero turns and zero
+        context — which has surfaced repeatedly as an empty LeapBoard and a status
+        bar stuck at ``0/<limit>``. Anything assembling runtime metadata must come
+        through here rather than reaching for ``ctx.engine`` directly.
+
+        Pass the caller's ``session_id``. Omitting it resolves "whichever session
+        was most recently active", which on a daemon serving several workspaces is
+        somebody else's — acceptable only for genuinely cross-session views.
         """
         ctx = self._ctx
         if ctx is None:
@@ -467,25 +470,25 @@ class RuntimeLeapService:
         return engine
 
     def _chunk_from_event(
-        self, event: StreamEvent, *, request_id: str = "", engine: Any = None,
+        self, event: StreamEvent, *, request_id: str = "", engine: Any,
     ) -> StreamChunk:
         """Wrap an engine stream event as an RPC chunk with runtime metadata.
 
-        ``engine`` must be the engine that produced the event — the per-session
-        one. Falling back to ``ctx.engine`` reports the base engine, which never
-        carries a conversation, so context usage reads as 0 and the client's
-        status bar sits at ``0/<limit>`` for the whole session.
+        ``engine`` is required and must be the engine that produced the event —
+        the per-session one. There is deliberately no fallback: resolving "some
+        active engine" would report the base engine (no conversation, so context
+        reads 0) or, on a daemon serving several TUIs, another client's session —
+        whose id the client would then adopt as its own.
         """
         ctx = self.context
-        active = engine if engine is not None else self._active_engine()
         metadata = dict(event.metadata or {})
-        session_id = getattr(active, "_current_session_id", "") if active else ""
+        session_id = getattr(engine, "_current_session_id", "") if engine is not None else ""
         if request_id:
             metadata.setdefault("request_id", request_id)
         if session_id:
             metadata.setdefault("session_id", str(session_id))
-        if active is not None:
-            metadata.update(engine_context_metadata(active, getattr(ctx, "settings", self._settings)))
+        if engine is not None:
+            metadata.update(engine_context_metadata(engine, getattr(ctx, "settings", self._settings)))
         return StreamChunk(
             request_id=request_id, content=event.content,
             done=False, event_type=event.type, metadata=metadata,
@@ -696,12 +699,14 @@ class RuntimeLeapService:
 
     # ── Status ───────────────────────────────────────────────────────
 
-    async def status(self) -> dict[str, Any]:
+    async def status(self, session_id: str = "") -> dict[str, Any]:
         ctx = self._ctx
         settings = getattr(ctx, "settings", self._settings) if ctx is not None else self._settings
-        # Report on the session engine, not the base template: the latter has no
-        # conversation, so context usage would always read as zero.
-        engine = self._active_engine()
+        # Report on the caller's session engine, not the base template (which has
+        # no conversation, so context usage would read zero) and not on whichever
+        # session happened to run last (which on a multi-workspace daemon belongs
+        # to another client, and whose id that client would then adopt).
+        engine = self._active_engine(session_id) if session_id else None
         db_holder = getattr(ctx, "_db_holder", None) if ctx is not None else None
         layout = settings.layout
         profile_layout = settings.profile_layout
@@ -743,7 +748,7 @@ class RuntimeLeapService:
             "compression_reason": context_metadata.get("compression_reason", ""),
             "compression_savings_ratio": context_metadata.get("compression_savings_ratio", 0.0),
             "context_budget_snapshot": context_metadata.get("context_budget_snapshot", {}),
-            "session_id": str(getattr(engine, "_current_session_id", "") or ""),
+            "session_id": str(getattr(engine, "_current_session_id", "") or "") if engine is not None else "",
             "runtime_source": runtime_source(),
             "runtime_executable": sys.executable,
             "runtime_version": runtime_version(),

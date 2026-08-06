@@ -8,6 +8,7 @@ from leapflow.engine.context_compressor import (
     CompressorConfig,
     ContextCompressor,
     SummarizeStage,
+    _TRIM_CEILING_CHARS,
     adaptive_trim_chars,
     estimate_text_tokens,
 )
@@ -18,6 +19,7 @@ from leapflow.engine.context_control import (
     ContextWindowController,
     LongTaskContextController,
     ToolEvidenceBuilder,
+    _EVIDENCE_CEILING_CHARS,
 )
 from leapflow.tools.file_operations import file_list, file_read
 
@@ -383,7 +385,9 @@ def test_adaptive_trim_chars_scales_with_context_length() -> None:
     assert threshold_128k > 2000
     assert threshold_256k > threshold_128k
     assert threshold_1m >= threshold_256k
-    assert threshold_1m <= 50_000  # ceiling
+    # Bound on the ceiling constant, not a copy of its value: the contract is
+    # "bounded and monotonic", and the ceiling itself rises as windows grow.
+    assert threshold_1m <= _TRIM_CEILING_CHARS
 
 
 def test_adaptive_trim_chars_never_below_base() -> None:
@@ -557,7 +561,7 @@ def test_evidence_builder_adapts_to_context_length() -> None:
 
 def test_evidence_builder_ceiling() -> None:
     huge = ToolEvidenceBuilder(max_content_chars=1200, context_length=2_000_000)
-    assert huge._max_content_chars <= 8_000
+    assert huge._max_content_chars <= _EVIDENCE_CEILING_CHARS
 
 
 def test_evidence_builder_preserves_platform_permission_recovery_fields() -> None:

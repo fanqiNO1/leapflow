@@ -143,9 +143,16 @@ class DaemonClient:
         result = await self.request("session.resume", {"session_id": session_id})
         return dict(result or {})
 
-    async def status(self) -> dict[str, Any]:
-        """Return daemon status."""
-        result = await self.request("daemon.status")
+    async def status(self, session_id: str = "") -> dict[str, Any]:
+        """Return daemon status, scoped to ``session_id`` when the caller has one.
+
+        Passing the caller's own session is what makes the reply describe *this*
+        client: without it the daemon has no way to know which of several live
+        sessions to report, and any session identity it returned would belong to
+        somebody else.
+        """
+        params = {"session_id": session_id} if session_id else {}
+        result = await self.request("daemon.status", params)
         return dict(result or {})
 
     async def host_status(self) -> dict[str, Any]:

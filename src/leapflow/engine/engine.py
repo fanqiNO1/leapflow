@@ -1222,7 +1222,7 @@ class AgentEngine:
         self._unified_classifier = UnifiedErrorClassifier(self._error_classifier)
         self._recovery_coordinator = RecoveryCoordinator()  # Re-created per turn
         self._checkpoint_store = InMemoryCheckpointStore()
-        self._audit_sink = JsonlAuditSink()  # In-memory; path-based if layout available
+        self._audit_sink = JsonlAuditSink(self._recovery_audit_path())
 
         # Apply startup-time tool configuration derived from settings.
         self._configure_tool_defaults()
@@ -1738,13 +1738,45 @@ class AgentEngine:
         return dict(self._last_context_snapshot)
 
     def _active_context_length(self) -> int:
-        """Return the runtime context length for the active model/provider."""
-        if self._model_capabilities is not None:
-            try:
-                return max(1, int(self._model_capabilities.resolve(self._settings.llm_model).context_length))
-            except Exception:
-                logger.debug("model capability lookup failed", exc_info=True)
-        return max(1, int(self._settings.llm_context_length))
+        """Return the runtime context budget for the active model/provider.
+
+        ``llm_context_length`` is the *configured budget* and the registry holds
+        *model capability*, so the effective window is the smaller of the two —
+        but only when the registry entry actually describes this model. A
+        family-wide entry carries whatever the vendor's line supported when it
+        was written, and clamping to it silently shrank the window for every
+        later generation (a 1M-class model matching "qwen" ran on 131K, i.e. 13%
+        of its window, with every compression ratio computed against that wrong
+        denominator). Model names always outrun a static table, so a
+        non-authoritative match defers to the configured budget instead.
+
+        Overshooting a model's real limit is recoverable: the provider reports
+        overflow and recovery routes it to context compression. Silently running
+        at a fraction of the window is not — nothing surfaces it.
+        """
+        budget = max(1, int(getattr(self._settings, "llm_context_length", 0) or 1))
+        if self._model_capabilities is None:
+            return budget
+        try:
+            caps = self._model_capabilities.resolve(self._settings.llm_model)
+        except Exception:
+            logger.debug("model capability lookup failed", exc_info=True)
+            return budget
+        if not getattr(caps, "authoritative", True):
+            return budget
+        known = max(1, int(getattr(caps, "context_length", 0) or 1))
+        return min(budget, known)
+
+    @property
+    def active_context_length(self) -> int:
+        """Effective context budget in use, for status reporting.
+
+        Exposed so clients report the window compression actually runs against.
+        Reading ``settings.llm_context_length`` instead shows the configured
+        budget, which differs whenever an authoritative capability caps it — the
+        status bar then claims a window the engine is not using.
+        """
+        return self._active_context_length()
 
     def _begin_turn_context(self, user_text: str) -> None:
         """Reset turn-scoped state and build the stable task contract."""
@@ -2499,10 +2531,55 @@ class AgentEngine:
         snap["prefix_commitment"] = state.as_dict()
         snap["prefix_committed"] = state.committed
 
+    def _recovery_audit_path(self) -> Any:
+        """Return the profile-owned path for the recovery audit trail, if declared.
+
+        Recovery decisions are the only record of why a turn stopped, and an
+        in-memory sink loses them with the turn — which is how an incident became
+        undiagnosable after the fact. Falls back to ``None`` (memory only) when no
+        profile layout is available, so an embedded engine still works.
+        """
+        layout = getattr(self._settings, "profile_layout", None)
+        path = getattr(layout, "audit_log_path", None)
+        return path
+
+    def _record_llm_call_telemetry(self, resp: Any, *, recovery: Any = None) -> None:
+        """Record usage and budget calibration for a provider call that succeeded.
+
+        Deliberately self-contained: this is bookkeeping, and a defect in it must
+        never be mistaken for a provider failure. It used to run inside the
+        provider call's ``try`` block, where one mistyped attribute name became an
+        ``AttributeError`` that the LLM classifier read as a context overflow (the
+        name contained "context"), sending every round through compression,
+        failover, and credential rotation before halting the turn with an
+        unrelated message. Telemetry now fails loudly in the log and silently to
+        the turn.
+
+        The success signal is recorded first so a bookkeeping defect cannot also
+        cost the loop its error-counter reset.
+        """
+        try:
+            if recovery is not None:
+                recovery.record_api_success()
+            usage = getattr(resp, "usage", None) or {}
+            self._usage_tracker.record_api_call(
+                usage,
+                provider=getattr(self._llm, "active_provider_name", ""),
+                model=getattr(resp, "model", "") or "",
+            )
+            if int(usage.get("prompt_tokens", 0) or 0) > 0:
+                self._record_provider_usage(getattr(resp, "model", "") or "", usage)
+        except Exception:  # noqa: BLE001 - telemetry must never fail a turn
+            logger.warning("llm call telemetry recording failed", exc_info=True)
+
     def _record_provider_usage(self, model: str, usage: Dict[str, Any]) -> None:
         """Prefer provider prompt usage when available and learn observed limits."""
         provider_prompt = int(usage.get("prompt_tokens", 0) or 0)
         if provider_prompt > 0:
+            # Calibrate before overwriting: the snapshot still holds this turn's
+            # estimate, so the pair (estimate, actual) is the only signal that can
+            # correct the character heuristic for this model and language mix.
+            self._calibrate_budget_estimator(provider_prompt)
             self._last_context_tokens = provider_prompt
             self._last_context_snapshot = {
                 **self._last_context_snapshot,
@@ -2512,6 +2589,25 @@ class AgentEngine:
             }
         if self._model_capabilities and model and usage:
             self._model_capabilities.update_from_usage(model, usage)
+
+    def _calibrate_budget_estimator(self, provider_prompt: int) -> None:
+        """Feed this turn's (estimate, actual) pair to the budget estimator."""
+        snapshot = self._last_context_snapshot or {}
+        # Skip a snapshot already replaced by a provider count, otherwise the
+        # estimator would calibrate against its own previous observation.
+        if snapshot.get("provider_prompt_tokens"):
+            return
+        estimated = int(snapshot.get("total_tokens", 0) or 0)
+        if estimated <= 0:
+            return
+        estimator = getattr(self._context_controller, "estimator", None)
+        observe = getattr(estimator, "observe_actual", None)
+        if observe is None:
+            return
+        try:
+            observe(estimated=estimated, actual=provider_prompt)
+        except Exception:  # noqa: BLE001 - calibration must never break a turn
+            logger.debug("budget estimator calibration failed", exc_info=True)
 
     def _compact_tool_result(self, tool_name: str, arguments: Dict[str, Any] | None, result: Any) -> Any:
         """Return compact tool evidence for LLM replay."""
@@ -2951,16 +3047,6 @@ class AgentEngine:
                     compressed, stream=False, enable_thinking=planned_enable_thinking,
                     **tools_kwarg,
                 )
-                recovery.record_api_success()
-                usage = resp.usage or {}
-                self._usage_tracker.record_api_call(
-                    usage,
-                    provider=getattr(self._llm, 'active_provider_name', ''),
-                    model=resp.model or '',
-                )
-                provider_prompt = usage.get("prompt_tokens", 0)
-                if provider_prompt > 0:
-                    self._record_provider_usage(resp.model or '', usage)
             except Exception as exc:
                 _clear_indicator()
                 classified = self._error_classifier.classify(exc)
@@ -2971,6 +3057,12 @@ class AgentEngine:
                 envelope = self._unified_classifier.classify_llm_error(
                     exc, provider=getattr(self._llm, 'provider', ''),
                     model=getattr(self._llm, 'model', ''),
+                )
+                # Always with the traceback: this used to be the only record of a
+                # failed round, and it was not written anywhere.
+                logger.error(
+                    "unified_loop: llm call failed (%s/%s)",
+                    envelope.category, envelope.failure_code, exc_info=True,
                 )
                 coordinator = self._recovery_coordinator
                 try:
@@ -3041,6 +3133,7 @@ class AgentEngine:
                     fatal_error = _terminal_failure_text(decision)
                     break
             _clear_indicator()
+            self._record_llm_call_telemetry(resp, recovery=recovery)
 
             content = (resp.content or "").strip()
             if self._sanitizer:
@@ -3469,16 +3562,6 @@ class AgentEngine:
                         compressed, stream=False, enable_thinking=planned_enable_thinking,
                         **tools_kwarg,
                     )
-                    turn_recovery.record_api_success()
-                    usage = resp.usage or {}
-                    self._usage_tracker.record_api_call(
-                        usage,
-                        provider=getattr(self._llm, 'active_provider_name', ''),
-                        model=resp.model or '',
-                    )
-                    provider_prompt = usage.get("prompt_tokens", 0)
-                    if provider_prompt > 0:
-                        self._record_provider_usage(resp.model or '', usage)
                 except Exception as exc:
                     _clear_indicator()
                     turn_recovery.record_api_error()
@@ -3487,6 +3570,12 @@ class AgentEngine:
                     envelope = self._unified_classifier.classify_llm_error(
                         exc, provider=getattr(self._llm, 'provider', ''),
                         model=getattr(self._llm, 'model', ''),
+                    )
+                    # The native-tools round previously logged nothing here, so a
+                    # repeating failure left no trace at all in the daemon log.
+                    logger.error(
+                        "unified_loop_stream: llm call failed (%s/%s)",
+                        envelope.category, envelope.failure_code, exc_info=True,
                     )
                     coordinator = self._recovery_coordinator
                     try:
@@ -3537,6 +3626,7 @@ class AgentEngine:
                         )
                         break
                 _clear_indicator()
+                self._record_llm_call_telemetry(resp, recovery=turn_recovery)
 
                 content = (resp.content or "").strip()
                 if self._sanitizer:
@@ -3746,16 +3836,6 @@ class AgentEngine:
                         resp = await self._llm.achat(
                             compressed, stream=False, enable_thinking=planned_enable_thinking,
                         )
-                        turn_recovery.record_api_success()
-                        usage = resp.usage or {}
-                        self._usage_tracker.record_api_call(
-                            usage,
-                            provider=getattr(self._llm, 'active_provider_name', ''),
-                            model=resp.model or '',
-                        )
-                        provider_prompt = usage.get("prompt_tokens", 0)
-                        if provider_prompt > 0:
-                            self._last_context_tokens = provider_prompt
                     except Exception as exc:
                         _clear_indicator()
                         turn_recovery.record_api_error()
@@ -3805,6 +3885,7 @@ class AgentEngine:
                             )
                             break
                     _clear_indicator()
+                    self._record_llm_call_telemetry(resp, recovery=turn_recovery)
                     content = (resp.content or "").strip()
                     if self._sanitizer:
                         content = self._sanitizer.sanitize(content)

@@ -28,8 +28,12 @@ from leapflow.tools.execution_context import (
 
 logger = logging.getLogger(__name__)
 
-_MAX_STDOUT = 10_000
-_MAX_STDERR = 5_000
+# Raw capture ceilings. These bound what the tool returns before the context
+# layers (evidence builder, result budget, trim) decide how much reaches the
+# model. Build and test logs routinely exceed 10K, and truncating there dropped
+# the tail — which is where the actual failure usually is.
+_MAX_STDOUT = 40_000
+_MAX_STDERR = 20_000
 _DEFAULT_TIMEOUT = 30.0
 # Internal ceiling for the shell process timeout. Raised from the original
 # hard-coded 120 s; injectable at startup via set_max_shell_timeout so
