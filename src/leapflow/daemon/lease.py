@@ -9,6 +9,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from leapflow.daemon.lifecycle import _process_alive
+
 _CLIENTS_DIR = "clients"
 _DEFAULT_LEASE_TTL_S = 120.0
 _DEFAULT_TOUCH_INTERVAL_S = 30.0
@@ -174,9 +176,3 @@ def _read_lease(path: Path) -> ClientLeaseSnapshot | None:
         return None
 
 
-def _process_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False

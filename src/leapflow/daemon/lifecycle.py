@@ -172,8 +172,8 @@ def write_pid_file(runtime_dir: Path, pid: Optional[int] = None) -> None:
 
 
 def cleanup_runtime_dir(runtime_dir: Path) -> None:
-    """Remove daemon runtime files (PID, socket, metadata)."""
-    for name in ("leapd.pid", "leapd.json", "leapd.sock"):
+    """Remove daemon runtime files (PID, socket, metadata, port)."""
+    for name in ("leapd.pid", "leapd.json", "leapd.sock", "leapd.port"):
         path = runtime_dir / name
         path.unlink(missing_ok=True)
     logger.info("daemon: cleaned up %s", runtime_dir)
@@ -294,14 +294,27 @@ def spawn_daemon(settings: object, *, mock_host: bool = False) -> subprocess.Pop
     command.extend(["daemon", "serve", "--internal"])
     log_file = open(log_path, "ab")
     try:
-        proc = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-        )
+        if sys.platform == "win32":  # pragma: no cover - platform specific
+            creationflags = (
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+            )
+            proc = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=False,
+                creationflags=creationflags,
+            )
+        else:
+            proc = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
     finally:
         log_file.close()
     logger.info("daemon: spawned pid=%s log=%s", proc.pid, log_path)
@@ -402,15 +415,11 @@ def _process_alive(pid: int) -> bool:
 
 
 def _sock_healthy(sock_path: Path) -> bool:
-    """Quick health check by connecting to the Unix socket."""
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(1.0)
-        s.connect(str(sock_path))
-        s.close()
-        return True
-    except (OSError, socket.timeout):
-        return False
+    """Quick health check by connecting to the daemon transport."""
+    from leapflow.daemon._transport import get_transport
+
+    transport = get_transport()
+    return transport.probe_healthy(sock_path.parent)
 
 
 def _format_duration(seconds: Optional[float]) -> str:

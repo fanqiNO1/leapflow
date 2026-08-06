@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
+from leapflow.daemon._transport import get_transport
 from leapflow.daemon.lifecycle import (
     DaemonInfo,
     DaemonLock,
@@ -288,7 +289,7 @@ class DaemonClient:
     async def _open(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         try:
             return await asyncio.wait_for(
-                asyncio.open_unix_connection(str(self._sock_path)),
+                get_transport().connect(self._sock_path.parent),
                 timeout=self._timeout_s,
             )
         except (TimeoutError, OSError) as exc:
