@@ -143,9 +143,15 @@ class SessionController:
 
     @property
     def recording_step_count(self) -> int:
-        """Number of steps captured so far in the active recording."""
+        """Number of steps captured so far in the active recording.
+
+        The count lives on the trajectory the recorder is filling, not on the
+        recorder itself. Reading a non-existent ``recorder.step_count`` raised
+        ``AttributeError`` on every ``/teach status`` issued while recording.
+        """
         recorder = getattr(self._pipeline, "recorder", None)
-        return recorder.step_count if recorder else 0
+        trajectory = getattr(recorder, "current_trajectory", None) if recorder else None
+        return int(getattr(trajectory, "step_count", 0) or 0)
 
     @property
     def last_result(self) -> Optional["LearnResult"]:
