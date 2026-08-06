@@ -23,6 +23,41 @@ from leapflow.skills.registry import Skill, SkillMetadata, SkillRegistry
 from leapflow.storage.trajectory_store import TrajectoryStore
 
 
+# ════════════════════════════════════════════════════════════════
+# Layer markers — applied by path so existing files need no edit
+# ════════════════════════════════════════════════════════════════
+
+_TESTS_ROOT = Path(__file__).resolve().parent
+_EXPLICIT_LAYERS = frozenset({"unit", "component", "e2e", "live"})
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: List[pytest.Item]
+) -> None:
+    """Assign a layer marker to every test based on its location.
+
+    Labelling by path keeps the 1400-case mock suite untouched while still making
+    the layers selectable: ``tests/journeys/`` is the real end-to-end layer,
+    ``tests/regression/`` is the always-on incident ledger, and everything else
+    defaults to ``unit`` unless the file opts into ``component`` itself.
+    """
+    for item in items:
+        try:
+            relative = Path(str(item.fspath)).resolve().relative_to(_TESTS_ROOT)
+        except ValueError:
+            continue
+        top = relative.parts[0] if relative.parts else ""
+        if top == "journeys":
+            item.add_marker(pytest.mark.e2e)
+            item.add_marker(pytest.mark.slow)
+            continue
+        if top == "regression":
+            item.add_marker(pytest.mark.invariant)
+            continue
+        if not _EXPLICIT_LAYERS.intersection(marker.name for marker in item.iter_markers()):
+            item.add_marker(pytest.mark.unit)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Stub LLM — scripted responses for deterministic integration tests
 # ═══════════════════════════════════════════════════════════════════

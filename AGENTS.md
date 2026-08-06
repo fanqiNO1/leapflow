@@ -118,12 +118,33 @@ This document is the LeapFlow engineering collaboration contract. It is not only
 
 ## Testing Philosophy
 
+The suite has **two layers with different jobs**, and keeping the boundary sharp is what stops each from doing the other's work badly.
+
+**Mock layer** (`tests/*.py`, marked `unit`/`component`) — broad and fast. It owns pure algorithms, state-machine branches, error-classification tables, rare and malformed inputs, and single-module invariants. Branch combinations can only be enumerated here, and only here is the feedback measured in milliseconds.
+
+**Real layer** (`tests/journeys/`, marked `e2e`) — six coarse journeys driving a real `leapd` subprocess over RPC, with the LLM boundary served by a local cassette proxy. It owns what a mock structurally cannot observe: cross-module wiring, process boundaries, session identity, workspace binding, real persistence, and pushed runtime metadata. Every incident recorded in this document shipped with a green mock suite.
+
+Three rules keep the split honest:
+
+1. **Anything provable with one mock-layer assertion must not enter the real layer.**
+2. **One journey is one test case.** Express variation as ordered phases inside a single session; never parameterize a journey.
+3. **The real layer has a hard case budget** (`tests/regression/test_suite_budget.py`). When it is reached, merge a journey — do not raise the ceiling. The budget is what lets the real layer run on *every* push, and a suite that can be skipped will be skipped.
+
+The two layers are joined by recorded traffic. `tests/_fixtures/cassettes/` holds the deterministic inputs the offline lanes replay (rebuilt with `make seed-cassettes`); `tests/_fixtures/recordings/` holds real provider traffic captured by `make record-traffic`. `make sync-fixtures` distils both into `tests/_fixtures/llm_responses/response_shapes.json`, which the mock layer asserts against — so a provider dropping a field turns the build red instead of passing forever against a body written from memory. Recording never writes to the replay store: a multi-turn agent conversation cannot be replayed from a recording, because each turn's prompt embeds the exact round-by-round history of the turns before it.
+
+Each journey also declares two cost ceilings, both enforced at the proxy and reported by `finish()`. `max_llm_calls` is the convergence guard: a turn that stops converging is cut off instead of running to the engine's iteration cap. `max_llm_tokens` is the cost guard, and it catches what call count cannot — prompt growth raises the bill without adding a single round. Raising a ceiling is not the fix for hitting one.
+
+**Which tests run.** The offline lanes never select: the mock layer runs in full, and the real journeys run in full on every push. Selection would save at most a few seconds, because the always-on tiers set the floor, and a suite that can be skipped will be skipped. The *live* lane is the exception — there a journey costs real tokens, so it selects: each journey declares `SUBJECT_PATHS` (the sources it exercises) and `LIVE_SIGNAL` (whether a real provider adds signal), and `tools/impact.py --live-journeys` picks from those. Declaring them inside the journey keeps that knowledge next to the assertions it describes. `tools/impact.py` can also scope the mock layer (`make test-impact`) for local work on a large change; it is not wired into CI.
+
 - **Unit tests must be hermetic**: no network, no LLM calls
+- **Journeys must not mock anything**: a journey that reaches for `unittest.mock` has become an expensive unit test
+- **Provider bodies are recorded, not written**: use a cassette or a derived fixture; a hand-authored body keeps passing after the provider changes
+- **Faked construction needs real-instance cover**: `object.__new__` plus private-attribute assignment is acceptable only for ordering contracts, and only when the same file also builds the class properly and drives the production path
 - **py_compile all modified files**: syntax errors caught before test run
 - **Import chain verification**: every new module must be importable standalone
 - **Existing tests must not regress**: all tests must pass after every change
 - **User-facing flows must not regress**: preserve or improve usability, feedback clarity, and failure recovery for impacted paths
-- **Verification sequence**: compile → import → unit test → integration (if applicable)
+- **Verification sequence**: compile → import → mock layer → real journeys
 - **Behavior contracts over snapshots**: assert invariants, not frozen values
 - **Mock at boundaries only**: mock external I/O (network, disk), never internal logic
 - **A test may not fabricate the wiring it claims to cover**: building an object with `object.__new__` and assigning the private attributes the code reads cannot detect a wrong attribute *name* — the test simply agrees with the typo. Calibration tests did exactly that and stayed green while every real turn raised `AttributeError`. Any test whose stated purpose is wiring must construct the real object and drive the production path.

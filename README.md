@@ -970,11 +970,56 @@ class MyChannel:
 
 ### Running Tests
 
+The suite has two layers. The **mock layer** is broad and fast; the **real layer** is six
+coarse journeys that drive an actual `leapd` subprocess over RPC, with the LLM boundary
+served from committed recordings. Both run offline.
+
 ```bash
-make test                              # Full suite
+make test                              # Mock layer + real journeys (the default gate)
+make test-unit                         # Mock layer only, parallel
+make test-e2e                          # Real journeys + always-on guards
+make test-impact BASE=origin/main      # Mock layer scoped to what changed (local)
+make test-full                         # Everything, unscoped
+
 uv run pytest tests/test_pure_algorithms.py -q   # Single file
 uv run pytest -k "test_world_model" -q            # By keyword
 ```
+
+CI runs both layers in full. Change-scoped selection exists (`tools/impact.py`,
+backed by a coverage-derived map in `tests/.impact/`) and narrows a single-module
+change to 2–3 test files, but it is a *local* convenience: the always-on tiers
+cannot be selected away and already account for most of the run, so selecting in
+CI would save only a few seconds.
+
+The live lane is the exception — there a journey costs real tokens, so it selects.
+Each journey declares `SUBJECT_PATHS` and `LIVE_SIGNAL`, and every journey caps
+its own provider calls *and* tokens, so neither a non-converging turn nor prompt
+growth can run up a bill.
+
+Against a real provider (needs `LEAPFLOW_LLM_API_KEY`, `LEAPFLOW_LLM_BASE_URL` and
+`LEAPFLOW_LLM_MODEL`):
+
+```bash
+make test-live                         # Journeys against the real provider
+make record-traffic                    # Capture real traffic into recordings/
+make sync-fixtures                     # Re-derive mock-layer response shapes
+```
+
+There are two stores, with different jobs:
+
+- `tests/_fixtures/cassettes/` — deterministic inputs the offline lanes replay.
+  Rebuild with `make seed-cassettes`.
+- `tests/_fixtures/recordings/` — real provider traffic, kept as evidence of wire
+  shape. `sync-fixtures` distils both into `llm_responses/response_shapes.json`,
+  which the mock layer checks against, so a provider dropping a field turns the
+  build red instead of passing forever.
+
+Recording deliberately never writes to the replay store: a multi-turn agent
+conversation cannot be replayed from a recording, because each turn's prompt
+embeds the exact round-by-round history of the turns before it.
+
+When a journey reports a cassette miss it prints a diff against the nearest
+recorded request, so you can see which prompt drifted.
 
 </details>
 
