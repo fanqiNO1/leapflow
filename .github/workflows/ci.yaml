@@ -10,9 +10,70 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Both lanes below are offline: the LLM boundary is served from the committed
+  # cassette store. That is deliberate — a pull request from a fork cannot access
+  # secrets, so anything gating a merge must run without them.
+  LEAPFLOW_TEST_LLM_MODE: replay
+
 jobs:
-  test:
+  # ── L1: pull-request lane ──────────────────────────────────────────────
+  # Static checks, the whole real layer, and the whole mock layer.
+  #
+  # Change-scoped selection is deliberately NOT used here, and the reason is
+  # arithmetic rather than distrust. Measured on this suite: the full mock layer
+  # is ~18s, while the always-on tier alone (real journeys + regression ledger +
+  # architecture contracts) is ~14s. Those tiers can never be selected away, so
+  # they set the floor — selecting the mock layer can save at most ~4s, however
+  # precise the selection gets. Spending correctness risk on four seconds is a
+  # bad trade.
+  #
+  # Revisit when the full mock layer stops fitting the feedback budget —
+  # concretely, when `make test-unit` exceeds ~3 minutes on CI hardware. The
+  # machinery is ready and tested (tools/impact.py, with a coverage-derived map
+  # in tests/.impact/); `make test-impact` already uses it locally, where a
+  # single-module change narrows to 2-3 test files.
+  #
+  # The live lane *does* select, in .github/workflows/nightly-live.yaml: there a
+  # journey costs real tokens, so the arithmetic comes out the other way.
+  pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Lint
+        run: uv run ruff check src/leapflow/ tests/ tools/
+
+      - name: Verify derived fixtures match the cassette store
+        run: uv run python tools/sync_fixtures.py --check
+
+      - name: Real layer — journeys and always-on guards
+        run: uv run pytest tests/journeys tests/regression tests/test_architecture_contracts.py -q -m "e2e or invariant or unit" -n 4
+
+      - name: Mock layer (full)
+        run: uv run pytest tests/ -q -m "not e2e" --tb=short -n auto
+
+  # ── L2: main lane ──────────────────────────────────────────────────────
+  # Everything, unscoped, across the supported matrix.
+  main:
+    if: github.event_name == 'push'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -29,15 +90,29 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
 
       - name: Install dependencies
         run: uv sync --all-extras
 
       - name: Lint
-        run: uv run ruff check src/leapflow/ tests/
+        run: uv run ruff check src/leapflow/ tests/ tools/
 
-      - name: Run tests
-        run: uv run pytest tests/ -q --tb=short
-        env:
-          LEAPFLOW_MOCK_HOST: '1'
-          LEAPFLOW_LLM_API_KEY: 'test-key-ci'
+      - name: Verify derived fixtures match the stored exchanges
+        run: uv run python tools/sync_fixtures.py --check
+
+      - name: Mock layer — full
+        run: uv run pytest tests/ -q -m "not e2e" --tb=short -n auto
+
+      - name: Real layer — full
+        run: uv run pytest tests/journeys -q -m e2e --tb=short -n 4
+
+      - name: Daemon logs on failure
+        if: failure()
+        run: |
+          echo "Journey daemons log under the scratch root; surface anything left behind."
+          find /tmp -maxdepth 6 -name 'leapd.log' -newermt '-40 minutes' 2>/dev/null | while read -r log; do
+            echo "===== $log ====="
+            tail -n 120 "$log"
+          done

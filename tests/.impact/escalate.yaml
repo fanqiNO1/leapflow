@@ -1,0 +1,48 @@
+# Changes that force the whole mock layer to run.
+#
+# Change-scoped selection is a cost optimisation, and it must never be the reason
+# a regression escapes. Anything listed here is a shared foundation: its blast
+# radius is either the entire codebase or impossible to bound statically, so the
+# honest answer is to run everything.
+#
+# Patterns are matched with pathlib's `PurePath.match` against repo-relative
+# paths, so `src/leapflow/domain/*.py` matches one level and `**/x.py` matches any
+# depth. Read by tools/impact.py.
+
+patterns:
+  # Configuration and path layout: read by essentially every module, and their
+  # precedence rules are the kind of thing that breaks distant code silently.
+  - src/leapflow/config.py
+  - src/leapflow/config_loader.py
+  - src/leapflow/config_service.py
+  - src/leapflow/layout.py
+
+  # Domain types travel everywhere by value; a field change is unbounded.
+  - src/leapflow/domain/*.py
+
+  # The agent loop and its recovery pipeline: coupled to tools, memory, LLM and
+  # the daemon through event and protocol indirection that no import graph shows.
+  - src/leapflow/engine/engine.py
+  - src/leapflow/engine/agent_loop.py
+  - src/leapflow/engine/session_factory.py
+  - src/leapflow/engine/recovery_coordinator.py
+  - src/leapflow/engine/unified_classifier.py
+
+  # Daemon service and session routing: every client-visible value flows through
+  # here, and multi-client leakage is invisible from any single module's tests.
+  - src/leapflow/daemon/service.py
+  - src/leapflow/daemon/session_registry.py
+  - src/leapflow/daemon/session_coordinator.py
+  - src/leapflow/daemon/protocol.py
+
+  # Test infrastructure: changing it changes the meaning of every result.
+  - tests/conftest.py
+  - tests/_harness/*.py
+
+  # Build, dependency and lane definitions.
+  - pyproject.toml
+  - uv.lock
+  - Makefile
+  - .github/workflows/*.yaml
+  - tools/impact.py
+  - tests/.impact/escalate.yaml
