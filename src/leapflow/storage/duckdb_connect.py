@@ -24,7 +24,18 @@ import duckdb
 
 logger = logging.getLogger(__name__)
 
-LOCK_KEYWORDS = frozenset({"lock", "locked", "exclusive", "cannot set lock"})
+LOCK_KEYWORDS = frozenset({
+    "lock",
+    "locked",
+    "exclusive",
+    "cannot set lock",
+    # Windows "file held by another process" forms — DuckDB raises these
+    # instead of a lock error when the DB file is open elsewhere (English
+    # and Chinese system locales). Must classify as locked, not corrupted.
+    "cannot open file",
+    "being used by another process",
+    "另一个程序正在使用",
+})
 
 _CONNECT_RETRIES = int(os.getenv("LEAPFLOW_DB_CONNECT_RETRIES", "5" if sys.platform == "win32" else "3"))
 _CONNECT_BACKOFF_S = float(os.getenv("LEAPFLOW_DB_CONNECT_BACKOFF_S", "1.0" if sys.platform == "win32" else "0.5"))

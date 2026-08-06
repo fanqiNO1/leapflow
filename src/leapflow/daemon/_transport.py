@@ -34,6 +34,10 @@ class DaemonTransport(abc.ABC):
         """Synchronous quick health check — returns True if the daemon is reachable."""
 
     @abc.abstractmethod
+    def readiness_path(self, runtime_dir: Path) -> Path:
+        """Artifact file the daemon publishes when it is ready to serve."""
+
+    @abc.abstractmethod
     def cleanup(self, runtime_dir: Path) -> None:
         """Remove transport artifacts (socket file, port file, etc.)."""
 
@@ -69,6 +73,9 @@ class UnixSocketTransport(DaemonTransport):
             return True
         except (OSError, socket.timeout):
             return False
+
+    def readiness_path(self, runtime_dir: Path) -> Path:
+        return self._sock_path(runtime_dir)
 
     def cleanup(self, runtime_dir: Path) -> None:
         self._sock_path(runtime_dir).unlink(missing_ok=True)
@@ -118,6 +125,9 @@ class TcpLoopbackTransport(DaemonTransport):
             return True
         except (OSError, socket.timeout):
             return False
+
+    def readiness_path(self, runtime_dir: Path) -> Path:
+        return self._port_path(runtime_dir)
 
     def cleanup(self, runtime_dir: Path) -> None:
         self._port_path(runtime_dir).unlink(missing_ok=True)

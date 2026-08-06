@@ -11,6 +11,8 @@ from typing import Any
 
 import pytest
 
+import leapflow
+from leapflow.daemon._transport import get_transport
 from leapflow.daemon.client import DaemonClient, DaemonUnavailableError, ensure_daemon_client
 from leapflow.daemon.lifecycle import DaemonInfo
 from leapflow.daemon.protocol import StreamChunk
@@ -75,7 +77,7 @@ class _FailingStreamService(_FakeService):
 
 class _SlowFirstChunkService(_FakeService):
     async def engine_chat(self, message: str, **kwargs: Any) -> AsyncIterator[StreamChunk]:
-        await asyncio.sleep(0.08)
+        await asyncio.sleep(0.16)
         yield StreamChunk(request_id="", content=f"slow {message}", event_type="chunk")
         yield StreamChunk(request_id="", content="done", event_type="final")
 
@@ -128,8 +130,9 @@ async def _start_server(runtime_dir: Path, service=None, *, stream_heartbeat_s: 
         stream_heartbeat_s=stream_heartbeat_s,
     )
     task = asyncio.create_task(server.serve_forever())
+    readiness = get_transport().readiness_path(runtime_dir)
     for _ in range(50):
-        if (runtime_dir / "leapd.sock").exists():
+        if readiness.exists():
             return server, task, runtime_dir
         await asyncio.sleep(0.02)
     task.cancel()
@@ -612,9 +615,9 @@ async def test_daemon_client_stream_heartbeat_prevents_idle_timeout() -> None:
         server, task, runtime_dir = await _start_server(
             Path(root) / "runtime",
             service=_SlowFirstChunkService(),
-            stream_heartbeat_s=0.01,
+            stream_heartbeat_s=0.03,
         )
-        client = DaemonClient(runtime_dir / "leapd.sock", timeout_s=0.03)
+        client = DaemonClient(runtime_dir / "leapd.sock", timeout_s=0.1)
 
         try:
             events = [event async for event in client.engine_chat("world")]
@@ -1237,8 +1240,9 @@ async def test_daemon_shutdown_rpc_triggers_server_stop() -> None:
             on_shutdown=shutdown_event.set,
         )
         task = asyncio.create_task(server.serve_forever())
+        readiness = get_transport().readiness_path(runtime_dir)
         for _ in range(50):
-            if (runtime_dir / "leapd.sock").exists():
+            if readiness.exists():
                 break
             await asyncio.sleep(0.02)
         else:
@@ -1665,7 +1669,7 @@ async def test_runtime_service_hot_reloads_config_before_daemon_chat(
         assert status["runtime_dir"] == str(settings.runtime_dir)
         assert status["llm_context_length"] == 700_000
         assert status["context_used"] == 0
-        assert status["runtime_source"].endswith("leapflow/__init__.py")
+        assert status["runtime_source"] == str(leapflow.__file__)
         assert status["runtime_executable"]
         assert status["runtime_version"]
     finally:
