@@ -207,6 +207,11 @@ async def terminal_open(params: Dict[str, Any]) -> Dict[str, Any]:
             return {"ok": False, "error": "Initial command blocked by safety policy.", "failure_code": "blocked"}
 
     try:
+        _popen_kwargs: Dict[str, Any] = {}
+        if sys.platform == "win32":  # pragma: no cover - platform specific
+            _popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            _popen_kwargs["start_new_session"] = True
         proc = subprocess.Popen(
             [shell],
             stdin=subprocess.PIPE,
@@ -214,7 +219,7 @@ async def terminal_open(params: Dict[str, Any]) -> Dict[str, Any]:
             stderr=subprocess.STDOUT,
             cwd=cwd,
             bufsize=0,
-            start_new_session=True,
+            **_popen_kwargs,
         )
     except (OSError, ValueError) as exc:
         return {"ok": False, "error": f"Failed to start shell: {exc}", "failure_code": "spawn_failed"}

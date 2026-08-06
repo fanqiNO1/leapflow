@@ -90,6 +90,7 @@ else:
                 return False
             try:
                 os.killpg(self._pgid, sig)
+                self._pgid = None
                 return True
             except OSError:
                 return False

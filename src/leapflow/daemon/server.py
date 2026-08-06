@@ -11,6 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from leapflow.daemon._transport import get_transport
 from leapflow.daemon.lease import default_lease_ttl_s, read_active_client_leases
 from leapflow.daemon.lifecycle import cleanup_runtime_dir, write_pid_file
 from leapflow.daemon.protocol import ErrorCode, METHOD_REGISTRY, RpcRequest, RpcResponse, StreamChunk
@@ -88,10 +89,11 @@ class UnixRpcServer:
     async def serve_forever(self) -> None:
         """Start listening and serve until cancelled."""
         self._runtime_dir.mkdir(parents=True, exist_ok=True)
-        self._sock_path.unlink(missing_ok=True)
-        self._server = await asyncio.start_unix_server(
+        transport = get_transport()
+        transport.cleanup(self._runtime_dir)
+        self._server = await transport.start_server(
             self._handle_client,
-            path=str(self._sock_path),
+            self._runtime_dir,
         )
         write_pid_file(self._runtime_dir)
         try:
@@ -100,14 +102,14 @@ class UnixRpcServer:
         except asyncio.CancelledError:
             raise
         finally:
-            self._sock_path.unlink(missing_ok=True)
+            transport.cleanup(self._runtime_dir)
 
     async def stop(self) -> None:
         """Stop accepting clients and close the listening socket."""
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
-        self._sock_path.unlink(missing_ok=True)
+        get_transport().cleanup(self._runtime_dir)
 
     async def _handle_client(
         self,

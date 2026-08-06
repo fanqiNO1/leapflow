@@ -14,6 +14,8 @@ import logging
 import os
 import re
 import shlex
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, Optional, Protocol, runtime_checkable
 
@@ -264,12 +266,17 @@ async def shell_run(params: Dict[str, Any]) -> Dict[str, Any]:
             return {"ok": False, "error": message}
 
     try:
+        _popen_kwargs: Dict[str, Any] = {}
+        if sys.platform == "win32":  # pragma: no cover - platform specific
+            _popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            _popen_kwargs["start_new_session"] = True
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
-            start_new_session=True,
+            **_popen_kwargs,
         )
         # Attach immediately so the shell's descendants inherit group membership
         # and a timeout can kill the whole tree, not just the shell itself.

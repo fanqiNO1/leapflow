@@ -266,10 +266,18 @@ async def _cmd_start() -> int:
         "def _signal_handler(*a): stop_event.set(); "
         "signal.signal(signal.SIGTERM, _signal_handler); "
         "signal.signal(signal.SIGINT, _signal_handler); "
+        "(signal.signal(signal.SIGBREAK, _signal_handler) "
+        "if hasattr(signal, 'SIGBREAK') else None); "
         "loop.run_until_complete(stop_event.wait()); "
         "loop.run_until_complete(daemon.stop()); "
         "print('ObservationDaemon stopped', flush=True)"
     )
+
+    creationflags = 0
+    start_new_session = True
+    if os.name == "nt":  # pragma: no cover - platform specific
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        start_new_session = False
 
     with open(log_file, "a") as lf:
         proc = subprocess.Popen(
@@ -277,7 +285,8 @@ async def _cmd_start() -> int:
             stdout=lf,
             stderr=lf,
             stdin=subprocess.DEVNULL,
-            start_new_session=True,
+            start_new_session=start_new_session,
+            creationflags=creationflags,
         )
 
     # Wait briefly to confirm startup
