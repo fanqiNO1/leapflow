@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import sys
 import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -14,6 +15,18 @@ from leapflow.daemon.client import DaemonClient, DaemonUnavailableError, ensure_
 from leapflow.daemon.lifecycle import DaemonInfo
 from leapflow.daemon.protocol import StreamChunk
 from leapflow.daemon.server import UnixRpcServer
+
+
+def _short_tempdir() -> str:
+    """Base directory for temp runtime dirs holding ``leapd.sock``.
+
+    AF_UNIX socket paths cap near 108 chars, and macOS's default TMPDIR
+    (/var/folders/...) is too long, so POSIX keeps /tmp; Windows has no
+    such constraint and no /tmp, so use the system temp dir.
+    """
+    if sys.platform == "win32":
+        return tempfile.gettempdir()
+    return "/tmp"
 
 
 def test_settings_runtime_dir_defaults_to_profile_runtime(tmp_path) -> None:
@@ -125,7 +138,7 @@ async def _start_server(runtime_dir: Path, service=None, *, stream_heartbeat_s: 
 
 @pytest.mark.asyncio
 async def test_daemon_client_receives_stream_events() -> None:
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         server, task, runtime_dir = await _start_server(Path(root) / "runtime")
         client = DaemonClient(runtime_dir / "leapd.sock")
 
@@ -148,7 +161,7 @@ async def test_daemon_client_receives_stream_events() -> None:
 
 @pytest.mark.asyncio
 async def test_daemon_server_injects_rpc_request_id_into_engine_chat() -> None:
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         service = _RequestIdCaptureService()
         server, task, runtime_dir = await _start_server(Path(root) / "runtime", service=service)
         client = DaemonClient(runtime_dir / "leapd.sock")
@@ -574,7 +587,7 @@ async def test_engine_chat_no_queued_status_when_idle() -> None:
 
 @pytest.mark.asyncio
 async def test_daemon_client_can_cancel_engine_turn() -> None:
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         service = _FakeService()
         server, task, runtime_dir = await _start_server(Path(root) / "runtime", service=service)
         client = DaemonClient(runtime_dir / "leapd.sock")
@@ -595,7 +608,7 @@ async def test_daemon_client_can_cancel_engine_turn() -> None:
 
 @pytest.mark.asyncio
 async def test_daemon_client_stream_heartbeat_prevents_idle_timeout() -> None:
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         server, task, runtime_dir = await _start_server(
             Path(root) / "runtime",
             service=_SlowFirstChunkService(),
@@ -627,7 +640,7 @@ async def test_dispatch_stream_keeps_contextvar_token_valid_across_chunks() -> N
     ContextVar set()/reset() pair spanning a multi-chunk stream (previously
     raised ValueError: ... was created in a different Context).
     """
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         server, task, runtime_dir = await _start_server(
             Path(root) / "runtime", service=_ContextVarStreamingService(),
         )
@@ -983,7 +996,7 @@ async def test_two_daemon_clients_stream_concurrently_through_dispatch_stream() 
     service._ctx = FakeContext()
     service._session_registry = FakeRegistry()
 
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         server, task, runtime_dir = await _start_server(Path(root) / "runtime", service=service)
 
         async def consume(session_id: str, decision: str) -> list[str]:
@@ -1068,7 +1081,7 @@ async def test_four_daemon_clients_run_and_fifth_queues_through_dispatch_stream(
     service._ctx = FakeContext()
     service._session_registry = FakeRegistry()
 
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         server, task, runtime_dir = await _start_server(Path(root) / "runtime", service=service)
 
         async def consume(session_id: str) -> list[tuple[str, str, dict[str, Any]]]:
@@ -1213,7 +1226,7 @@ async def test_daemon_shutdown_rpc_triggers_server_stop() -> None:
         async def shutdown(self) -> None:
             self.shutdown_called = True
 
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         runtime_dir = Path(root) / "runtime"
         service = ShutdownService()
         shutdown_event = asyncio.Event()
@@ -1264,7 +1277,7 @@ async def test_runtime_service_status_reports_host_backend() -> None:
             self.settings = settings
             self._db_holder = None
 
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         settings = make_settings(root)
         service = RuntimeLeapService(settings, mock_host=True)
         service._ctx = FakeContext(settings)
@@ -1292,7 +1305,7 @@ async def test_daemon_client_host_lifecycle_rpc() -> None:
         async def host_restart(self) -> dict[str, Any]:
             return {"ok": True, "backend": "cua-driver", "started": True, "changed": True}
 
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         server, task, runtime_dir = await _start_server(Path(root) / "runtime", service=HostRpcService())
         client = DaemonClient(runtime_dir / "leapd.sock")
         try:
@@ -1350,7 +1363,7 @@ async def test_daemon_client_slash_metadata_rpc() -> None:
                 "result": {"platforms": [{"id": "feishu", "name": "Feishu", "state": "available"}]},
             }
 
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         server, task, runtime_dir = await _start_server(Path(root) / "runtime", service=SlashMetadataService())
         client = DaemonClient(runtime_dir / "leapd.sock")
         try:
@@ -1413,7 +1426,7 @@ async def test_runtime_service_slash_metadata_payloads() -> None:
             self.rpc = FakeRpc()
             self.platform_tools: list[Any] = []
 
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         settings = make_settings(root)
         from leapflow.gateway.server import GatewayServer
 
@@ -1472,7 +1485,7 @@ async def test_runtime_service_host_lifecycle_delegates_to_context() -> None:
             self.calls.append("restart")
             return {"ok": True, "backend": "cua-driver", "started": True}
 
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         settings = make_settings(root)
         service = RuntimeLeapService(settings, mock_host=True)
         ctx = FakeContext(settings)
@@ -1501,7 +1514,7 @@ async def test_daemon_client_approval_resolve_rpc() -> None:
         async def approval_cancel(self, pending_id: str, reason: str = "cancelled") -> dict[str, Any]:
             return {"ok": True, "pending_id": pending_id, "decision": "deny", "reason": reason}
 
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         server, task, runtime_dir = await _start_server(Path(root) / "runtime", service=ApprovalRpcService())
         client = DaemonClient(runtime_dir / "leapd.sock")
         try:
@@ -1523,7 +1536,7 @@ async def test_daemon_client_approval_resolve_rpc() -> None:
 
 @pytest.mark.asyncio
 async def test_daemon_client_reports_unknown_method() -> None:
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         server, task, runtime_dir = await _start_server(Path(root) / "runtime")
         client = DaemonClient(runtime_dir / "leapd.sock")
 
@@ -1543,7 +1556,7 @@ async def test_daemon_client_reports_unknown_method() -> None:
 async def test_ensure_daemon_client_reuses_healthy_daemon() -> None:
     from conftest import make_settings
 
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         root_path = Path(root)
         settings = make_settings(str(root_path))
         server, task, runtime_dir = await _start_server(settings.runtime_dir)
@@ -1565,7 +1578,7 @@ async def test_ensure_daemon_client_reuses_healthy_daemon() -> None:
 
 @pytest.mark.asyncio
 async def test_daemon_client_surfaces_stream_errors() -> None:
-    with tempfile.TemporaryDirectory(prefix="lfd-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         server, task, runtime_dir = await _start_server(
             Path(root) / "runtime",
             service=_FailingStreamService(),
@@ -1911,7 +1924,7 @@ def test_stop_daemon_sends_sigterm_waits_and_cleans(monkeypatch, tmp_path) -> No
         is_healthy=False,
     )
     states = [running, stopped]
-    signals: list[int] = []
+    signals: list = []
 
     def discover(runtime_dir):
         return states.pop(0) if states else stopped
@@ -1929,7 +1942,7 @@ def test_stop_daemon_sends_sigterm_waits_and_cleans(monkeypatch, tmp_path) -> No
     assert result.stopped is True
     assert result.signal_sent is True
     assert result.stale_cleaned is True
-    assert signals == [lifecycle_module.signal.SIGTERM]
+    assert signals == [lifecycle_module.DaemonSignal.SIGTERM]
 
 
 def test_stop_daemon_force_escalates_after_timeout(monkeypatch, tmp_path) -> None:
@@ -1942,7 +1955,7 @@ def test_stop_daemon_force_escalates_after_timeout(monkeypatch, tmp_path) -> Non
         is_running=True,
         is_healthy=False,
     )
-    signals: list[int] = []
+    signals: list = []
 
     monkeypatch.setattr(lifecycle_module.DaemonInfo, "discover", staticmethod(lambda runtime_dir: running))
     monkeypatch.setattr(lifecycle_module, "send_signal", lambda runtime_dir, sig: signals.append(sig) or True)
@@ -1958,7 +1971,7 @@ def test_stop_daemon_force_escalates_after_timeout(monkeypatch, tmp_path) -> Non
     assert result.stopped is False
     assert result.timed_out is True
     assert result.forced is True
-    assert signals == [lifecycle_module.signal.SIGTERM, lifecycle_module.signal.SIGKILL]
+    assert signals == [lifecycle_module.DaemonSignal.SIGTERM, lifecycle_module.DaemonSignal.SIGKILL]
 
 
 def test_stop_daemon_narrates_progress(monkeypatch, tmp_path) -> None:

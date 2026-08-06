@@ -114,7 +114,7 @@ def test_terminal_disabled_by_default() -> None:
 def test_terminal_session_lifecycle() -> None:
     ts.set_terminal_sessions_enabled(True)
     try:
-        opened = _run(terminal_open({"shell": "/bin/sh"}))
+        opened = _run(terminal_open({}))
         assert opened["ok"] is True
         sid = opened["session_id"]
 
@@ -151,10 +151,10 @@ def test_terminal_send_unknown_session() -> None:
 def test_terminal_max_sessions(monkeypatch) -> None:
     ts.set_terminal_sessions_enabled(True)
     monkeypatch.setattr(ts, "_MAX_SESSIONS", 1)
-    opened = _run(terminal_open({"shell": "/bin/sh"}))
+    opened = _run(terminal_open({}))
     try:
         assert opened["ok"] is True
-        second = _run(terminal_open({"shell": "/bin/sh"}))
+        second = _run(terminal_open({}))
         assert second["ok"] is False and second["failure_code"] == "too_many_sessions"
     finally:
         _run(terminal_close({"session_id": opened["session_id"]}))

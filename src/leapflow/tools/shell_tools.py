@@ -14,9 +14,8 @@ import logging
 import os
 import re
 import shlex
-import signal
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Protocol, runtime_checkable
+from typing import Any, Dict, FrozenSet, Optional, Protocol, runtime_checkable
 
 from leapflow.tools.execution_context import (
     current_tool_context,
@@ -25,6 +24,7 @@ from leapflow.tools.execution_context import (
     resolve_workspace_path,
     workspace_scope_error,
 )
+from leapflow.utils.process_group import ProcessGroup
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +271,13 @@ async def shell_run(params: Dict[str, Any]) -> Dict[str, Any]:
             cwd=cwd,
             start_new_session=True,
         )
+        # Attach immediately so the shell's descendants inherit group membership
+        # and a timeout can kill the whole tree, not just the shell itself.
+        try:
+            group: Optional[ProcessGroup] = ProcessGroup()
+            group.attach(proc.pid)
+        except OSError:
+            group = None
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
             proc.communicate(), timeout=timeout,
         )
@@ -300,12 +307,15 @@ async def shell_run(params: Dict[str, Any]) -> Dict[str, Any]:
             result["error"] = detail[-800:] if detail else f"Command failed with exit code {proc.returncode}"
         return result
     except asyncio.TimeoutError:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)  # type: ignore[possibly-undefined]
-        except (ProcessLookupError, OSError):
+        # Kill the whole tree: leaving the shell's children running would leak
+        # the very work that timed out.
+        from leapflow.daemon.lifecycle import DaemonSignal
+
+        killed = group is not None and group.terminate(DaemonSignal.SIGKILL.value)
+        if not killed:
             try:
                 proc.kill()  # type: ignore[possibly-undefined]
-            except ProcessLookupError:
+            except (ProcessLookupError, OSError):
                 pass
         return {"ok": False, "error": f"Command timed out after {timeout}s"}
     except Exception as e:
