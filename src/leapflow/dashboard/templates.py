@@ -19,6 +19,7 @@ _INDEX_RE = re.compile(r"^(.*?)\[(\d+)\]$")
 _FULL_RE = re.compile(r"^\{\{\s*(.+?)\s*\}\}$")
 _PART_RE = re.compile(r"\{\{\s*(.+?)\s*\}\}")
 _TEMPLATE_ID_RE = re.compile(r"[^a-z0-9._-]+")
+_ALWAYS_HIDDEN_TEMPLATE_NAMES = frozenset({"finance", "research", "sentiment"})
 
 
 def sanitize_template_id(raw: str) -> str:
@@ -197,11 +198,17 @@ class TemplateLibrary:
         return sorted(found)
 
     def visible_names(self) -> list[str]:
-        """Return template names excluding those marked hidden: true."""
+        """Return template names excluding templates hidden from navigation."""
         return [name for name in self.names() if not self._is_hidden(name)]
 
+    def hidden_names(self) -> list[str]:
+        """Return template names that must not appear in navigation."""
+        return [name for name in self.names() if self._is_hidden(name)]
+
     def _is_hidden(self, name: str) -> bool:
-        """Check whether a template declares hidden: true."""
+        """Check whether a template is hidden from the navigation switcher."""
+        if name in _ALWAYS_HIDDEN_TEMPLATE_NAMES:
+            return True
         raw = self.load(name)
         if raw is None:
             return False

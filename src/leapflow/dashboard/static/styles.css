@@ -61,7 +61,11 @@ body {
   margin: 2px 0 14px; padding-bottom: 8px; border-bottom: 2px solid var(--ink);
 }
 
-/* ── Sections (Swiss numeric index + uppercase label) ────────────────────── */
+/* Title controls are scoped to the heading only. They must never turn the page
+   container into a flex row, or the dashboard columns collapse sideways. */
+.page-title.with-actions, .section-title.with-actions { display: flex; align-items: center; gap: 6px; }
+.page-title.with-actions .refresh-btn, .section-title.with-actions .refresh-btn { margin-inline-start: auto; }
+
 .section { margin-bottom: 18px; }
 .section-title {
   color: var(--ink); font-size: 0.85rem; letter-spacing: .13em; text-transform: uppercase;
@@ -76,11 +80,15 @@ body {
 
 /* ── Layout primitives (dense modular grid) ──────────────────────────────── */
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 9px; align-items: start; }
+.grid > * { min-width: 0; }
 .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .span-2 { grid-column: span 2; }
 .span-3 { grid-column: span 3; }
+@media (max-width: 1100px) {
+  .grid.cols-3, .grid.cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 760px) {
   .grid, .grid[class*="cols-"] { grid-template-columns: 1fr; }
   [class*="span-"] { grid-column: auto; }
@@ -180,9 +188,9 @@ body {
 .progress-fill { display: block; height: 100%; background: var(--accent); border-radius: 0; }
 
 /* ── Tables (dense academic rules + tabular figures) ─────────────────────── */
-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-.data-table { font-size: 0.85rem; }
-th, td { text-align: left; padding: 3px 7px; border-bottom: 1px solid var(--line); }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; font-variant-numeric: tabular-nums; }
+.data-table { font-size: 0.85rem; min-width: 0; }
+th, td { text-align: left; padding: 3px 7px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
 thead th { border-bottom: 1.5px solid var(--ink); }
 th { color: var(--muted); font-weight: 600; font-size: 0.81rem; letter-spacing: .04em; text-transform: uppercase; position: sticky; top: 0; background: var(--panel); }
 caption { caption-side: top; text-align: left; color: var(--muted); font-size: 0.81rem; padding-bottom: 5px; }

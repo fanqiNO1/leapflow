@@ -15,6 +15,7 @@
   const browserLocale = (navigator.language || "en").slice(0, 2).toLowerCase();
   let locale = storedLocale || (["en", "zh", "fr", "es", "ar", "ru"].includes(browserLocale) ? browserLocale : "en");
   let current = { template: params.get("template") || "" };
+  const HIDDEN_NAV_TEMPLATES = new Set(["finance", "research", "sentiment"]);
   let figSeq = 0;  // academic figure counter, reset each render()
   let tblSeq = 0;  // academic table counter, reset each render()
 
@@ -43,20 +44,18 @@
 
   function injectSignalRefreshBtn() {
     if (getCurrentTemplate() !== "signals") return;
-    // Find the page title or first section title to attach the button
+    // Find the page title or first section title to attach the controls.
     var title = rootEl.querySelector(".page-title") || rootEl.querySelector(".section-title");
     if (!title) return;
-    // Avoid duplicates
-    var header = title.parentElement || title;
+    // Avoid duplicates; controls belong to the title node, never the page
+    // container, so the page keeps its vertical document flow.
+    var header = title;
     if (header.querySelector(".refresh-btn")) return;
-    // Make the header a flex row so the button sits at the far right
-    header.style.display = "flex";
-    header.style.alignItems = "center";
+    header.classList.add("with-actions");
     var btn = document.createElement("button");
     btn.className = "refresh-btn";
     btn.textContent = "\u21bb";  // ↻
     btn.title = "Refresh signal metrics";
-    btn.style.marginLeft = "auto";
     btn.addEventListener("click", function () {
       btn.disabled = true;
       btn.classList.add("refreshing");
@@ -130,7 +129,15 @@
   function renderNav(meta) {
     const nav = document.getElementById("nav");
     if (!nav) return;
-    const names = Array.isArray(meta.templates) ? meta.templates : [];
+    const hidden = new Set(Array.isArray(meta.hidden_templates) ? meta.hidden_templates : []);
+    HIDDEN_NAV_TEMPLATES.forEach((name) => hidden.add(name));
+    const seen = new Set();
+    const names = (Array.isArray(meta.templates) ? meta.templates : []).filter((name) => {
+      name = String(name || "");
+      if (!name || hidden.has(name) || seen.has(name)) return false;
+      seen.add(name);
+      return true;
+    });
     const active = meta.active_template || "";
     nav.innerHTML = "";
     names.forEach((name) => {

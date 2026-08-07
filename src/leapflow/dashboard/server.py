@@ -118,7 +118,9 @@ class DashboardServer:
             return web.Response(status=401, text="missing or invalid token")
         index = STATIC_DIR / "index.html"
         if index.exists():
-            return web.FileResponse(index)
+            response = web.FileResponse(index)
+            response.headers["Cache-Control"] = "no-store"
+            return response
         return web.Response(text="<h1>LeapFlow dashboard</h1>", content_type="text/html")
 
     async def _handle_view(self, request: Any) -> Any:

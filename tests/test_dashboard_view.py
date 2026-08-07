@@ -14,9 +14,15 @@ from leapflow.dashboard import (
 
 
 class _FakeProvider:
-    def __init__(self, watches: list[dict], findings: list[dict]) -> None:
+    def __init__(
+        self,
+        watches: list[dict],
+        findings: list[dict],
+        signal_result: dict[str, Any] | None = None,
+    ) -> None:
         self._watches = watches
         self._findings = findings
+        self._signal_result = signal_result or {"metrics": {}, "signal_stream": []}
 
     async def watches(self) -> list[dict[str, Any]]:
         return list(self._watches)
@@ -24,6 +30,9 @@ class _FakeProvider:
     async def findings(self, *, watch_id: str = "", limit: int = 50) -> list[dict[str, Any]]:
         items = [f for f in self._findings if f.get("watch_id") == watch_id] if watch_id else list(self._findings)
         return items[:limit]
+
+    async def signal_metrics(self) -> dict[str, Any]:
+        return dict(self._signal_result)
 
 
 def _flatten(spec: dict) -> list[dict]:
@@ -99,10 +108,67 @@ async def test_builder_exposes_template_switcher_meta() -> None:
     spec = await builder.build(DashboardIntent(template="finance"), _session_provider())
     assert spec["meta"]["active_template"] == "finance"
     assert {"generic", "signals"}.issubset(set(spec["meta"]["templates"]))
-    # Hidden templates must NOT appear in the switcher.
+    # Hidden templates must NOT appear in the switcher, and are exposed as a
+    # client-side deny list so stale/custom metadata cannot re-render them.
     assert "finance" not in spec["meta"]["templates"]
     assert "research" not in spec["meta"]["templates"]
     assert "sentiment" not in spec["meta"]["templates"]
+    assert {"finance", "research", "sentiment"}.issubset(set(spec["meta"]["hidden_templates"]))
+
+
+async def test_builder_signals_template_renders_dense_operational_layout() -> None:
+    builder = DashboardViewBuilder(TemplateLibrary())
+    provider = _FakeProvider(
+        watches=[
+            {"watch_id": "abcdef123", "name": "Session", "domain": "session", "trigger": "every 2m", "state": "armed", "finding_count": 1},
+            {"watch_id": "sig123", "name": "fs-observer", "domain": "signal", "trigger": "event:fs.*", "state": "done", "finding_count": 0},
+        ],
+        findings=[{"finding_id": "f1", "watch_id": "abcdef123", "domain": "session", "title": "analysis", "summary": "s", "severity": "notable"}],
+        signal_result={
+            "metrics": {
+                "event_subscriber_count": 6,
+                "active_trigger_count": 2,
+                "active_watch_count": 1,
+                "recent_findings_count": 1,
+                "signal_buffer_dropped": 3,
+                "composite_source_dropped": 4,
+                "reorder_buffer_pending": 2,
+                "debounce_stats": {"sig123": 5},
+                "trigger_stats": [{"watch_id": "sig123456", "pattern": "fs.*", "triggered": True, "last_event": "fs.modified"}],
+            },
+            "signal_stream": [
+                {"event_type": "fs.modified", "source": "fs"},
+                {"event_type": "gateway.message", "source": "gateway"},
+            ],
+        },
+    )
+
+    spec = await builder.build(DashboardIntent(template="signals"), provider)
+
+    assert spec["meta"]["active_template"] == "signals"
+    flat = _flatten(spec)
+    stats = [n for n in flat if n["type"] == "Stat"]
+    labels = {n["props"]["label"] for n in stats}
+    assert {
+        "Subscribers",
+        "Active triggers",
+        "Active watches",
+        "Stream events",
+        "Recent findings",
+        "Buffer dropped",
+        "Source dropped",
+        "Reorder pending",
+        "Debounced",
+    }.issubset(labels)
+    assert len(stats) >= 9
+    assert any(n["type"] == "Timeline" for n in flat)
+    assert len([n for n in flat if n["type"] == "BarChart"]) >= 2
+    assert any(n["type"] == "Section" and n["props"].get("span") == 2 for n in flat)
+    trigger_table = next(
+        n for n in flat
+        if n["type"] == "Table" and any(c.get("key") == "pattern" for c in n["props"].get("columns", []))
+    )
+    assert trigger_table["props"]["data"][0]["watch"] == "sig12345"
 
 
 # -- ViewHub fan-out ----------------------------------------------------------

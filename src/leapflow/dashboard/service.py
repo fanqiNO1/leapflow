@@ -67,6 +67,41 @@ def select_template(template: str, names: list[str]) -> str:
     return template if template and template in names else "generic"
 
 
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _sum_int_values(value: Any) -> int:
+    if isinstance(value, dict):
+        values = value.values()
+    elif isinstance(value, (list, tuple)):
+        values = value
+    else:
+        return 0
+    return sum(_safe_int(item) for item in values)
+
+
+def _distribution(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        label = str(row.get(key) or "unknown")
+        counts[label] = counts.get(label, 0) + 1
+    return [{"label": label, "value": count} for label, count in sorted(counts.items())]
+
+
+def _event_family(event_type: str) -> str:
+    normalized = str(event_type or "unknown").replace(":", ".")
+    return normalized.split(".", 1)[0] or "unknown"
+
+
+def _short_id(value: Any) -> str:
+    text = str(value or "")
+    return text[:8] if len(text) > 8 else text
+
+
 class DashboardViewBuilder:
     """Assemble ViewSpecs for dashboard intents."""
 
@@ -131,6 +166,7 @@ class DashboardViewBuilder:
             meta = spec.setdefault("meta", {})
             if isinstance(meta, dict):
                 meta["templates"] = self._templates.visible_names()
+                meta["hidden_templates"] = self._templates.hidden_names()
                 meta["active_template"] = name
         return spec
 
@@ -139,21 +175,50 @@ class DashboardViewBuilder:
         metrics_result = await provider.signal_metrics()
         watches = await provider.watches()
         findings = await provider.findings(limit=20)
+        raw_metrics = metrics_result.get("metrics", {}) if isinstance(metrics_result, dict) else metrics_result
+        metrics = dict(raw_metrics or {}) if isinstance(raw_metrics, dict) else {}
+
         # Use the raw signal event stream from the daemon ring buffer.
         raw_stream = metrics_result.get("signal_stream", []) if isinstance(metrics_result, dict) else []
+        stream_events = [dict(evt) for evt in raw_stream if isinstance(evt, dict)]
         signal_stream = [
             {
                 "title": str(evt.get("event_type", "")),
                 "summary": str(evt.get("source", "")),
                 "severity": "info",
             }
-            for evt in raw_stream
-        ] if raw_stream else None
+            for evt in stream_events
+        ] if stream_events else None
+
+        debounce_total = _sum_int_values(metrics.get("debounce_stats"))
+        metrics["total_debounced"] = debounce_total
+        metrics["signal_stream_count"] = len(stream_events)
+        metrics["total_drop_count"] = (
+            _safe_int(metrics.get("signal_buffer_dropped"))
+            + _safe_int(metrics.get("composite_source_dropped"))
+        )
+
+        trigger_rows = []
+        for trigger in metrics.get("trigger_stats") or []:
+            if not isinstance(trigger, dict):
+                continue
+            trigger_rows.append({
+                "watch": _short_id(trigger.get("watch_id")),
+                "pattern": str(trigger.get("pattern") or ""),
+                "triggered": "yes" if trigger.get("triggered") else "no",
+                "last_event": str(trigger.get("last_event") or ""),
+            })
+
+        event_family_rows = [{"family": _event_family(str(evt.get("event_type") or ""))} for evt in stream_events]
         data = {
-            "signal_metrics": metrics_result.get("metrics", {}) if isinstance(metrics_result, dict) else metrics_result,
+            "signal_metrics": metrics,
             "signal_stream": signal_stream,
             "watches": watches if watches else None,
             "findings": findings if findings else None,
+            "trigger_rows": trigger_rows,
+            "event_family_distribution": _distribution(event_family_rows, "family") if event_family_rows else None,
+            "watch_state_distribution": _distribution(watches, "state") if watches else None,
+            "finding_severity_distribution": _distribution(findings, "severity") if findings else None,
         }
         name = select_template(template, self._templates.names())
         spec = self._templates.render(name, data)
@@ -161,6 +226,7 @@ class DashboardViewBuilder:
             meta = spec.setdefault("meta", {})
             if isinstance(meta, dict):
                 meta["templates"] = self._templates.visible_names()
+                meta["hidden_templates"] = self._templates.hidden_names()
                 meta["active_template"] = name
         return spec
 
