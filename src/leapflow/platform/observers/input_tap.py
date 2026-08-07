@@ -224,6 +224,7 @@ class InputTapObserver:
                     "mouse_x": int(loc.x),
                     "mouse_y": int(loc.y),
                     "timestamp": time.time(),
+                    "_mono_ts": time.monotonic(),
                 }
                 self._schedule_emit(payload)
 
@@ -236,6 +237,7 @@ class InputTapObserver:
                     "app_bundle_id": "",
                     "key_code": int(keycode),
                     "timestamp": time.time(),
+                    "_mono_ts": time.monotonic(),
                 }
                 self._schedule_emit(payload)
 
@@ -253,6 +255,7 @@ class InputTapObserver:
                     "mouse_x": int(loc.x),
                     "mouse_y": int(loc.y),
                     "timestamp": time.time(),
+                    "_mono_ts": time.monotonic(),
                 }
                 self._schedule_emit(payload)
 
@@ -308,6 +311,7 @@ class InputTapObserver:
             "mouse_x": int(x),
             "mouse_y": int(y),
             "timestamp": time.time(),
+            "_mono_ts": time.monotonic(),
         }
         self._schedule_emit(payload)
 
@@ -326,6 +330,7 @@ class InputTapObserver:
             "mouse_x": int(x),
             "mouse_y": int(y),
             "timestamp": time.time(),
+            "_mono_ts": time.monotonic(),
         }
         self._schedule_emit(payload)
 
@@ -352,5 +357,6 @@ class InputTapObserver:
             "key_code": key_code,
             "char": key_str,
             "timestamp": time.time(),
+            "_mono_ts": time.monotonic(),
         }
         self._schedule_emit(payload)

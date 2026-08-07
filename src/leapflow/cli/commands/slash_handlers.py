@@ -1357,11 +1357,12 @@ def _execute_board_status(ctx: "Context", monitors: Any) -> dict[str, Any]:
       - ``templates`` / ``default``: available lenses and the default.
       - ``watches``: every watch with state, run/finding counts, and last-run age.
       - ``findings``: recent findings (severity, title, summary, age) across watches.
+      - ``signal_flow``: real-time signal health metrics (if available).
     """
     library = _template_library(ctx)
     data: dict[str, Any] = {
         "ok": True, "view": "dashboard", "mode": "status",
-        "templates": library.names(), "default": "generic",
+        "templates": library.visible_names(), "default": "generic",
         "watches": [], "findings": [],
     }
     if monitors is None:
@@ -1374,6 +1375,27 @@ def _execute_board_status(ctx: "Context", monitors: Any) -> dict[str, Any]:
         data["findings"] = [f.to_dict() for f in monitors.list_findings(limit=20)]
     except Exception:
         logger.debug("dashboard: finding list unavailable", exc_info=True)
+
+    # Signal flow health metrics (best-effort, non-blocking)
+    try:
+        from leapflow.monitor.signal_metrics import SignalMetricsCollector
+
+        collector = SignalMetricsCollector()
+        event_bus = getattr(ctx, "event_bus", None)
+        snapshot = collector.collect(
+            event_bus=event_bus,
+            monitor_manager=monitors,
+        )
+        data["signal_flow"] = {
+            "event_subscriber_count": snapshot.event_subscriber_count,
+            "active_trigger_count": snapshot.active_trigger_count,
+            "signal_buffer_dropped": snapshot.signal_buffer_dropped,
+            "active_watch_count": snapshot.active_watch_count,
+            "recent_findings_count": snapshot.recent_findings_count,
+        }
+    except Exception:
+        logger.debug("dashboard: signal metrics unavailable", exc_info=True)
+
     return data
 
 
@@ -1386,7 +1408,7 @@ def _execute_board_templates(ctx: "Context", rest_tokens: list[str]) -> dict[str
     args = rest_tokens[1:]
 
     if op == "list":
-        items = [library.describe(name) or {"name": name} for name in library.names()]
+        items = [library.describe(name) or {"name": name} for name in library.visible_names()]
         return {"ok": True, "view": "dashboard", "mode": "templates",
                 "templates": items, "default": "generic"}
 

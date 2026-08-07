@@ -282,6 +282,16 @@ class DaemonClient:
         """Ensure a session-analysis watch and run one analysis cycle now."""
         return dict(await self.request("session.analyze") or {})
 
+    async def signal_record(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Inject a signal event into the daemon's EventBus."""
+        return dict(await self.request(
+            "signal.record", {"signal_data": {"type": event_type, "payload": payload}},
+        ) or {})
+
+    async def monitor_signal_metrics(self) -> dict[str, Any]:
+        """Fetch signal flow metrics from daemon."""
+        return dict(await self.request("monitor.signal_metrics") or {})
+
     async def shutdown(self) -> None:
         """Request graceful daemon shutdown."""
         await self.request("daemon.shutdown")

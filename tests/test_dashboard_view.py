@@ -94,10 +94,15 @@ async def test_builder_unknown_template_falls_back_to_generic() -> None:
 
 async def test_builder_exposes_template_switcher_meta() -> None:
     # The web client renders its lens switcher from this meta (no hardcoding).
+    # Only visible (non-hidden) templates appear in the switcher.
     builder = DashboardViewBuilder(TemplateLibrary())
     spec = await builder.build(DashboardIntent(template="finance"), _session_provider())
     assert spec["meta"]["active_template"] == "finance"
-    assert {"generic", "finance", "sentiment", "research"}.issubset(set(spec["meta"]["templates"]))
+    assert {"generic", "signals"}.issubset(set(spec["meta"]["templates"]))
+    # Hidden templates must NOT appear in the switcher.
+    assert "finance" not in spec["meta"]["templates"]
+    assert "research" not in spec["meta"]["templates"]
+    assert "sentiment" not in spec["meta"]["templates"]
 
 
 # -- ViewHub fan-out ----------------------------------------------------------

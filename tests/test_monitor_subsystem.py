@@ -242,3 +242,98 @@ async def test_sweep_client_coupled_watches_is_noop_without_session_watches(tmp_
     await manager.arm_watch(WatchSpec(name="F", domain="finance"))
     assert manager.sweep_client_coupled_watches() == 0
     assert len(manager.list_watches()) == 1
+
+
+# ── Event trigger expression tests ────────────────────────────────────────────
+
+import pytest
+
+from leapflow.scheduler.coordinator import parse_trigger_expression
+from leapflow.scheduler.triggers import create_trigger
+from leapflow.scheduler.triggers.event import EventTrigger
+
+
+def test_parse_event_trigger_fs_change() -> None:
+    """event:fs.change parses to trigger_type='event' with correct pattern."""
+    trigger_type, trigger_config = parse_trigger_expression("event:fs.change")
+    assert trigger_type == "event"
+    assert trigger_config == {"event_pattern": "fs.change"}
+
+    # Verify the config creates a valid EventTrigger
+    trigger = create_trigger(trigger_type, trigger_config)
+    assert isinstance(trigger, EventTrigger)
+    assert trigger.event_pattern == "fs.change"
+
+
+def test_parse_event_trigger_wildcard_pattern() -> None:
+    """event:monitor.* parses correctly and supports glob matching."""
+    trigger_type, trigger_config = parse_trigger_expression("event:monitor.*")
+    assert trigger_type == "event"
+    assert trigger_config == {"event_pattern": "monitor.*"}
+
+    trigger = create_trigger(trigger_type, trigger_config)
+    assert isinstance(trigger, EventTrigger)
+    assert trigger.event_pattern == "monitor.*"
+    # Glob matching works
+    assert trigger.matches("monitor.cpu") is True
+    assert trigger.matches("monitor.mem") is True
+    assert trigger.matches("fs.change") is False
+
+
+def test_parse_event_trigger_gateway_signal() -> None:
+    """event:gateway.signal parses correctly."""
+    trigger_type, trigger_config = parse_trigger_expression("event:gateway.signal")
+    assert trigger_type == "event"
+    assert trigger_config == {"event_pattern": "gateway.signal"}
+
+    trigger = create_trigger(trigger_type, trigger_config)
+    assert isinstance(trigger, EventTrigger)
+    assert trigger.event_pattern == "gateway.signal"
+
+
+def test_parse_event_trigger_empty_pattern_raises() -> None:
+    """event: with empty pattern raises ValueError."""
+    with pytest.raises(ValueError, match="event name"):
+        parse_trigger_expression("event:")
+
+
+def test_parse_event_trigger_whitespace_only_raises() -> None:
+    """event: followed by whitespace only raises ValueError."""
+    with pytest.raises(ValueError, match="event name"):
+        parse_trigger_expression("event:   ")
+
+
+def test_parse_event_trigger_case_insensitive_prefix() -> None:
+    """The 'event:' prefix is recognized case-insensitively."""
+    trigger_type, trigger_config = parse_trigger_expression("Event:ci.passed")
+    assert trigger_type == "event"
+    assert trigger_config == {"event_pattern": "ci.passed"}
+
+    trigger_type2, trigger_config2 = parse_trigger_expression("EVENT:deploy.done")
+    assert trigger_type2 == "event"
+    assert trigger_config2 == {"event_pattern": "deploy.done"}
+
+
+async def test_arm_watch_with_event_trigger_registers_bridge(tmp_path: Path) -> None:
+    """arm_watch with event trigger registers the trigger in EventBridge."""
+    manager = MonitorManager(holder=_holder(tmp_path))
+    view = await manager.arm_watch(
+        WatchSpec(name="FSWatch", domain="filesystem", trigger_expr="event:fs.change")
+    )
+    assert view.state == "armed"
+    # Verify EventBridge has registered this watch
+    assert manager.event_bridge.active_count == 1
+
+
+async def test_arm_watch_with_event_trigger_glob_pattern(tmp_path: Path) -> None:
+    """arm_watch with glob event pattern registers correctly."""
+    manager = MonitorManager(holder=_holder(tmp_path))
+    view = await manager.arm_watch(
+        WatchSpec(name="AllMonitor", domain="monitor", trigger_expr="event:monitor.*")
+    )
+    assert view.state == "armed"
+    assert manager.event_bridge.active_count == 1
+
+    # Stop removes from bridge
+    manager.stop_watch(view.watch_id)
+    assert manager.event_bridge.active_count == 0

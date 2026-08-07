@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 @runtime_checkable
 class DashboardDataProvider(Protocol):
-    """Read-only data access the builder needs (watches and findings)."""
+    """Read-only data access the builder needs (watches, findings, signal metrics)."""
 
     async def watches(self) -> list[dict[str, Any]]:
         """Return all watch views."""
@@ -28,6 +28,10 @@ class DashboardDataProvider(Protocol):
 
     async def findings(self, *, watch_id: str = "", limit: int = 50) -> list[dict[str, Any]]:
         """Return findings, optionally scoped to a watch."""
+        ...
+
+    async def signal_metrics(self) -> dict[str, Any]:
+        """Return signal flow health metrics."""
         ...
 
 
@@ -42,6 +46,16 @@ class DaemonDataProvider:
 
     async def findings(self, *, watch_id: str = "", limit: int = 50) -> list[dict[str, Any]]:
         return list(await self._client.watch_findings(watch_id=watch_id, limit=limit))
+
+    async def signal_metrics(self) -> dict[str, Any]:
+        """Return signal flow health metrics and live stream from the daemon."""
+        result = await self._client.monitor_signal_metrics()
+        if result.get("ok"):
+            return {
+                "metrics": result.get("metrics", {}),
+                "signal_stream": result.get("signal_stream", []),
+            }
+        return {"metrics": {}, "signal_stream": []}
 
 
 def select_template(template: str, names: list[str]) -> str:
@@ -65,6 +79,9 @@ class DashboardViewBuilder:
         LeapBoard has one analysis target (the current session); the intent only
         carries which template lens to render it with.
         """
+        template_name = intent.template
+        if template_name == "signals":
+            return await self._build_signals(template_name, provider)
         return await self._build_session(intent.template, provider)
 
     async def _build_session(self, template: str, provider: DashboardDataProvider) -> dict[str, Any]:
@@ -113,7 +130,37 @@ class DashboardViewBuilder:
         if isinstance(spec, dict):
             meta = spec.setdefault("meta", {})
             if isinstance(meta, dict):
-                meta["templates"] = self._templates.names()
+                meta["templates"] = self._templates.visible_names()
+                meta["active_template"] = name
+        return spec
+
+    async def _build_signals(self, template: str, provider: DashboardDataProvider) -> dict[str, Any]:
+        """Build signal flow observation view."""
+        metrics_result = await provider.signal_metrics()
+        watches = await provider.watches()
+        findings = await provider.findings(limit=20)
+        # Use the raw signal event stream from the daemon ring buffer.
+        raw_stream = metrics_result.get("signal_stream", []) if isinstance(metrics_result, dict) else []
+        signal_stream = [
+            {
+                "title": str(evt.get("event_type", "")),
+                "summary": str(evt.get("source", "")),
+                "severity": "info",
+            }
+            for evt in raw_stream
+        ] if raw_stream else None
+        data = {
+            "signal_metrics": metrics_result.get("metrics", {}) if isinstance(metrics_result, dict) else metrics_result,
+            "signal_stream": signal_stream,
+            "watches": watches if watches else None,
+            "findings": findings if findings else None,
+        }
+        name = select_template(template, self._templates.names())
+        spec = self._templates.render(name, data)
+        if isinstance(spec, dict):
+            meta = spec.setdefault("meta", {})
+            if isinstance(meta, dict):
+                meta["templates"] = self._templates.visible_names()
                 meta["active_template"] = name
         return spec
 

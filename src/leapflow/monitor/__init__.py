@@ -7,6 +7,7 @@ Public surface:
 - ``MonitorManager`` orchestrating watch lifecycle, persistence, and push
 """
 
+from leapflow.monitor.event_bridge import EventBridge
 from leapflow.monitor.finding_store import FindingStore
 from leapflow.monitor.manager import EmitFn, MonitorManager
 from leapflow.monitor.producers import ProducerRegistry
@@ -16,6 +17,7 @@ from leapflow.monitor.session_producer import (
     ensure_session_watch,
     session_watch_params,
 )
+from leapflow.monitor.signal_producer import SignalObservationProducer
 from leapflow.monitor.types import (
     EVENT_ERROR,
     EVENT_FINDING,
@@ -33,6 +35,7 @@ from leapflow.monitor.types import (
 )
 
 __all__ = [
+    "EventBridge",
     "EVENT_FINDING",
     "EVENT_WATCH_STATE",
     "EVENT_ERROR",
@@ -52,6 +55,7 @@ __all__ = [
     "EmitFn",
     "SessionAnalysisProducer",
     "SessionAnalysisServices",
+    "SignalObservationProducer",
     "ensure_session_watch",
     "session_watch_params",
 ]

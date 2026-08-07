@@ -155,7 +155,11 @@ async def test_board_status_and_templates_are_discoverable(tmp_path: Path) -> No
     templates = await command_execute(ctx, "board templates", "")
     assert templates["mode"] == "templates"
     names = {t["name"] for t in templates["templates"]}
-    assert {"generic", "finance", "sentiment", "research"}.issubset(names)
+    # Only visible (non-hidden) templates are listed.
+    assert {"generic", "signals"}.issubset(names)
+    assert "finance" not in names
+    assert "research" not in names
+    assert "sentiment" not in names
 
 
 async def test_board_refresh_reanalyzes_session(tmp_path: Path) -> None:

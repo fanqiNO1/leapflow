@@ -196,6 +196,17 @@ class TemplateLibrary:
                     found.add(path.stem)
         return sorted(found)
 
+    def visible_names(self) -> list[str]:
+        """Return template names excluding those marked hidden: true."""
+        return [name for name in self.names() if not self._is_hidden(name)]
+
+    def _is_hidden(self, name: str) -> bool:
+        """Check whether a template declares hidden: true."""
+        raw = self.load(name)
+        if raw is None:
+            return False
+        return bool(raw.get("hidden"))
+
     def load(self, name: str) -> Optional[dict[str, Any]]:
         """Load a raw template dict by name, or None when not found."""
         import yaml

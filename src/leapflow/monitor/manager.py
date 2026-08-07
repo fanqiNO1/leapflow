@@ -15,6 +15,7 @@ import time
 from dataclasses import replace
 from typing import Any, Callable, List, Optional
 
+from leapflow.monitor.event_bridge import EventBridge
 from leapflow.monitor.finding_store import FindingStore
 from leapflow.monitor.producers import ProducerRegistry
 from leapflow.monitor.types import (
@@ -33,6 +34,7 @@ from leapflow.monitor.types import (
 from leapflow.scheduler.coordinator import TaskCoordinator
 from leapflow.scheduler.local_scheduler import LocalScheduler
 from leapflow.scheduler.store import TaskStore
+from leapflow.scheduler.triggers.event import EventTrigger
 from leapflow.scheduler.types import ArmedTask, TaskState
 
 logger = logging.getLogger(__name__)
@@ -191,6 +193,7 @@ class MonitorManager:
             cloud_dispatcher=None,
             default_tier="local",
         )
+        self._event_bridge = EventBridge(scheduler_wake=self._scheduler.wake)
         self._started = False
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
@@ -209,6 +212,11 @@ class MonitorManager:
             return
         await self._scheduler.stop()
         self._started = False
+
+    @property
+    def event_bridge(self) -> EventBridge:
+        """Expose the event bridge for external EventBus subscription."""
+        return self._event_bridge
 
     @property
     def finding_store(self) -> FindingStore:
@@ -237,6 +245,13 @@ class MonitorManager:
             METADATA_CLIENT_COUPLED_KEY: bool(spec.client_coupled),
         }
         self._task_store.save(task)
+
+        # Register event trigger with the bridge for instant activation
+        if task.trigger_type == "event":
+            trigger_cfg = task.trigger_config if isinstance(task.trigger_config, dict) else {}
+            event_trigger = EventTrigger.deserialize(trigger_cfg)
+            self._event_bridge.register(task.task_id, event_trigger)
+
         self._emit_state(task)
         return self._to_view(task)
 
@@ -300,6 +315,7 @@ class MonitorManager:
 
     def stop_watch(self, watch_id: str) -> Optional[WatchView]:
         """Terminally stop a watch (kept for history)."""
+        self._event_bridge.unregister(watch_id)
         return self._transition(watch_id, TaskState.DONE.value)
 
     def set_muted(self, watch_id: str, muted: bool) -> Optional[WatchView]:

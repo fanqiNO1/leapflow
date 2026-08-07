@@ -216,3 +216,23 @@ button:hover { border-color: var(--accent); color: var(--accent); }
 }
 .toast.sev-alert { border-left-color: var(--alert); }
 .toast.sev-notable { border-left-color: var(--notable); }
+
+/* ── Signal refresh button + counter badge ──────────────────────────────────────── */
+.refresh-btn {
+  background: none; border: 1px solid var(--line); border-radius: 0;
+  cursor: pointer; font-size: 0.82rem; margin-inline-start: 6px;
+  padding: 1px 5px; color: var(--muted); vertical-align: middle;
+  transition: border-color .15s, color .15s, opacity .15s;
+  line-height: 1;
+}
+.refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
+.refresh-btn:disabled, .refresh-btn.refreshing {
+  opacity: .45; cursor: default; pointer-events: none;
+}
+.refresh-btn.refreshing { animation: spin-once .5s linear; }
+@keyframes spin-once { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.signal-counter-badge {
+  display: inline-block; margin-inline-start: 5px; padding: 1px 5px;
+  border: 1px solid var(--line); font-size: 0.7rem; font-variant-numeric: tabular-nums;
+  color: var(--muted); vertical-align: middle;
+}

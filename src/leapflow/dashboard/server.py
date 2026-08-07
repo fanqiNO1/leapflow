@@ -29,7 +29,7 @@ from leapflow.monitor.types import EVENT_ERROR, EVENT_FINDING, EVENT_HEARTBEAT, 
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
-_MONITOR_EVENTS = frozenset({EVENT_FINDING, EVENT_WATCH_STATE, EVENT_ERROR, EVENT_HEARTBEAT})
+_MONITOR_EVENTS = frozenset({EVENT_FINDING, EVENT_WATCH_STATE, EVENT_ERROR, EVENT_HEARTBEAT, "signal.stream"})
 # Only these RPCs may be triggered by browser actions (least privilege).
 _ALLOWED_RPC = frozenset({"watch.pause", "watch.resume", "watch.stop", "watch.refresh", "watch.mute"})
 # Exact loopback hosts accepted in the Origin header (see _check_origin).

@@ -129,6 +129,7 @@ class FileSystemObserver:
             "path": path,
             "action": action,
             "is_dir": is_dir,
+            "_mono_ts": time.monotonic(),
         }
         # Schedule coroutine from watchdog's thread
         asyncio.run_coroutine_threadsafe(

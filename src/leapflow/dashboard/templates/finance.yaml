@@ -1,5 +1,6 @@
 template: finance
 version: 1
+hidden: true
 title: "{{ title }}"
 domain: finance
 meta:

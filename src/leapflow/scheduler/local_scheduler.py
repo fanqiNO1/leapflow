@@ -44,6 +44,8 @@ class LocalScheduler:
         self._grace_seconds = grace_seconds
         self._task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
         self._running = False
+        self._wake_event: asyncio.Event = asyncio.Event()
+        self._last_wake_time: float = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -90,6 +92,19 @@ class LocalScheduler:
     # Tick loop
     # ------------------------------------------------------------------
 
+    def wake(self) -> None:
+        """Signal the scheduler to check for due tasks immediately.
+
+        Called by EventBridge when an event-driven trigger fires,
+        reducing latency from poll-interval to near-zero.
+        Thread-safe: asyncio.Event.set() is safe to call from any thread.
+        """
+        now = time.monotonic()
+        if now - self._last_wake_time < 1.0:
+            return
+        self._last_wake_time = now
+        self._wake_event.set()
+
     async def _tick_loop(self) -> None:
         """Background loop: check and execute due tasks every tick."""
         while self._running:
@@ -97,7 +112,12 @@ class LocalScheduler:
                 await self._tick()
             except Exception as e:
                 logger.error("Scheduler tick error: %s", e, exc_info=True)
-            await asyncio.sleep(self._tick_seconds)
+            # Wait for either the tick interval or an external wake signal
+            try:
+                await asyncio.wait_for(self._wake_event.wait(), timeout=self._tick_seconds)
+            except asyncio.TimeoutError:
+                pass
+            self._wake_event.clear()
 
     async def _tick(self) -> None:
         """Single tick: find due tasks, advance, execute."""

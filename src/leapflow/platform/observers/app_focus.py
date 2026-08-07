@@ -98,6 +98,7 @@ class AppFocusObserver:
             "pid": info.get("pid", 0),
             "window_title": info.get("window_title", ""),
             "ts": time.time(),
+            "_mono_ts": time.monotonic(),
         }
         try:
             await self._bus.handle_event(EventTypes.APP_FOCUS_CHANGE, payload)

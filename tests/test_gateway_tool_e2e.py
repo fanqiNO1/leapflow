@@ -994,6 +994,82 @@ async def test_composite_event_source_cleans_child_tasks_on_cancel() -> None:
 
 
 @pytest.mark.asyncio
+async def test_composite_event_source_drop_oldest_on_burst() -> None:
+    """When child sources burst faster than the consumer drains, oldest events
+    are dropped and drop_count is incremented correctly."""
+    from leapflow.gateway.connectors.composite_event_source import CompositeEventSource
+    from leapflow.gateway.connectors.protocol import BackendEvent, EventSourceStatus
+
+    QUEUE_SIZE = 4
+    BURST_SIZE = 10  # more than queue capacity
+
+    class BurstSource:
+        platform_id = "burst"
+        backend_kind = "test"
+
+        async def start(self, *, checkpoint: str = "") -> EventSourceStatus:
+            return EventSourceStatus(ok=True, backend_kind=self.backend_kind)
+
+        async def stop(self) -> EventSourceStatus:
+            return EventSourceStatus(ok=True, backend_kind=self.backend_kind)
+
+        async def status(self) -> EventSourceStatus:
+            return EventSourceStatus(ok=True, backend_kind=self.backend_kind)
+
+        async def events(self):
+            for i in range(BURST_SIZE):
+                yield BackendEvent(
+                    event_id=f"ev_{i}",
+                    event_type="test.burst",
+                    platform_id="burst",
+                    payload={"seq": i},
+                )
+
+    source = BurstSource()
+    composite = CompositeEventSource([source], platform_id="burst", maxsize=QUEUE_SIZE)
+    await composite.start()
+
+    received = []
+    async for event in composite.events():
+        received.append(event)
+
+    # We should have received QUEUE_SIZE events (the queue was drained at the end)
+    # and dropped (BURST_SIZE - QUEUE_SIZE) events.
+    assert composite.drop_count == BURST_SIZE - QUEUE_SIZE
+    assert len(received) == QUEUE_SIZE
+    # The retained events should be the NEWEST ones (drop-oldest strategy).
+    expected_ids = [f"ev_{i}" for i in range(BURST_SIZE - QUEUE_SIZE, BURST_SIZE)]
+    assert [e.event_id for e in received] == expected_ids
+
+
+@pytest.mark.asyncio
+async def test_composite_event_source_drop_count_property() -> None:
+    """drop_count property starts at zero and is publicly accessible."""
+    from leapflow.gateway.connectors.composite_event_source import CompositeEventSource
+    from leapflow.gateway.connectors.protocol import EventSourceStatus
+
+    class EmptySource:
+        platform_id = "empty"
+        backend_kind = "test"
+
+        async def start(self, *, checkpoint: str = "") -> EventSourceStatus:
+            return EventSourceStatus(ok=True, backend_kind=self.backend_kind)
+
+        async def stop(self) -> EventSourceStatus:
+            return EventSourceStatus(ok=True, backend_kind=self.backend_kind)
+
+        async def status(self) -> EventSourceStatus:
+            return EventSourceStatus(ok=True, backend_kind=self.backend_kind)
+
+        async def events(self):
+            return
+            yield  # noqa: unreachable — makes this an async generator
+
+    composite = CompositeEventSource([EmptySource()], platform_id="empty")
+    assert composite.drop_count == 0
+
+
+@pytest.mark.asyncio
 async def test_lark_event_source_kills_identity_subprocess_on_timeout(monkeypatch) -> None:
     import leapflow.gateway.connectors.lark_event_source as lark_event_source
 

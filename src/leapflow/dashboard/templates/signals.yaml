@@ -1,0 +1,90 @@
+# Signal Flow Observation template for LeapBoard
+# Provides real-time visibility into the signal processing pipeline.
+template: signals
+version: 1
+title: "Signal flow"
+domain: signals
+meta:
+  title: "Signal flow"
+  description: "Real-time signal processing pipeline health and live event stream."
+layout:
+  - type: Page
+    props:
+      title: "Signal flow"
+    children:
+      # KPI metric band: signal health at a glance.
+      - type: Row
+        props:
+          variant: metrics
+        children:
+          - type: Stat
+            props:
+              label: "Subscribers"
+              value: "{{ signal_metrics.event_subscriber_count }}"
+          - type: Stat
+            props:
+              label: "Active triggers"
+              value: "{{ signal_metrics.active_trigger_count }}"
+          - type: Stat
+            props:
+              label: "Active watches"
+              value: "{{ signal_metrics.active_watch_count }}"
+          - type: Stat
+            props:
+              label: "Buffer dropped"
+              value: "{{ signal_metrics.signal_buffer_dropped }}"
+          - type: Stat
+            props:
+              label: "Debounced"
+              value: "{{ signal_metrics.total_debounced }}"
+
+      # Live signal stream: recent events rendered as a timeline.
+      - type: Section
+        when: signal_stream
+        props:
+          title: "Live signal stream"
+          subtitle: "Recent events (last 50)"
+        children:
+          - type: Timeline
+            props:
+              bind: signal_stream
+
+      # Watch portfolio: active event-driven monitors.
+      - type: Section
+        when: watches
+        props:
+          title: "Watch portfolio"
+          subtitle: "Active event-driven monitors"
+        children:
+          - type: Table
+            props:
+              bind: watches
+              columns:
+                - key: name
+                  label: "Name"
+                - key: domain
+                  label: "Domain"
+                - key: trigger
+                  label: "Trigger"
+                - key: state
+                  label: "Status"
+                - key: finding_count
+                  label: "Findings"
+
+      # Recent findings: latest observation results.
+      - type: Section
+        when: findings
+        props:
+          title: "Recent findings"
+          subtitle: "Latest observation results"
+        children:
+          - type: Grid
+            children:
+              - type: FindingCard
+                repeat: findings
+                as: f
+                props:
+                  title: "{{ f.title }}"
+                  summary: "{{ f.summary }}"
+                  severity: "{{ f.severity }}"
+                  bind: f

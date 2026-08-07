@@ -1,5 +1,6 @@
 template: research
 version: 1
+hidden: true
 title: "{{ title }}"
 domain: research
 meta:

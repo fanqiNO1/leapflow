@@ -74,6 +74,7 @@ class RuntimeLeapService:
         )
         self._active_engine_request_id: str = ""
         self._active_engines: dict[str, Any] = {}
+        self._observation: Any | None = None
         self._engine_request_ledger: dict[str, dict[str, Any]] = {}
         self._request_ledger_ttl_s = max(1.0, float(getattr(settings, "daemon_request_ledger_ttl_s", 600.0) or 600.0))
         self._request_ledger_max_entries = max(1, int(getattr(settings, "daemon_request_ledger_max_entries", 128) or 128))
@@ -114,6 +115,18 @@ class RuntimeLeapService:
                 request_approval=self._request_approval,
             )
 
+        # Platform observers: start FS/clipboard/focus signal collection
+        if getattr(settings, "observation_enabled", True):
+            event_bus = getattr(ctx, "event_bus", None)
+            if event_bus is not None:
+                try:
+                    from leapflow.platform.observers.daemon import ObservationDaemon
+                    self._observation = ObservationDaemon(bus=event_bus)
+                    await self._observation.start()
+                except Exception:
+                    logger.debug("daemon: observation subsystem start failed", exc_info=True)
+                    self._observation = None
+
     async def shutdown(self) -> None:
         if self._ctx is None:
             return
@@ -140,6 +153,12 @@ class RuntimeLeapService:
             except (asyncio.CancelledError, Exception):
                 pass
         await self._reentry_coordinator.stop()
+        if self._observation is not None:
+            try:
+                await self._observation.stop()
+            except Exception:
+                logger.debug("daemon: observation stop failed", exc_info=True)
+            self._observation = None
         await self._monitor_coordinator.stop()
         checkpoint_open_connection(ctx)
         await ctx.cleanup()
@@ -604,6 +623,21 @@ class RuntimeLeapService:
             if not callable(restart):
                 return {"ok": False, "started": False, "last_error": "host lifecycle is unavailable"}
             return dict(await restart())
+
+    # ── Delegate: signal metrics ──────────────────────────────────────
+
+    async def monitor_signal_metrics(self) -> dict[str, Any]:
+        """Collect real-time signal flow metrics from runtime components."""
+        from leapflow.monitor.signal_metrics import SignalMetricsCollector
+
+        ctx = self._ctx
+        collector = SignalMetricsCollector()
+        snapshot = collector.collect(
+            event_bus=getattr(ctx, "event_bus", None) if ctx else None,
+            monitor_manager=self._monitor_coordinator._monitors,
+        )
+        stream = self._monitor_coordinator.get_signal_stream()
+        return {"ok": True, "metrics": snapshot.to_dict(), "signal_stream": stream}
 
     # ── Delegate: memory / signal ────────────────────────────────────
 
