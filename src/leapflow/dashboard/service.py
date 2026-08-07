@@ -97,6 +97,29 @@ def _event_family(event_type: str) -> str:
     return normalized.split(".", 1)[0] or "unknown"
 
 
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _signal_stream_item(evt: dict[str, Any]) -> dict[str, Any]:
+    event_type = str(evt.get("event_type") or evt.get("type") or "")
+    source = str(evt.get("source") or "")
+    family = _event_family(event_type)
+    timestamp = _safe_float(evt.get("ts") or evt.get("timestamp"))
+    return {
+        "title": event_type,
+        "event_type": event_type,
+        "summary": source,
+        "source": source,
+        "severity": "info",
+        "family": family,
+        "ts": timestamp,
+    }
+
+
 def _short_id(value: Any) -> str:
     text = str(value or "")
     return text[:8] if len(text) > 8 else text
@@ -178,17 +201,13 @@ class DashboardViewBuilder:
         raw_metrics = metrics_result.get("metrics", {}) if isinstance(metrics_result, dict) else metrics_result
         metrics = dict(raw_metrics or {}) if isinstance(raw_metrics, dict) else {}
 
-        # Use the raw signal event stream from the daemon ring buffer.
+        # Use the raw signal event stream from the daemon ring buffer. Sort by
+        # event timestamp descending so "recent" is true on first render; the
+        # frontend still receives the full ring buffer and handles tab/limit UI.
         raw_stream = metrics_result.get("signal_stream", []) if isinstance(metrics_result, dict) else []
         stream_events = [dict(evt) for evt in raw_stream if isinstance(evt, dict)]
-        signal_stream = [
-            {
-                "title": str(evt.get("event_type", "")),
-                "summary": str(evt.get("source", "")),
-                "severity": "info",
-            }
-            for evt in stream_events
-        ] if stream_events else None
+        stream_events.sort(key=lambda evt: _safe_float(evt.get("ts") or evt.get("timestamp")), reverse=True)
+        signal_stream = [_signal_stream_item(evt) for evt in stream_events] or None
 
         debounce_total = _sum_int_values(metrics.get("debounce_stats"))
         metrics["total_debounced"] = debounce_total
@@ -209,7 +228,7 @@ class DashboardViewBuilder:
                 "last_event": str(trigger.get("last_event") or ""),
             })
 
-        event_family_rows = [{"family": _event_family(str(evt.get("event_type") or ""))} for evt in stream_events]
+        event_family_rows = [{"family": str(evt.get("family") or "unknown")} for evt in (signal_stream or [])]
         data = {
             "signal_metrics": metrics,
             "signal_stream": signal_stream,

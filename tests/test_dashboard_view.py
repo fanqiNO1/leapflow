@@ -130,6 +130,7 @@ async def test_builder_signals_template_renders_dense_operational_layout() -> No
                 "active_trigger_count": 2,
                 "active_watch_count": 1,
                 "recent_findings_count": 1,
+                "signal_noise_suppressed": 9,
                 "signal_buffer_dropped": 3,
                 "composite_source_dropped": 4,
                 "reorder_buffer_pending": 2,
@@ -137,8 +138,9 @@ async def test_builder_signals_template_renders_dense_operational_layout() -> No
                 "trigger_stats": [{"watch_id": "sig123456", "pattern": "fs.*", "triggered": True, "last_event": "fs.modified"}],
             },
             "signal_stream": [
-                {"event_type": "fs.modified", "source": "fs"},
-                {"event_type": "gateway.message", "source": "gateway"},
+                {"event_type": "fs.modified", "source": "fs-old", "ts": 100.0},
+                {"event_type": "gateway.message", "source": "gateway-new", "ts": 300.0},
+                {"event_type": "clipboard.change", "source": "clipboard-mid", "ts": 200.0},
             ],
         },
     )
@@ -155,13 +157,27 @@ async def test_builder_signals_template_renders_dense_operational_layout() -> No
         "Active watches",
         "Stream events",
         "Recent findings",
+        "Noise suppressed",
         "Buffer dropped",
         "Source dropped",
         "Reorder pending",
         "Debounced",
     }.issubset(labels)
     assert len(stats) >= 9
-    assert any(n["type"] == "Timeline" for n in flat)
+    signal_widget = next(
+        n for n in flat
+        if n["type"] == "Custom" and n["props"].get("render") == "signalTimeline"
+    )
+    stream = signal_widget["props"]["data"]
+    assert signal_widget["props"]["max_items"] == 12
+    assert [item["event_type"] for item in stream] == [
+        "gateway.message",
+        "clipboard.change",
+        "fs.modified",
+    ]
+    assert [item["family"] for item in stream] == ["gateway", "clipboard", "fs"]
+    assert stream[0]["source"] == "gateway-new"
+    assert stream[0]["ts"] == 300.0
     assert len([n for n in flat if n["type"] == "BarChart"]) >= 2
     assert any(n["type"] == "Section" and n["props"].get("span") == 2 for n in flat)
     trigger_table = next(

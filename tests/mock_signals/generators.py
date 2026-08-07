@@ -56,8 +56,11 @@ class BaseGenerator:
             wait = interval + jitter
             if cfg.burst_interval_s > 0 and cfg.burst_size > 1:
                 wait = cfg.burst_interval_s + jitter
-            # We encode the desired wait in a special sentinel value;
-            # the runner reads ``_wait_hint`` from the payload to schedule.
+            # Cap wait at remaining duration to avoid overshooting the deadline
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            wait = min(wait, remaining)
             yield ("__wait__", {"seconds": wait})
 
     def _make_payload(self) -> Dict[str, Any]:

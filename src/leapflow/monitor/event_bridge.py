@@ -35,6 +35,7 @@ class EventBridge:
         *,
         default_debounce_s: float = 1.0,
         scheduler_wake: Optional[Callable[[], None]] = None,
+        mark_due: Optional[Callable[[str, float], None]] = None,
     ) -> None:
         self._triggers: Dict[str, EventTrigger] = {}
         self._active_patterns: Set[str] = set()
@@ -43,6 +44,7 @@ class EventBridge:
         self._debounced_count: Dict[str, int] = {}
         self._default_debounce_s = default_debounce_s
         self._scheduler_wake = scheduler_wake
+        self._mark_due = mark_due
 
     # ------------------------------------------------------------------
     # Registration
@@ -140,6 +142,12 @@ class EventBridge:
                     event_name,
                     trigger.event_pattern,
                 )
+                # Persist the due time so the scheduler SQL query finds this task.
+                if self._mark_due is not None:
+                    try:
+                        self._mark_due(watch_id, trigger.next_due_at)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("EventBridge: mark_due failed for %s", watch_id[:8], exc_info=True)
                 if self._scheduler_wake is not None:
                     self._scheduler_wake()
 

@@ -1,0 +1,158 @@
+"""Hermetic tests for leapflow.utils.build_info (long-lived-process staleness).
+
+All git subprocess calls are monkeypatched at the module's ``_fingerprint``
+seam, so these tests never depend on the actual repository's git state (or
+git being installed at all) and run identically in any CI environment.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+from typing import Optional, Tuple
+
+import pytest
+
+from leapflow.utils import build_info
+from leapflow.version import __version__
+
+
+def _patch_fingerprint(monkeypatch: pytest.MonkeyPatch, values) -> None:
+    """Make ``_fingerprint`` return successive ``values`` on each call."""
+    it = iter(values)
+
+    def _fake(cwd: Path) -> Tuple[Optional[str], Optional[str]]:
+        return next(it)
+
+    monkeypatch.setattr(build_info, "_fingerprint", _fake)
+
+
+# ── capture_build_info ───────────────────────────────────────────────────────
+
+
+def test_capture_build_info_reports_process_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_fingerprint(monkeypatch, [("abc123", "d1")])
+
+    info = build_info.capture_build_info()
+
+    assert info.version == __version__
+    assert info.pid == os.getpid()
+    assert info.commit == "abc123"
+    assert info.dirty_digest == "d1"
+    assert info.started_at > 0
+
+
+def test_capture_build_info_outside_git_checkout_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_fingerprint(monkeypatch, [(None, None)])
+
+    info = build_info.capture_build_info()
+
+    assert info.commit is None
+    assert info.dirty_digest is None
+
+
+# ── is_stale ─────────────────────────────────────────────────────────────────
+
+
+def test_is_stale_false_when_fingerprint_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_fingerprint(monkeypatch, [("abc123", "d1"), ("abc123", "d1")])
+
+    info = build_info.capture_build_info()
+    assert build_info.is_stale(info) is False
+
+
+def test_is_stale_true_when_commit_advances(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Simulates: process starts at commit abc123, a new commit lands afterwards.
+    _patch_fingerprint(monkeypatch, [("abc123", "d1"), ("def456", "d1")])
+
+    info = build_info.capture_build_info()
+    assert build_info.is_stale(info) is True
+
+
+def test_is_stale_true_when_working_tree_becomes_dirty(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Same commit, but an uncommitted edit landed after the process started.
+    _patch_fingerprint(monkeypatch, [("abc123", "d1"), ("abc123", "d2")])
+
+    info = build_info.capture_build_info()
+    assert build_info.is_stale(info) is True
+
+
+def test_is_stale_none_outside_git_checkout(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_fingerprint(monkeypatch, [(None, None), (None, None)])
+
+    info = build_info.capture_build_info()
+    assert build_info.is_stale(info) is None
+
+
+def test_is_stale_none_when_git_disappears_after_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Captured inside a checkout, but the live re-check can no longer find git
+    # (e.g. run from a different cwd) — must degrade to unknown, not "stale".
+    _patch_fingerprint(monkeypatch, [("abc123", "d1"), (None, None)])
+
+    info = build_info.capture_build_info()
+    assert build_info.is_stale(info) is None
+
+
+# ── to_dict ──────────────────────────────────────────────────────────────────
+
+
+def test_to_dict_is_plain_json_safe_and_coerces_none_to_empty_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_fingerprint(monkeypatch, [(None, None)])
+    info = build_info.capture_build_info()
+
+    data = info.to_dict()
+
+    assert data == {
+        "version": __version__,
+        "commit": "",
+        "dirty_digest": "",
+        "pid": os.getpid(),
+        "started_at": info.started_at,
+    }
+
+
+# ── _run_git: graceful degradation on subprocess failure ────────────────────
+
+
+def test_run_git_returns_none_when_binary_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise(*args, **kwargs):
+        raise FileNotFoundError("git not found")
+
+    monkeypatch.setattr(subprocess, "run", _raise)
+    assert build_info._run_git(["rev-parse", "HEAD"], Path(".")) is None
+
+
+def test_run_git_returns_none_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=1.5)
+
+    monkeypatch.setattr(subprocess, "run", _raise)
+    assert build_info._run_git(["status"], Path(".")) is None
+
+
+def test_run_git_returns_none_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeResult:
+        returncode = 128
+        stdout = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _FakeResult())
+    assert build_info._run_git(["rev-parse", "HEAD"], Path(".")) is None
+
+
+# ── Integration smoke: this repository really is a git checkout ────────────
+
+
+def test_capture_build_info_against_real_repo_is_internally_consistent() -> None:
+    """No monkeypatch: exercises the real git subprocess calls once.
+
+    This repository is a git checkout, so commit should resolve; whatever it
+    resolves to, checking staleness immediately afterward must be False
+    (nothing changed between the two calls a few milliseconds apart).
+    """
+    info = build_info.capture_build_info()
+    if info.commit is None:
+        pytest.skip("not a git checkout in this environment")
+    assert build_info.is_stale(info) is False

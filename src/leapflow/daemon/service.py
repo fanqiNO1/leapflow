@@ -39,6 +39,7 @@ from leapflow.daemon.session_coordinator import SessionCoordinator
 from leapflow.daemon.turn_admission import TurnAdmission
 from leapflow.engine import StreamEvent
 from leapflow.memory.protocol import MemoryQuery
+from leapflow.utils.build_info import capture_build_info, is_stale
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,10 @@ class RuntimeLeapService:
         )
         self._session_coordinator = SessionCoordinator()
         self._started_at = time.time()
+        # Captured once at daemon startup so status() can tell a developer
+        # this process is stale (source changed since it started) instead of
+        # a fixed behavior change looking like a code defect.
+        self._build_info = capture_build_info()
         self._client_count: Callable[[], int] = lambda: 0
         self._client_leases: Callable[[], list[ClientLeaseSnapshot]] = lambda: []
         self._approval_coordinator = ApprovalCoordinator(
@@ -310,6 +315,7 @@ class RuntimeLeapService:
             try:
                 if ctx.reload_runtime_config_if_changed():
                     self._settings = ctx.settings
+                    self._monitor_coordinator.update_settings(ctx.settings)
                     chunk = StreamChunk(
                         request_id=request_id,
                         content="Configuration reloaded in leapd.",
@@ -635,6 +641,7 @@ class RuntimeLeapService:
         snapshot = collector.collect(
             event_bus=getattr(ctx, "event_bus", None) if ctx else None,
             monitor_manager=self._monitor_coordinator._monitors,
+            signal_noise_gate=self._monitor_coordinator.signal_noise_stats,
         )
         stream = self._monitor_coordinator.get_signal_stream()
         return {"ok": True, "metrics": snapshot.to_dict(), "signal_stream": stream}
@@ -749,6 +756,7 @@ class RuntimeLeapService:
         self._approval_coordinator.prune_stale()
         clients = await asyncio.to_thread(self._safe_client_lease_summaries)
         host = await asyncio.to_thread(host_backend_status, ctx)
+        build_stale = await asyncio.to_thread(is_stale, self._build_info)
         return {
             "pid": os.getpid(),
             "profile": getattr(settings, "profile", "default"),
@@ -791,6 +799,9 @@ class RuntimeLeapService:
             "deferred_init": self._deferred_init_status(ctx),
             "watch_summary": self._monitor_coordinator.get_summary(),
             "host_backend": host,
+            # Whether *this* daemon process still matches the source tree on
+            # disk (None when outside a git checkout, e.g. a packaged install).
+            "build": {**self._build_info.to_dict(), "stale": build_stale},
         }
 
     # ── Internal helpers ─────────────────────────────────────────────

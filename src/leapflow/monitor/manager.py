@@ -193,7 +193,10 @@ class MonitorManager:
             cloud_dispatcher=None,
             default_tier="local",
         )
-        self._event_bridge = EventBridge(scheduler_wake=self._scheduler.wake)
+        self._event_bridge = EventBridge(
+            scheduler_wake=self._scheduler.wake,
+            mark_due=self._task_store.advance_next_due,
+        )
         self._started = False
         self._background_tasks: set[asyncio.Task[Any]] = set()
 

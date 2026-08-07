@@ -10,6 +10,9 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
+from leapflow.daemon.notifications import Notification
+from leapflow.monitor.signal_noise import SignalNoiseConfig, SignalNoiseGate
+
 logger = logging.getLogger(__name__)
 
 # Rate-limit: max pushes per event_type per second.
@@ -27,6 +30,7 @@ class MonitorCoordinator:
         self._signal_stream_subscriber: Optional[Callable[..., None]] = None
         self._notification_bus: Any | None = None
         self._signal_stream_buffer: deque[dict[str, Any]] = deque(maxlen=50)
+        self._signal_noise_gate: SignalNoiseGate | None = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -35,7 +39,7 @@ class MonitorCoordinator:
         if not getattr(settings, "scheduler_enabled", True):
             return
         try:
-            from leapflow.monitor import MonitorManager, SessionAnalysisProducer, WatchSpec
+            from leapflow.monitor import MonitorManager, SessionAnalysisProducer
             from leapflow.monitor.signal_producer import SignalObservationProducer
 
             bus = notification_bus
@@ -51,22 +55,21 @@ class MonitorCoordinator:
             setattr(ctx, "monitors", self._monitors)
             await self._monitors.start()
 
-            # Subscribe Monitor EventBridge to EventBus so gateway/daemon events
-            # can trigger event-driven watches via pattern matching.
+            # Subscribe one monitor/display boundary callback to EventBus. The
+            # callback applies SignalNoiseGate once, then fans accepted events
+            # into both EventBridge (watch activation) and LeapBoard stream.
             event_bus = getattr(ctx, "event_bus", None)
+            self._signal_noise_gate = SignalNoiseGate(SignalNoiseConfig.from_settings(settings))
             if event_bus is not None and hasattr(event_bus, "subscribe") and not self._bridge_subscribed:
-                self._bridge_callback = self._monitors.event_bridge.on_event
+                self._bridge_callback = self._make_monitor_signal_subscriber(
+                    self._monitors.event_bridge.on_event,
+                    bus,
+                )
                 event_bus.subscribe(self._bridge_callback)
                 self._bridge_subscribed = True
                 self._event_bus = event_bus
-                logger.debug("daemon: monitor event_bridge subscribed to event_bus")
-
-            # Signal stream push (rate-limited)
-            self._signal_stream_subscriber = self._make_signal_stream_subscriber(bus)
-            if event_bus is not None:
-                event_bus.subscribe(self._signal_stream_subscriber)
                 self._notification_bus = bus
-                logger.debug("daemon: signal stream subscriber registered")
+                logger.debug("daemon: monitor signal subscriber registered")
 
             # A fresh daemon lifetime owns no interactive clients yet, so any
             # persisted client-coupled watch (e.g. a session-analysis watch left
@@ -100,6 +103,29 @@ class MonitorCoordinator:
         # _ProducerServices is built in service.py and passed to start().
         return None
 
+    def update_settings(self, settings: Any) -> None:
+        """Hot-apply signal noise policy settings to the running gate."""
+        gate = self._signal_noise_gate
+        if gate is not None:
+            gate.update_config(SignalNoiseConfig.from_settings(settings))
+
+    def _make_monitor_signal_subscriber(
+        self,
+        event_bridge_callback: Callable[[Any], None],
+        notification_bus: Any,
+    ) -> Callable[..., None]:
+        """Apply noise policy once, then route accepted events to watch + stream."""
+        stream_callback = self._make_signal_stream_subscriber(notification_bus)
+
+        def _on_event(event: Any) -> None:
+            gate = self._signal_noise_gate
+            if gate is not None and not gate.should_pass(event):
+                return
+            event_bridge_callback(event)
+            stream_callback(event)
+
+        return _on_event
+
     def _make_signal_stream_subscriber(self, notification_bus: Any) -> Callable[..., None]:
         """Build a rate-limited callback that pushes signal summaries to NotificationBus.
 
@@ -126,13 +152,19 @@ class MonitorCoordinator:
             if now - prev < min_interval:
                 return
             last_push[event_type] = now
-            notification_bus.emit_event("signal.stream", **summary)
+            notification_bus.emit(Notification(event_type="signal.stream", payload=summary))
 
         return _on_event
 
     def get_signal_stream(self) -> list[dict[str, Any]]:
-        """Return recent signal events (up to 50) from the ring buffer."""
+        """Return recent accepted signal events (up to 50) from the ring buffer."""
         return list(self._signal_stream_buffer)
+
+    @property
+    def signal_noise_stats(self) -> dict[str, Any]:
+        """Return monitor/display noise-gate counters for metrics."""
+        gate = self._signal_noise_gate
+        return gate.stats if gate is not None else {}
 
     # ── Default event-driven watches ──────────────────────────────────────
 
@@ -144,26 +176,45 @@ class MonitorCoordinator:
     ]
 
     async def _arm_default_watches(self) -> None:
-        """Arm built-in event-driven watches if not already present (idempotent)."""
+        """Arm built-in event-driven watches if not already present (idempotent).
+
+        Stale watches (state=done/failed) with the same trigger pattern are
+        removed and re-created so daemon restarts always restore monitoring.
+        """
         from leapflow.monitor import WatchSpec
 
         monitors = self._monitors
         if monitors is None:
             return
 
-        existing_triggers: set[str] = set()
+        # Map trigger -> (view, is_active) for existing watches
+        existing: dict[str, tuple[Any, bool]] = {}
+        _ACTIVE_STATES = {"armed", "watching", "due", "confirming", "executing"}
         try:
             for view in monitors.list_watches():
-                existing_triggers.add(view.trigger)
+                is_active = str(view.state) in _ACTIVE_STATES
+                existing[view.trigger] = (view, is_active)
         except Exception:
             logger.debug("daemon: failed to list watches for default arm", exc_info=True)
             return
 
         for name, domain, trigger_expr in self._DEFAULT_WATCHES:
-            # The formatted trigger for event watches is "event:<pattern>"
             expected_trigger = f"event:{trigger_expr.removeprefix('event:')}"
-            if expected_trigger in existing_triggers:
-                continue
+            entry = existing.get(expected_trigger)
+            if entry is not None:
+                view, is_active = entry
+                if is_active:
+                    # Already armed and active — nothing to do.
+                    continue
+                # Stale (done/failed/suspended) — remove so we can re-arm.
+                try:
+                    monitors.stop_watch(view.watch_id)
+                except Exception:
+                    pass
+                try:
+                    monitors._task_store.delete(view.watch_id)
+                except Exception:
+                    logger.debug("daemon: failed to delete stale watch %s", name, exc_info=True)
             try:
                 await monitors.arm_watch(
                     WatchSpec(
@@ -192,6 +243,8 @@ class MonitorCoordinator:
                 self._bridge_subscribed = False
                 self._bridge_callback = None
                 self._event_bus = None
+                self._notification_bus = None
+                self._signal_noise_gate = None
             try:
                 await self._monitors.stop()
             except Exception:

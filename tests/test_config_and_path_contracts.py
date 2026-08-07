@@ -167,6 +167,26 @@ def test_describe_exposes_every_field_the_contract_requires(monkeypatch, tmp_pat
     assert view.value_hint
 
 
+def test_signal_noise_config_fields_are_discoverable(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("LEAPFLOW_HOME", str(tmp_path / "home"))
+    from leapflow.config import get_settings
+
+    service = ConfigService(get_settings())
+
+    for key in (
+        "signal.noise_gate_enabled",
+        "signal.noise_same_source_cooldown_s",
+        "signal.noise_allow_fs_outside_workspace",
+        "signal.noise_path_fragments",
+        "signal.noise_dir_names",
+        "signal.noise_suffixes",
+    ):
+        view = service.describe(key)
+        assert view.category == "Signal Fusion"
+        assert view.description
+        assert view.hot_reload in _VALID_HOT_RELOAD
+
+
 def test_unknown_key_is_rejected_rather_than_silently_accepted(monkeypatch, tmp_path) -> None:
     """Both read and write reject an unknown key loudly.
 

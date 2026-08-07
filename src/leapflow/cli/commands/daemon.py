@@ -163,6 +163,12 @@ def _print_runtime_status(status: dict) -> None:
             print(f"host_capability: {host['capability_version']}")
         if host.get("last_error"):
             print(f"host_error: {host['last_error']}")
+    build = status.get("build")
+    if isinstance(build, dict) and build.get("commit"):
+        stale = build.get("stale")
+        stale_text = "UNKNOWN" if stale is None else ("STALE — restart with 'leap daemon restart'" if stale else "fresh")
+        dirty = " (dirty)" if build.get("dirty_digest") else ""
+        print(f"build: commit={build['commit']}{dirty} pid={build.get('pid')} status={stale_text}")
 
 
 def _start(settings: object, mock_host: bool) -> int:

@@ -1227,7 +1227,7 @@ async def _execute_dashboard(
     if verb == "templates":
         return _execute_board_templates(ctx, rest_tokens)
     if verb == "status":
-        return _execute_board_status(ctx, monitors)
+        return await _execute_board_status(ctx, monitors)
     if verb in ("refresh", "pause", "resume", "stop"):
         return await _execute_board_control(
             ctx, monitors, verb, target=rest_tokens[0] if rest_tokens else "",
@@ -1350,7 +1350,7 @@ def _find_session_watch_id(monitors: Any) -> str:
     return ""
 
 
-def _execute_board_status(ctx: "Context", monitors: Any) -> dict[str, Any]:
+async def _execute_board_status(ctx: "Context", monitors: Any) -> dict[str, Any]:
     """Return session-observation status: watch detail + recent findings + lenses.
 
     Fields:
@@ -1358,6 +1358,9 @@ def _execute_board_status(ctx: "Context", monitors: Any) -> dict[str, Any]:
       - ``watches``: every watch with state, run/finding counts, and last-run age.
       - ``findings``: recent findings (severity, title, summary, age) across watches.
       - ``signal_flow``: real-time signal health metrics (if available).
+      - ``server``: the *separate* LeapBoard web server process's own build
+        fingerprint and staleness verdict, when one is currently running (see
+        ``_board_server_health``).
     """
     library = _template_library(ctx)
     data: dict[str, Any] = {
@@ -1390,13 +1393,45 @@ def _execute_board_status(ctx: "Context", monitors: Any) -> dict[str, Any]:
             "event_subscriber_count": snapshot.event_subscriber_count,
             "active_trigger_count": snapshot.active_trigger_count,
             "signal_buffer_dropped": snapshot.signal_buffer_dropped,
+            "signal_noise_suppressed": snapshot.signal_noise_suppressed,
+            "signal_noise_seen": snapshot.signal_noise_seen,
             "active_watch_count": snapshot.active_watch_count,
             "recent_findings_count": snapshot.recent_findings_count,
         }
     except Exception:
         logger.debug("dashboard: signal metrics unavailable", exc_info=True)
 
+    data["server"] = await _board_server_health(ctx)
     return data
+
+
+async def _board_server_health(ctx: "Context") -> dict[str, Any] | None:
+    """Best-effort staleness check for the separately running LeapBoard web server.
+
+    The dashboard is a distinct long-lived process from leapd (spawned by
+    ``leap board`` and never restarted automatically); editing dashboard source
+    does not reach it until it is restarted. Returns None when no dashboard
+    server is currently running/discoverable, or the probe fails — this is a
+    diagnostic side-channel, never a reason to fail ``/board status``.
+    """
+    import asyncio
+
+    settings = getattr(ctx, "settings", None)
+    if settings is None:
+        return None
+    try:
+        from leapflow.dashboard import launcher
+
+        state = launcher.load_state(settings)
+        if not state:
+            return None
+        return await asyncio.to_thread(
+            launcher.fetch_server_info,
+            str(state.get("bind") or ""), int(state.get("port") or 0), str(state.get("token") or ""),
+        )
+    except Exception:
+        logger.debug("dashboard: board server health probe failed", exc_info=True)
+        return None
 
 
 def _execute_board_templates(ctx: "Context", rest_tokens: list[str]) -> dict[str, Any]:
@@ -1915,6 +1950,31 @@ def _board_page_url() -> str:
         return ""
 
 
+def _render_board_server_health(console: "LeapConsole", server: Any) -> None:
+    """Render the LeapBoard web server's own staleness verdict, if known.
+
+    ``server`` is None when no dashboard server is currently running, or the
+    probe failed — both render nothing, since there is nothing actionable to
+    report. A definite ``stale`` verdict is the whole point of this warning:
+    the browser page a developer is looking at right now was built from code
+    that predates the current source tree.
+    """
+    if not isinstance(server, dict):
+        return
+    build = server.get("build") if isinstance(server.get("build"), dict) else {}
+    stale = server.get("stale")
+    if stale is None:
+        return  # unknown (not a git checkout) — nothing to warn about
+    if stale:
+        console.warning(
+            f"LeapBoard web server (pid={build.get('pid')}) predates the current source "
+            "tree — restart it to pick up recent changes: run /board again after killing "
+            f"pid {build.get('pid')}, or 'leap board --serve' manually."
+        )
+    else:
+        console.system(f"LeapBoard web server (pid={build.get('pid')}) is up to date.")
+
+
 def _render_dashboard_view(console: "LeapConsole", payload: dict[str, Any]) -> None:
     from rich.table import Table
 
@@ -1980,6 +2040,7 @@ def _render_dashboard_view(console: "LeapConsole", payload: dict[str, Any]) -> N
                 console.system(line)
         else:
             console.system("Findings: none yet.")
+        _render_board_server_health(console, payload.get("server"))
         return
 
     if mode == "templates":

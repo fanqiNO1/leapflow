@@ -25,8 +25,10 @@ from leapflow.dashboard.intent import DashboardIntent
 from leapflow.dashboard.service import DaemonDataProvider, DashboardViewBuilder
 from leapflow.dashboard.templates import TemplateLibrary
 from leapflow.monitor.types import EVENT_ERROR, EVENT_FINDING, EVENT_HEARTBEAT, EVENT_WATCH_STATE
+from leapflow.utils.build_info import capture_build_info, is_stale
 
 logger = logging.getLogger(__name__)
+
 
 STATIC_DIR = Path(__file__).parent / "static"
 _MONITOR_EVENTS = frozenset({EVENT_FINDING, EVENT_WATCH_STATE, EVENT_ERROR, EVENT_HEARTBEAT, "signal.stream"})
@@ -56,6 +58,10 @@ class DashboardServer:
         self._builder = DashboardViewBuilder(templates or TemplateLibrary())
         self._provider = DaemonDataProvider(client)
         self._upstream_task: Optional[asyncio.Task[None]] = None
+        # Captured once at server startup so /api/server-info and the ViewSpec
+        # meta can report whether this long-lived process is still fresh
+        # relative to the source tree (see leapflow.utils.build_info).
+        self._build_info = capture_build_info()
 
     # ── App wiring ─────────────────────────────────────────────────────────
 
@@ -66,6 +72,7 @@ class DashboardServer:
         app = web.Application()
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/api/view", self._handle_view)
+        app.router.add_get("/api/server-info", self._handle_server_info)
         app.router.add_post("/api/action", self._handle_action)
         app.router.add_get("/ws", self._handle_ws)
         if STATIC_DIR.exists():
@@ -132,7 +139,30 @@ class DashboardServer:
             "template": request.query.get("template", ""),
         })
         spec = await self._builder.build(intent, self._provider)
+        if isinstance(spec, dict):
+            meta = spec.setdefault("meta", {})
+            if isinstance(meta, dict):
+                meta["server"] = await self._server_info()
         return web.json_response(spec)
+
+    async def _handle_server_info(self, request: Any) -> Any:
+        """Self-report this process's build fingerprint and staleness verdict.
+
+        A tiny, single-purpose diagnostic endpoint (distinct from the ViewSpec
+        the browser renders) so ``/board status`` and ``leap daemon status``
+        can check on this *separate* long-lived process without depending on
+        SDUI schema shape.
+        """
+        from aiohttp import web
+
+        if not self._check_token(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response(await self._server_info())
+
+    async def _server_info(self) -> dict[str, Any]:
+        """Build the {build, stale} payload shared by the view meta and the endpoint."""
+        stale = await asyncio.to_thread(is_stale, self._build_info)
+        return {"build": self._build_info.to_dict(), "stale": stale}
 
     async def _handle_action(self, request: Any) -> Any:
         from aiohttp import web

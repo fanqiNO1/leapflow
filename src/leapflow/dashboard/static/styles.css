@@ -51,6 +51,10 @@ body {
   border-radius: 0; padding: 3px 7px; font-size: 0.85rem;
 }
 .status { margin-left: auto; color: var(--muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.server-stale-badge {
+  color: var(--alert); font-size: 0.79rem; border: 1px solid var(--alert);
+  padding: 1px 6px; cursor: help;
+}
 
 /* ── Page scaffold + numbering counters ──────────────────────────────────── */
 .root { padding: 18px 22px 40px; max-width: 1480px; margin: 0 auto; }
@@ -184,6 +188,23 @@ body {
 .timeline-item.sev-alert::before { background: var(--alert); }
 .timeline-item.sev-notable::before { background: var(--notable); }
 .timeline-title { font-weight: 600; }
+.signal-timeline { border: 1px solid var(--line); background: var(--panel); padding: 8px 10px; }
+.signal-tabs { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+.signal-tab {
+  padding: 3px 8px; font-size: 0.78rem; color: var(--muted); border: 1px solid var(--line);
+  background: var(--panel); text-transform: uppercase; letter-spacing: .06em;
+}
+.signal-tab.active { color: var(--accent); border-color: var(--accent); }
+.signal-stream-list { gap: 6px; }
+.signal-row { padding-top: 5px; padding-bottom: 5px; }
+.signal-event-meta { display: flex; gap: 6px; align-items: center; margin-bottom: 1px; }
+.signal-time, .signal-family {
+  color: var(--muted); font-size: 0.76rem; letter-spacing: .04em; font-variant-numeric: tabular-nums;
+}
+.signal-family { color: var(--info); text-transform: uppercase; }
+.signal-type { font-size: 0.92rem; }
+.signal-source { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.signal-stream-footer { margin-top: 7px; color: var(--muted); font-size: 0.8rem; border-top: 1px solid var(--line); padding-top: 5px; }
 .progress { height: 8px; background: var(--track); border-radius: 0; overflow: hidden; margin-top: 9px; }
 .progress-fill { display: block; height: 100%; background: var(--accent); border-radius: 0; }
 

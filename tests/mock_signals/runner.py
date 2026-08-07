@@ -192,7 +192,13 @@ class MockSignalRunner:
         return await self._run_local_mode()
 
     async def _run_daemon_mode(self) -> RunResult:
-        """Inject signals into running leapd via RPC."""
+        """Inject signals into running leapd via RPC.
+
+        Generators run concurrently (matching local mode) so that
+        different signal types overlap realistically.  Inter-event
+        waits use the profile-intended timing so the daemon's
+        EventBridge debounce windows work as designed.
+        """
         from leapflow.config import _bootstrap_profile_layout
         from leapflow.daemon.client import DaemonClient, DaemonUnavailableError
 
@@ -221,23 +227,40 @@ class MockSignalRunner:
         # Build generators (same as local mode)
         generators = self._build_generators()
         t0 = time.monotonic()
+        _lock = asyncio.Lock()
         injected = 0
         errors: List[str] = []
         events_per_type: Dict[str, int] = {}
+        _progress_count = 0
 
-        for gen in generators:
+        async def _inject_from(gen: BaseGenerator) -> None:
+            """Inject events from a single generator concurrently."""
+            nonlocal injected, _progress_count
             for event_type, payload in gen.generate():
                 if event_type == "__wait__":
                     wait_s = payload.get("seconds", 0.01)
-                    await asyncio.sleep(min(wait_s, 0.05))
+                    await asyncio.sleep(wait_s)
                     continue
                 try:
                     await client.signal_record(event_type, payload)
+                except Exception as exc:
+                    async with _lock:
+                        errors.append(f"{event_type}: {exc}")
+                    continue
+                async with _lock:
                     injected += 1
+                    _progress_count += 1
                     display_type = self._display_event_type(event_type)
                     events_per_type[display_type] = events_per_type.get(display_type, 0) + 1
-                except Exception as exc:
-                    errors.append(f"{event_type}: {exc}")
+                    if _progress_count % 20 == 0:
+                        elapsed = time.monotonic() - t0
+                        print(f"    \r  injected {_progress_count} events ({elapsed:.1f}s)", end="", flush=True)
+
+        await asyncio.gather(*[_inject_from(gen) for gen in generators])
+
+        # Clear progress line
+        if _progress_count >= 20:
+            print()
 
         result.duration_s = time.monotonic() - t0
         result.events_injected = injected

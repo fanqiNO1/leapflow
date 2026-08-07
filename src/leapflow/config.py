@@ -449,6 +449,32 @@ class Settings:
     # signal collection entirely (V0 baseline).
     signal_channels: frozenset = frozenset()
     signal_reactive_capture: bool = False
+    signal_noise_gate_enabled: bool = True
+    signal_noise_same_source_cooldown_s: float = 2.0
+    signal_noise_allow_fs_outside_workspace: bool = False
+    signal_noise_path_fragments: tuple = (
+        "/Library/Caches/",
+        "/Library/Logs/",
+        "/Library/Preferences/",
+        "/Application Support/Qoder/User/globalStorage/",
+        "/Application Support/Qoder/SharedClientCache/",
+        "/Application Support/Qoder/SharedCredentialCache/",
+        "/Application Support/Qoder/Partitions/native-browser/Cache/",
+        "/Application Support/Cursor/User/globalStorage/",
+        "/Application Support/DuetExpertCenter/",
+        "/.cache/",
+        "/.hermes/",
+        "/.r2c/logs/",
+    )
+    signal_noise_dir_names: tuple = (
+        ".git", ".hg", ".svn", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache",
+        "node_modules", "Cache", "Caches", "SharedCredentialCache", "globalStorage",
+        "Code Cache", "GPUCache",
+    )
+    signal_noise_suffixes: tuple = (
+        ".tmp", ".temp", ".swp", ".lock", ".log", ".pyc", ".pyo",
+        "-journal", "-shm", "-wal", ".db-shm", ".db-wal", ".sqlite-journal",
+    )
 
     # ── RPC Transport ──
     # Default fallback timeout (seconds) used by CuaDriverClient when no
@@ -938,6 +964,25 @@ def _build_settings_from_env(
         ) & ALL_SIGNAL_CHANNELS
     signal_reactive_capture = _bool("LEAPFLOW_SIGNAL_REACTIVE_CAPTURE", "false")
 
+    def _tuple_env(key: str, default: tuple) -> tuple:
+        raw = os.getenv(key, ",".join(str(item) for item in default)).strip()
+        return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+    signal_noise_gate_enabled = _bool("LEAPFLOW_SIGNAL_NOISE_GATE_ENABLED", "true")
+    signal_noise_same_source_cooldown_s = float(os.getenv("LEAPFLOW_SIGNAL_NOISE_SAME_SOURCE_COOLDOWN_S", "2.0"))
+    signal_noise_allow_fs_outside_workspace = _bool(
+        "LEAPFLOW_SIGNAL_NOISE_ALLOW_FS_OUTSIDE_WORKSPACE", "false",
+    )
+    signal_noise_path_fragments = _tuple_env(
+        "LEAPFLOW_SIGNAL_NOISE_PATH_FRAGMENTS", Settings.signal_noise_path_fragments,
+    )
+    signal_noise_dir_names = _tuple_env(
+        "LEAPFLOW_SIGNAL_NOISE_DIR_NAMES", Settings.signal_noise_dir_names,
+    )
+    signal_noise_suffixes = _tuple_env(
+        "LEAPFLOW_SIGNAL_NOISE_SUFFIXES", Settings.signal_noise_suffixes,
+    )
+
     # RPC Transport
     rpc_timeout_default = float(os.getenv("LEAPFLOW_RPC_TIMEOUT_DEFAULT", "30.0"))
 
@@ -1256,6 +1301,12 @@ def _build_settings_from_env(
         # Signal Fusion
         signal_channels=signal_channels,
         signal_reactive_capture=signal_reactive_capture,
+        signal_noise_gate_enabled=signal_noise_gate_enabled,
+        signal_noise_same_source_cooldown_s=signal_noise_same_source_cooldown_s,
+        signal_noise_allow_fs_outside_workspace=signal_noise_allow_fs_outside_workspace,
+        signal_noise_path_fragments=signal_noise_path_fragments,
+        signal_noise_dir_names=signal_noise_dir_names,
+        signal_noise_suffixes=signal_noise_suffixes,
         # RPC Transport
         rpc_timeout_default=rpc_timeout_default,
         # Cua Driver

@@ -34,6 +34,11 @@ class SignalMetricsSnapshot:
     composite_source_dropped: int
     active_watch_count: int
     recent_findings_count: int
+    signal_noise_seen: int = 0
+    signal_noise_passed: int = 0
+    signal_noise_suppressed: int = 0
+    signal_noise_by_reason: Dict[str, int] | None = None
+    signal_noise_by_family: Dict[str, int] | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize snapshot to plain dict for RPC transport."""
@@ -51,6 +56,7 @@ class SignalMetricsCollector:
         signal_buffer: Any = None,
         reorder_buffer: Any = None,
         composite_source: Any = None,
+        signal_noise_gate: Any = None,
     ) -> SignalMetricsSnapshot:
         """Collect current metrics snapshot (synchronous, fast)."""
         # EventBus stats
@@ -94,6 +100,13 @@ class SignalMetricsCollector:
         source_dropped = (
             getattr(composite_source, "drop_count", 0) if composite_source else 0
         )
+        noise_stats = {}
+        if signal_noise_gate is not None:
+            try:
+                raw_stats = signal_noise_gate if isinstance(signal_noise_gate, dict) else getattr(signal_noise_gate, "stats", {})
+                noise_stats = dict(raw_stats) if isinstance(raw_stats, dict) else {}
+            except Exception:
+                noise_stats = {}
 
         # Monitor stats
         active_watches = 0
@@ -123,4 +136,9 @@ class SignalMetricsCollector:
             composite_source_dropped=source_dropped,
             active_watch_count=active_watches,
             recent_findings_count=findings_count,
+            signal_noise_seen=int(noise_stats.get("seen", 0) or 0),
+            signal_noise_passed=int(noise_stats.get("passed", 0) or 0),
+            signal_noise_suppressed=int(noise_stats.get("suppressed", 0) or 0),
+            signal_noise_by_reason=dict(noise_stats.get("by_reason", {}) or {}),
+            signal_noise_by_family=dict(noise_stats.get("by_family", {}) or {}),
         )

@@ -162,6 +162,38 @@ async def test_board_status_and_templates_are_discoverable(tmp_path: Path) -> No
     assert "sentiment" not in names
 
 
+async def test_board_status_reports_none_without_a_configured_settings(tmp_path: Path) -> None:
+    # No settings -> no dashboard-server discovery is possible; 'server' must
+    # be a graceful None, never an error, never a missing key.
+    ctx = SimpleNamespace(monitors=_manager(tmp_path), settings=None, engine=None)
+
+    status_payload = await command_execute(ctx, "board status", "")
+
+    assert status_payload["server"] is None
+
+
+async def test_board_status_surfaces_running_dashboard_server_staleness(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """/board status must warn when the *separate* LeapBoard web server process
+    (not the daemon itself) predates the current source tree — the exact class
+    of bug a developer cannot otherwise detect from the terminal.
+    """
+    from leapflow.dashboard import launcher
+
+    settings = SimpleNamespace(runtime_dir=tmp_path)
+    launcher.write_state(settings, {"bind": "127.0.0.1", "port": 8766, "token": "tok", "pid": 999})
+    monkeypatch.setattr(
+        launcher, "fetch_server_info",
+        lambda bind, port, token: {"build": {"pid": 999, "commit": "abc"}, "stale": True},
+    )
+    ctx = SimpleNamespace(monitors=_manager(tmp_path), settings=settings, engine=None)
+
+    status_payload = await command_execute(ctx, "board status", "")
+
+    assert status_payload["server"] == {"build": {"pid": 999, "commit": "abc"}, "stale": True}
+
+
 async def test_board_refresh_reanalyzes_session(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     ctx = SimpleNamespace(monitors=manager, settings=None, engine=None)
@@ -369,3 +401,32 @@ def test_render_dashboard_payload_covers_new_modes() -> None:
     failed = _CaptureConsole()
     render_command_payload(failed, {"ok": False, "message": "Could not add template: bad"})
     assert any("Could not add" in line for line in failed.lines)
+
+
+def test_render_board_status_warns_when_web_server_is_stale() -> None:
+    from leapflow.cli.commands.slash_handlers import render_command_payload
+
+    stale = _CaptureConsole()
+    render_command_payload(stale, {
+        "ok": True, "view": "dashboard", "mode": "status",
+        "templates": ["generic"], "default": "generic", "watches": [], "findings": [],
+        "server": {"build": {"pid": 4242, "commit": "abc123"}, "stale": True},
+    })
+    assert any("4242" in line and "restart" in line.lower() for line in stale.lines)
+
+    fresh = _CaptureConsole()
+    render_command_payload(fresh, {
+        "ok": True, "view": "dashboard", "mode": "status",
+        "templates": ["generic"], "default": "generic", "watches": [], "findings": [],
+        "server": {"build": {"pid": 4242, "commit": "abc123"}, "stale": False},
+    })
+    assert any("up to date" in line for line in fresh.lines)
+
+    # No dashboard server currently running (or verdict unknown): render nothing.
+    silent = _CaptureConsole()
+    render_command_payload(silent, {
+        "ok": True, "view": "dashboard", "mode": "status",
+        "templates": ["generic"], "default": "generic", "watches": [], "findings": [],
+        "server": None,
+    })
+    assert not any("stale" in line.lower() or "up to date" in line for line in silent.lines)

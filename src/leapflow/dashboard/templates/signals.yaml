@@ -39,6 +39,10 @@ layout:
               value: "{{ signal_metrics.recent_findings_count }}"
           - type: Stat
             props:
+              label: "Noise suppressed"
+              value: "{{ signal_metrics.signal_noise_suppressed }}"
+          - type: Stat
+            props:
               label: "Buffer dropped"
               value: "{{ signal_metrics.signal_buffer_dropped }}"
           - type: Stat
@@ -97,6 +101,10 @@ layout:
                     children:
                       - type: Stat
                         props:
+                          label: "Noise suppressed"
+                          value: "{{ signal_metrics.signal_noise_suppressed }}"
+                      - type: Stat
+                        props:
                           label: "Buffer dropped"
                           value: "{{ signal_metrics.signal_buffer_dropped }}"
                       - type: Stat
@@ -132,12 +140,14 @@ layout:
             when: signal_stream
             props:
               title: "Live signal stream"
-              subtitle: "Recent events from the daemon ring buffer."
+              subtitle: "Latest daemon events · grouped by signal family · newest first."
               span: 2
             children:
-              - type: Timeline
+              - type: Custom
                 props:
+                  render: signalTimeline
                   bind: signal_stream
+                  max_items: 12
           - type: Section
             when: watch_state_distribution
             props:
