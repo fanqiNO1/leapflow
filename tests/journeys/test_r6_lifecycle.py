@@ -22,6 +22,7 @@ import pytest
 
 from leapflow.daemon.client import DaemonUnavailableError
 from leapflow.daemon.lifecycle import DaemonInfo, cleanup_stale
+from leapflow.daemon._transport import get_transport
 from tests._harness.cassette_proxy import answer, scripted
 from tests._harness.journey import Journey, JourneyFactory
 from tests._harness.leapd import await_for, start_leapd
@@ -107,7 +108,8 @@ async def test_r6_daemon_lifecycle(journeys: JourneyFactory) -> None:
         # Simulate the crash case: runtime files present, no process behind them.
         journey.daemon.runtime_dir.mkdir(parents=True, exist_ok=True)
         (journey.daemon.runtime_dir / "leapd.pid").write_text("999999", encoding="utf-8")
-        (journey.daemon.runtime_dir / "leapd.sock").touch(exist_ok=True)
+        sock_path = get_transport().readiness_path(journey.daemon.runtime_dir)
+        sock_path.touch(exist_ok=True)
 
         stale = DaemonInfo.discover(journey.daemon.runtime_dir)
         assert not stale.is_healthy, "a stale socket was reported as healthy"

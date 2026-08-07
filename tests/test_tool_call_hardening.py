@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 from leapflow.engine.engine import (
     _head_tail_truncate,
@@ -170,8 +171,12 @@ def test_compact_error_preserves_stderr_without_error_field() -> None:
 
 
 def test_shell_run_populates_error_on_failure() -> None:
+    import os
+
     from leapflow.tools.shell_tools import shell_run
-    result = asyncio.run(shell_run({"command": "echo BOOM_ERR 1>&2; exit 2"}))
+    # cmd.exe (the Windows shell backend) has no ';' separator; '&&' works on both.
+    joiner = "&&" if os.name == "nt" else ";"
+    result = asyncio.run(shell_run({"command": f"echo BOOM_ERR 1>&2 {joiner} exit 2"}))
     assert result["ok"] is False and result["returncode"] == 2
     assert "BOOM_ERR" in result["error"] and "BOOM_ERR" in result["stderr"]
 
@@ -220,8 +225,9 @@ def test_workspace_context_resolves_relative_paths_and_blocks_cross_workspace(tm
         assert repo_result["ok"] is True
         assert repo_result["root"] == str(workspace.resolve())
 
-        shell_result = asyncio.run(shell_run({"command": "pwd"}))
-        assert shell_result["ok"] is True
+        pwd_command = "echo %CD%" if os.name == "nt" else "pwd"
+        shell_result = asyncio.run(shell_run({"command": pwd_command}))
+        assert shell_result["ok"] is True, shell_result
         assert shell_result["cwd"] == str(workspace.resolve())
 
         blocked = asyncio.run(file_read({"path": str(other / "secret.txt")}))
@@ -251,6 +257,8 @@ def test_shell_gate_blocks_expanded_and_relative_escapes(tmp_path, monkeypatch) 
     )
     from leapflow.tools.shell_tools import shell_run
 
+    import os
+
     workspace = tmp_path / "work"
     other = tmp_path / "other"
     workspace.mkdir()
@@ -277,8 +285,16 @@ def test_shell_gate_blocks_expanded_and_relative_escapes(tmp_path, monkeypatch) 
             assert result["resolved_path"].startswith(str(other.resolve())), command
 
         # Traversal that stays inside must still run: the gate judges the resolved
-        # target, so `sub/../alpha.txt` is an ordinary in-workspace read.
-        inside = asyncio.run(shell_run({"command": "cat sub/../alpha.txt"}))
+        # target, so `sub/../alpha.txt` is an ordinary in-workspace read, and the
+        # content must come back. On Windows no cmd-era builtin reads a '..'
+        # operand (Git's MSYS cat falls back to stdin and hangs, cmd's `type`
+        # rejects the path), so the read goes through PowerShell's Get-Content —
+        # as a command argument; the shell backend stays cmd.
+        if os.name == "nt":
+            command = 'powershell -NoProfile -Command "Get-Content sub/../alpha.txt"'
+        else:
+            command = "cat sub/../alpha.txt"
+        inside = asyncio.run(shell_run({"command": command}))
         assert inside["ok"] is True
         assert inside["stdout"].strip() == "inside"
     finally:

@@ -298,9 +298,12 @@ class DaemonClient:
 
     async def _open(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         try:
+            # _timeout_s is the per-request read budget (heartbeat tests set it
+            # to 0.1s); connection establishment needs its own, larger floor or
+            # every RPC flakes under load when the handshake exceeds it.
             return await asyncio.wait_for(
                 get_transport().connect(self._sock_path.parent),
-                timeout=self._timeout_s,
+                timeout=max(self._timeout_s, 5.0),
             )
         except (TimeoutError, OSError) as exc:
             raise DaemonUnavailableError(
@@ -331,7 +334,7 @@ async def ensure_daemon_client(
 ) -> DaemonClient:
     """Return a client connected to a healthy daemon, starting one if needed."""
     runtime_dir = settings.runtime_dir
-    sock_path = runtime_dir / "leapd.sock"
+    sock_path = get_transport().readiness_path(runtime_dir)
     info = DaemonInfo.discover(runtime_dir)
     if info.is_healthy:
         _emit(status_callback, f"Connected to leapd (pid={info.pid}).")

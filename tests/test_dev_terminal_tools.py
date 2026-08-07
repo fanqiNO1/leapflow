@@ -7,6 +7,7 @@ output parsing; terminal_session uses a real /bin/sh with timing-tolerant reads.
 from __future__ import annotations
 
 import asyncio
+import sys
 
 from leapflow.tools import dev_tools
 from leapflow.tools import terminal_session as ts
@@ -113,18 +114,22 @@ def test_terminal_disabled_by_default() -> None:
 
 def test_terminal_session_lifecycle() -> None:
     ts.set_terminal_sessions_enabled(True)
+    sid = ""
     try:
         opened = _run(terminal_open({}))
-        assert opened["ok"] is True
+        assert opened["ok"] is True, opened
         sid = opened["session_id"]
 
-        sent = _run(terminal_send({"session_id": sid, "input": "echo hello-term", "wait": 0.6}))
+        # PowerShell cold-starts slowly (banner + profile + first prompt),
+        # especially under parallel xdist load; widen the capture budget there.
+        send_wait, read_wait, reads = (2.0, 1.0, 8) if sys.platform == "win32" else (0.6, 0.4, 5)
+        sent = _run(terminal_send({"session_id": sid, "input": "echo hello-term", "wait": send_wait}))
         assert sent["ok"] is True
         output = sent["output"]
-        for _ in range(5):
+        for _ in range(reads):
             if "hello-term" in output:
                 break
-            output += _run(terminal_read({"session_id": sid, "wait": 0.4}))["output"]
+            output += _run(terminal_read({"session_id": sid, "wait": read_wait}))["output"]
         assert "hello-term" in output
 
         listed = _run(terminal_list({}))
@@ -132,10 +137,13 @@ def test_terminal_session_lifecycle() -> None:
 
         closed = _run(terminal_close({"session_id": sid}))
         assert closed["ok"] is True and closed["closed"] is True
+        sid = ""
 
         after = _run(terminal_send({"session_id": sid, "input": "x"}))
         assert after["ok"] is False and after["failure_code"] == "session_not_found"
     finally:
+        if sid:
+            _run(terminal_close({"session_id": sid}))
         ts.set_terminal_sessions_enabled(False)
 
 
@@ -153,9 +161,9 @@ def test_terminal_max_sessions(monkeypatch) -> None:
     monkeypatch.setattr(ts, "_MAX_SESSIONS", 1)
     opened = _run(terminal_open({}))
     try:
-        assert opened["ok"] is True
+        assert opened["ok"] is True, opened
         second = _run(terminal_open({}))
         assert second["ok"] is False and second["failure_code"] == "too_many_sessions"
     finally:
-        _run(terminal_close({"session_id": opened["session_id"]}))
+        _run(terminal_close({"session_id": opened.get("session_id", "")}))
         ts.set_terminal_sessions_enabled(False)

@@ -48,12 +48,14 @@ class DaemonInfo:
     def discover(cls, runtime_dir: Path) -> DaemonInfo:
         """Probe the runtime directory to determine daemon state."""
         pid = _read_pid(runtime_dir / "leapd.pid")
-        sock_path = runtime_dir / "leapd.sock"
+        from leapflow.daemon._transport import get_transport
+
+        sock_path = get_transport().readiness_path(runtime_dir)
         meta = _read_meta(runtime_dir / "leapd.json")
         start_time = meta.get("start_time") if meta else None
 
         is_running = pid is not None and _process_alive(pid)
-        is_healthy = is_running and sock_path.exists() and _sock_healthy(sock_path)
+        is_healthy = is_running and _sock_healthy(runtime_dir)
 
         return cls(
             pid=pid,
@@ -439,12 +441,11 @@ def _process_alive(pid: int) -> bool:
             kernel32.CloseHandle(handle)
 
 
-def _sock_healthy(sock_path: Path) -> bool:
+def _sock_healthy(runtime_dir: Path) -> bool:
     """Quick health check by connecting to the daemon transport."""
     from leapflow.daemon._transport import get_transport
 
-    transport = get_transport()
-    return transport.probe_healthy(sock_path.parent)
+    return get_transport().probe_healthy(runtime_dir)
 
 
 def _format_duration(seconds: Optional[float]) -> str:

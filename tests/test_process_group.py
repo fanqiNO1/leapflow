@@ -70,6 +70,7 @@ def test_second_terminate_is_false() -> None:
     group = ProcessGroup()
     group.attach(proc.pid)
     assert group.terminate() is True
+    proc.wait(timeout=5)  # reap on POSIX: a zombie keeps the group alive
     assert group.terminate() is False  # job handle released / pgid already dead
 
 

@@ -289,7 +289,7 @@ async def serve_daemon(settings: Any, *, mock_host: bool = False) -> int:
     from leapflow.daemon.service import RuntimeLeapService
 
     runtime_dir = settings.runtime_dir
-    sock_path = runtime_dir / "leapd.sock"
+    sock_path = get_transport().readiness_path(runtime_dir)
     service = RuntimeLeapService(settings, mock_host=mock_host)
     await service.start()
     loop = asyncio.get_running_loop()

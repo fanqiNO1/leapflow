@@ -49,15 +49,25 @@ class WorkspaceMismatchError(ValueError):
 class SessionExecutionContext:
     """Per-session execution state: an engine + workspace + turn lock."""
 
+    # Coarse clocks quantize: on Windows, time.monotonic resolves to ~15.6ms,
+    # so two activities can share a timestamp. This counter stamps every
+    # activity strictly after the previous one, keeping "most recent" and
+    # "oldest" orderings deterministic.
+    _activity_counter = 0
+
     def __init__(self, session_id: str, engine: Any, workspace_root: Path) -> None:
         self.session_id = session_id
         self.engine = engine
         self.workspace_root = workspace_root
         self.lock = asyncio.Lock()  # serialize this session's own turns
         self.last_active = time.monotonic()
+        SessionExecutionContext._activity_counter += 1
+        self.activity_seq = SessionExecutionContext._activity_counter
 
     def touch(self) -> None:
         self.last_active = time.monotonic()
+        SessionExecutionContext._activity_counter += 1
+        self.activity_seq = SessionExecutionContext._activity_counter
 
 
 class SessionRegistry:
@@ -150,7 +160,7 @@ class SessionRegistry:
         ]
         if not candidates:
             return
-        oldest = min(candidates, key=lambda c: c.last_active)
+        oldest = min(candidates, key=lambda c: (c.last_active, c.activity_seq))
         del self._contexts[oldest.session_id]
 
     def active_count(self) -> int:
@@ -178,4 +188,7 @@ class SessionRegistry:
         """
         if not self._contexts:
             return None
-        return max(self._contexts.values(), key=lambda ctx: ctx.last_active)
+        return max(
+            self._contexts.values(),
+            key=lambda ctx: (ctx.last_active, ctx.activity_seq),
+        )
