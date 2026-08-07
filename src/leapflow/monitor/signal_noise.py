@@ -12,7 +12,6 @@ from __future__ import annotations
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from leapflow.domain.events import SystemEvent
@@ -218,10 +217,7 @@ class SignalNoiseGate:
         return any(suffix and lowered.endswith(str(suffix).lower()) for suffix in self.config.suffixes)
 
     def _matches_noisy_dir(self, path: str) -> bool:
-        try:
-            parts = set(Path(path).parts)
-        except (OSError, ValueError):
-            parts = set(path.split("/"))
+        parts = _path_parts(path)
         return any(name in parts for name in self.config.dir_names)
 
 
@@ -240,11 +236,13 @@ def _is_relative_to(path: str, root: str) -> bool:
     return path == root or path.startswith(root + "/")
 
 
+def _path_parts(path: str) -> set[str]:
+    """Split POSIX, Windows, and mixed-separator paths without OS-dependent Path.parts."""
+    return {part for part in str(path).replace("\\", "/").split("/") if part}
+
+
 def _has_hidden_state_segment(path: str) -> bool:
-    for part in Path(path).parts:
-        if part in {".cache", ".hermes", ".qoder", ".r2c"}:
-            return True
-    return False
+    return bool(_path_parts(path) & {".cache", ".hermes", ".qoder", ".r2c"})
 
 
 __all__ = [

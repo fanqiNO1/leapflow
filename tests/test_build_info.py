@@ -142,6 +142,35 @@ def test_run_git_returns_none_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -
     assert build_info._run_git(["rev-parse", "HEAD"], Path(".")) is None
 
 
+# ── _repo_root: source checkout and packaged-install degradation ─────────────
+
+
+def test_repo_root_finds_source_checkout_above_src_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    module_file = root / "src" / "leapflow" / "utils" / "build_info.py"
+    module_file.parent.mkdir(parents=True)
+    (root / ".git").mkdir()
+    monkeypatch.setattr(build_info, "__file__", str(module_file))
+
+    assert build_info._repo_root() == root
+
+
+def test_repo_root_degrades_without_fixed_parent_depth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_root = tmp_path / "site-packages" / "leapflow"
+    module_file = package_root / "utils" / "build_info.py"
+    module_file.parent.mkdir(parents=True)
+    monkeypatch.setattr(build_info, "__file__", str(module_file))
+
+    # Packaged installs have no .git/pyproject source root; this must still
+    # return a usable cwd for git probing (which then degrades to None), never
+    # raise from a fixed parents[3] assumption.
+    assert build_info._repo_root() == package_root
+
+
 # ── Integration smoke: this repository really is a git checkout ────────────
 
 

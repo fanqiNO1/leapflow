@@ -47,6 +47,20 @@ def test_state_roundtrip(tmp_path: Path) -> None:
     assert launcher.load_state(settings) is None
 
 
+def test_clear_state_is_best_effort_on_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+
+    class _DeniedPath:
+        def unlink(self, *, missing_ok: bool = False) -> None:
+            raise PermissionError("sandbox denied")
+
+    monkeypatch.setattr(launcher, "state_path", lambda _settings: _DeniedPath())
+
+    launcher.clear_state(settings)  # must not raise; /board can pick a fresh port
+
+
 def test_server_running_requires_open_port_and_valid_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

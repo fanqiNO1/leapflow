@@ -49,6 +49,25 @@ def test_signal_noise_gate_suppresses_noisy_dirs_inside_workspace() -> None:
     assert gate.stats["by_reason"] == {"transient_suffix": 1}
 
 
+def test_signal_noise_gate_suppresses_windows_style_noisy_dirs() -> None:
+    gate = SignalNoiseGate(SignalNoiseConfig(workspace_root="C:/repo", same_source_cooldown_s=0.0))
+
+    assert gate.should_pass(_event("fs.change", r"C:\repo\.cache\state.db")) is False
+    assert gate.should_pass(_event("fs.change", "C:/repo/node_modules/pkg/index.js")) is False
+
+    assert gate.stats["suppressed"] == 2
+    assert gate.stats["by_reason"] == {"path_fragment": 1, "noisy_dir": 1}
+
+
+def test_signal_noise_gate_handles_mixed_windows_separators_for_workspace() -> None:
+    gate = SignalNoiseGate(SignalNoiseConfig(workspace_root=r"C:\repo", same_source_cooldown_s=0.0))
+
+    assert gate.should_pass(_event("fs.change", "C:/repo/src/main.py")) is True
+
+    assert gate.stats["passed"] == 1
+    assert gate.stats["suppressed"] == 0
+
+
 def test_signal_noise_gate_suppresses_fs_changes_outside_workspace_by_default() -> None:
     gate = _gate()
 

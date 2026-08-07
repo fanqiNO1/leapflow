@@ -70,7 +70,11 @@ def write_state(settings: Any, state: dict[str, Any]) -> None:
 
 
 def clear_state(settings: Any) -> None:
-    state_path(settings).unlink(missing_ok=True)
+    """Best-effort removal of dashboard discovery state."""
+    try:
+        state_path(settings).unlink(missing_ok=True)
+    except OSError:
+        logger.debug("dashboard: failed to clear discovery state", exc_info=True)
 
 
 def _host_for_bind(bind: str) -> str:

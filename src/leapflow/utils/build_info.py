@@ -36,8 +36,28 @@ _GIT_TIMEOUT_S = 1.5
 
 
 def _repo_root() -> Path:
-    """Best-effort repo root: three levels above this file under ``src/leapflow``."""
-    return Path(__file__).resolve().parents[3]
+    """Best-effort source checkout root for git fingerprinting.
+
+    Source checkouts use ``.../src/leapflow/utils/build_info.py``, but packaged
+    installs may live under ``site-packages/leapflow`` without any repository
+    metadata. Walk upward looking for a real git checkout or a source-tree
+    ``pyproject.toml``; otherwise return the package directory. A non-checkout
+    cwd simply makes the later git calls return None (unknown), which is the
+    intended graceful degradation.
+    """
+    try:
+        here = Path(__file__).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return Path.cwd()
+    for candidate in here.parents:
+        if (candidate / ".git").exists():
+            return candidate
+        if (candidate / "pyproject.toml").exists() and (candidate / "src" / "leapflow").exists():
+            return candidate
+    try:
+        return here.parents[1]
+    except IndexError:
+        return here.parent
 
 
 def _run_git(args: List[str], cwd: Path) -> Optional[str]:
