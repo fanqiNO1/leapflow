@@ -7,6 +7,7 @@ the tool registry so a failed read-only search never trips the batch-stop gate.
 from __future__ import annotations
 
 import asyncio
+from pathlib import PurePath
 
 from leapflow.tools import file_operations as fo
 from leapflow.tools.file_operations import code_search, edit_file, file_find, file_write
@@ -27,7 +28,7 @@ def test_code_search_finds_matches_with_location(tmp_path) -> None:
 
     assert result["ok"] is True
     assert result["match_count"] >= 2
-    hits = {(m["path"].split("/")[-1], m["line"]) for m in result["matches"]}
+    hits = {(PurePath(m["path"]).name, m["line"]) for m in result["matches"]}
     assert ("a.py", 2) in hits and ("b.py", 1) in hits
     assert all("text" in m and m["line"] for m in result["matches"])
 
@@ -165,7 +166,7 @@ def test_file_find_recursive_glob(tmp_path) -> None:
     result = _run(file_find({"glob": "*.py", "path": str(tmp_path)}))
 
     assert result["ok"] is True
-    found = {p.split("/")[-1] for p in result["files"]}
+    found = {PurePath(p).name for p in result["files"]}
     assert found == {"mod.py", "top.py"}
 
 
@@ -176,7 +177,7 @@ def test_file_find_skips_dep_dirs(tmp_path) -> None:
 
     result = _run(file_find({"glob": "*.py", "path": str(tmp_path)}))
 
-    assert [p.split("/")[-1] for p in result["files"]] == ["keep.py"]
+    assert [PurePath(p).name for p in result["files"]] == ["keep.py"]
 
 
 def test_file_find_truncates_at_max_results(tmp_path) -> None:

@@ -180,7 +180,9 @@ def build_config_payload(ctx: "Context", args: str = "") -> dict[str, Any]:
 
     service = ConfigService(ctx.settings)
     try:
-        tokens = shlex.split(args)
+        from leapflow.utils.shell_lex import split_args
+
+        tokens = split_args(args)
     except ValueError as exc:
         return {"ok": False, "message": f"Invalid /config syntax: {exc}"}
     if not tokens:
@@ -702,7 +704,9 @@ def _parse_app_options(tokens: list[str]) -> tuple[dict[str, str], str]:
 
 def _parse_app_params(args: str) -> dict[str, Any]:
     try:
-        tokens = shlex.split(args)
+        from leapflow.utils.shell_lex import split_args
+
+        tokens = split_args(args)
     except ValueError as exc:
         return {"ok": False, "error": f"Invalid /app arguments: {exc}"}
 
@@ -1218,7 +1222,9 @@ async def _execute_dashboard(
     sub = name.split(" ", 1)[1].strip() if " " in name else ""
     rest = (sub + ((" " + args) if args else "")).strip() if sub else args.strip()
     try:
-        tokens = shlex.split(rest) if rest else []
+        from leapflow.utils.shell_lex import split_args
+
+        tokens = split_args(rest) if rest else []
     except ValueError:
         tokens = rest.split()
     verb = tokens[0].lower() if tokens else ""

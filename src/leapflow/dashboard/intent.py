@@ -9,9 +9,10 @@ template name — empty means the default (``generic``).
 
 from __future__ import annotations
 
-import shlex
 from dataclasses import dataclass
 from typing import Any, Mapping
+
+from leapflow.utils.shell_lex import split_args
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,7 @@ class DashboardIntent:
     def from_args(cls, args: str) -> "DashboardIntent":
         """Parse a slash argument string; the first token is the template name."""
         try:
-            tokens = shlex.split(args or "")
+            tokens = split_args(args or "")
         except ValueError:
             tokens = (args or "").split()
         return cls(template=tokens[0].strip() if tokens else "")
