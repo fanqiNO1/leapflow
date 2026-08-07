@@ -76,8 +76,12 @@ class _FailingStreamService(_FakeService):
 
 
 class _SlowFirstChunkService(_FakeService):
+    def __init__(self, first_chunk_delay: float = 0.16) -> None:
+        super().__init__()
+        self._first_chunk_delay = first_chunk_delay
+
     async def engine_chat(self, message: str, **kwargs: Any) -> AsyncIterator[StreamChunk]:
-        await asyncio.sleep(0.16)
+        await asyncio.sleep(self._first_chunk_delay)
         yield StreamChunk(request_id="", content=f"slow {message}", event_type="chunk")
         yield StreamChunk(request_id="", content="done", event_type="final")
 
@@ -617,11 +621,14 @@ async def test_daemon_client_stream_heartbeat_prevents_idle_timeout() -> None:
     with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
         server, task, runtime_dir = await _start_server(
             Path(root) / "runtime",
-            service=_SlowFirstChunkService(),
-            stream_heartbeat_s=0.03,
+            service=_SlowFirstChunkService(first_chunk_delay=0.6),
+            stream_heartbeat_s=0.1,
         )
         socket_path = get_transport().readiness_path(runtime_dir)
-        client = DaemonClient(socket_path, timeout_s=0.1)
+        # The read timeout must stay smaller than the first-chunk delay (so an
+        # idle stream would die) but large enough that slow CI dispatch latency
+        # cannot starve the first heartbeat; 0.3s keeps both invariants.
+        client = DaemonClient(socket_path, timeout_s=0.3)
 
         try:
             events = [event async for event in client.engine_chat("world")]
