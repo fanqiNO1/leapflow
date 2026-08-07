@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 from typing import Any, AsyncIterator, List, Optional
@@ -21,6 +22,30 @@ from leapflow.memory import (
 )
 from leapflow.skills.registry import Skill, SkillMetadata, SkillRegistry
 from leapflow.storage.trajectory_store import TrajectoryStore
+
+
+# ════════════════════════════════════════════════════════════════
+# Headless prompt_toolkit output
+# ════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture(autouse=(sys.platform == "win32"))
+def _headless_prompt_toolkit_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows, tests never attach to a real console; render through a DummyOutput.
+
+    prompt_toolkit's win32 default output probes the console screen buffer at
+    construction and raises NoConsoleScreenBufferError anywhere a real conhost
+    is absent (git-bash, CI, pytest capture). POSIX Vt100 output has no such
+    probe, so the fixture only arms on Windows. The import below is the exact
+    symbol Application resolves lazily, so replacing it covers every app the
+    tests build.
+    """
+    from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.output import defaults as _output_defaults
+
+    monkeypatch.setattr(
+        _output_defaults, "create_output", lambda *args, **kwargs: DummyOutput()
+    )
 
 
 # ════════════════════════════════════════════════════════════════

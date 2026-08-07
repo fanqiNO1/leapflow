@@ -193,7 +193,7 @@ def test_modules_importing(modules: set[str]) -> set[str]:
                 for name in names
                 for module in modules
             ):
-                selected.add(str(path.relative_to(REPO_ROOT)))
+                selected.add(path.relative_to(REPO_ROOT).as_posix())
                 break
     return selected
 
@@ -338,7 +338,7 @@ def journey_metadata() -> list[JourneyMeta]:
                 continue
         found.append(
             JourneyMeta(
-                path=str(path.relative_to(REPO_ROOT)),
+                path=path.relative_to(REPO_ROOT).as_posix(),
                 subject_paths=subjects,
                 live_signal=live,
             )
@@ -451,7 +451,7 @@ def build_map() -> int:
         if not test_file.endswith(".py"):
             continue
         try:
-            relative = str(Path(file_path).resolve().relative_to(REPO_ROOT))
+            relative = Path(file_path).resolve().relative_to(REPO_ROOT).as_posix()
         except ValueError:
             continue
         mapping.setdefault(test_file, set()).add(relative)

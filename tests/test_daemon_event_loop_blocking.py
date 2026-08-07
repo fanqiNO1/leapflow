@@ -263,7 +263,9 @@ class TestDeferredDbExecutor:
             result = await ctx._run_deferred_db(lambda: (time.sleep(0.3), 42)[1])
             elapsed = time.monotonic() - start
             assert result == 42
-            assert elapsed >= 0.3
+            # Windows' monotonic clock quantizes to ~15.6ms, so the measured
+            # interval can read a few ms short of the blocking sleep itself.
+            assert elapsed >= 0.3 - 0.03
         finally:
             stop.set()
             await ticker_task

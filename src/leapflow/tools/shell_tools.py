@@ -13,7 +13,6 @@ import asyncio
 import logging
 import os
 import re
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +26,7 @@ from leapflow.tools.execution_context import (
     workspace_scope_error,
 )
 from leapflow.utils.process_group import ProcessGroup
+from leapflow.utils.shell_lex import split_args
 
 logger = logging.getLogger(__name__)
 
@@ -159,13 +159,16 @@ def _expand_operand(token: str) -> str:
     Expansions that are not a single filesystem operand are discarded: a variable
     holding a search list (``$PATH``) expands to ``os.pathsep``-joined entries
     that begin with ``/`` but name no file, so treating it as a path would block
-    ordinary commands like ``echo $PATH`` or ``PATH=$PATH:./bin npm test``.
+    ordinary commands like ``echo $PATH`` or ``PATH=$PATH:./bin npm test``. On
+    Windows, mixed-shell environments (MSYS/git-bash) join the same list with
+    ``:``, so both separators disqualify — except a drive-letter colon.
     """
     candidate = token.split("=", 1)[-1]
     if "$" not in candidate:
         return candidate
     expanded = os.path.expandvars(candidate)
-    if os.pathsep in expanded or any(char.isspace() for char in expanded):
+    body = expanded[2:] if len(expanded) >= 2 and expanded[1] == ":" else expanded
+    if os.pathsep in body or ":" in body or any(char.isspace() for char in expanded):
         return ""
     return expanded
 
@@ -173,6 +176,11 @@ def _expand_operand(token: str) -> str:
 def _has_parent_traversal(operand: str) -> bool:
     """Return whether a relative operand walks upward out of its base directory."""
     return ".." in Path(operand).parts
+
+
+# Drive-letter operands (``C:\...`` / ``C:/...``) address files exactly like
+# POSIX ``/...`` ones; without this the gate never inspects them on Windows.
+_WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
 def _command_workspace_escape(command: str, cwd: Path | None = None) -> dict[str, Any] | None:
@@ -195,7 +203,7 @@ def _command_workspace_escape(command: str, cwd: Path | None = None) -> dict[str
         return None
     base = cwd if cwd is not None else ctx.workspace_root
     try:
-        tokens = shlex.split(command)
+        tokens = split_args(command)
     except ValueError:
         tokens = command.split()
     for token in tokens:
@@ -204,7 +212,7 @@ def _command_workspace_escape(command: str, cwd: Path | None = None) -> dict[str
         operand = _expand_operand(token)
         if not operand:
             continue
-        if operand.startswith(("/", "~")):
+        if operand.startswith(("/", "~")) or _WINDOWS_ABSOLUTE.match(operand):
             path = Path(operand)
         elif _has_parent_traversal(operand):
             path = base / operand

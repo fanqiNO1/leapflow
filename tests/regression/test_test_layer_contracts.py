@@ -93,7 +93,7 @@ def _test_modules() -> list[pathlib.Path]:
 
 
 def _relative(path: pathlib.Path) -> str:
-    return str(path.relative_to(TESTS_ROOT))
+    return path.relative_to(TESTS_ROOT).as_posix()
 
 
 def _harness_modules() -> list[pathlib.Path]:

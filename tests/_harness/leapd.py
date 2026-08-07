@@ -22,6 +22,7 @@ from typing import Any, Mapping
 
 from leapflow.daemon.client import DaemonClient
 from leapflow.daemon.lifecycle import DaemonInfo, cleanup_stale, wait_ready
+from leapflow.daemon._transport import get_transport
 from leapflow.layout import build_layout
 
 READY_TIMEOUT_S = 60.0
@@ -152,7 +153,7 @@ class Leapd:
     @property
     def sock_path(self) -> Path:
         """Unix socket the daemon listens on."""
-        return self.runtime_dir / "leapd.sock"
+        return get_transport().readiness_path(self.runtime_dir)
 
     @property
     def log_path(self) -> Path:
@@ -248,7 +249,7 @@ def start_leapd(
     runtime_dir.mkdir(parents=True, exist_ok=True)
     cleanup_stale(runtime_dir)
 
-    sock_path = runtime_dir / "leapd.sock"
+    sock_path = get_transport().readiness_path(runtime_dir)
     if len(str(sock_path)) > MAX_SOCKET_PATH_LEN:
         raise LeapdStartupError(
             f"daemon socket path is {len(str(sock_path))} bytes, over the "

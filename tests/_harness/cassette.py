@@ -46,6 +46,9 @@ _SCRUBBERS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b(?:sess|ws|req|traj|ep|skill|watch|call)-[0-9a-zA-Z]{6,}\b"), "<ID>"),
     (re.compile(r"\bcall_[0-9a-zA-Z]{6,}\b"), "<ID>"),
     (re.compile(r"/(?:private/)?(?:var|tmp)/[^\s\"',)\]]*"), "<TMP>"),
+    # Windows drive-letter paths: journeys scratch under %TEMP% and prompts
+    # plus tool results embed those paths, so normalize like POSIX /tmp.
+    (re.compile(r"[A-Za-z]:\\[^\s\"',)\]]*"), "<TMP>"),
     (re.compile(r"127\.0\.0\.1:\d+"), "127.0.0.1:<PORT>"),
     (re.compile(r"\b1[0-9]{9}(?:\.[0-9]+)?\b"), "<TS>"),
 )

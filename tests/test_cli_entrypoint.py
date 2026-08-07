@@ -941,12 +941,13 @@ async def test_host_doctor_stops_client_when_probe_fails(monkeypatch) -> None:
 async def test_host_status_reports_daemon_host_backend(monkeypatch, tmp_path, capsys) -> None:
     from conftest import make_settings
     from leapflow.cli.commands import host as host_module
+    from leapflow.daemon._transport import get_transport
 
     class Info:
         pid = 123
         is_healthy = True
         is_running = True
-        sock_path = tmp_path / "leapd.sock"
+        sock_path = get_transport().readiness_path(tmp_path)
 
     settings = replace(make_settings(str(tmp_path)), use_cua_driver=True)
 
