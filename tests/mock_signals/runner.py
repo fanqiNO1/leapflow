@@ -12,27 +12,23 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
-from leapflow.domain.events import SystemEvent
 from leapflow.memory.providers.episodic import EpisodicMemoryProvider
 from leapflow.memory.providers.working import WorkingMemoryProvider
-from leapflow.monitor.event_bridge import EventBridge
 from leapflow.monitor.manager import MonitorManager
 from leapflow.monitor.producers import ProducerRegistry
 from leapflow.monitor.types import (
     Finding,
-    MonitorProducer,
     ProducerContext,
     Severity,
     WatchSpec,
 )
 from leapflow.platform.event_bus import EventBus
-from leapflow.scheduler.triggers.event import EventTrigger
 from leapflow.storage.connection import LocalConnectionHolder
 
 from tests.mock_signals.generators import GENERATOR_REGISTRY, BaseGenerator, SignalConfig
-from tests.mock_signals.profiles import PROFILES, ScenarioProfile
+from tests.mock_signals.profiles import PROFILES
 
 
 # ─── Passthrough producer ────────────────────────────────────────────────
@@ -97,7 +93,7 @@ class RunResult:
         sep = "\u2550" * 55
         lines.append(f"\n{sep}")
         lines.append(f"  LeapFlow Mock Signal Injection \u2014 {self.profile}")
-        lines.append(f"  Mode: DAEMON (leapd RPC)")
+        lines.append("  Mode: DAEMON (leapd RPC)")
         lines.append(sep)
         lines.append("")
         lines.append(f"  Duration:        {self.duration_s:.2f}s")
@@ -361,12 +357,6 @@ class MockSignalRunner:
         total_debounced = sum(
             monitor.event_bridge.debounced_count(wid) for wid in watch_ids
         )
-        # Total events that matched a pattern = injected minus those that
-        # matched no pattern.  Non-debounced = matched - debounced.
-        total_matched = total_debounced + sum(
-            p.call_count for p in producer_instances.values()
-        )
-        total_triggers = result.events_injected - total_debounced
         total_findings = sum(
             len(monitor.list_findings(watch_id=wid)) for wid in watch_ids
         )

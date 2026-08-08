@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from leapflow.monitor import (
     EVENT_FINDING,
     Evidence,
@@ -19,6 +21,9 @@ from leapflow.monitor import (
 )
 from leapflow.monitor.finding_store import FindingStore
 from leapflow.monitor.types import ProducerContext
+from leapflow.scheduler.coordinator import parse_trigger_expression
+from leapflow.scheduler.triggers import create_trigger
+from leapflow.scheduler.triggers.event import EventTrigger
 from leapflow.storage.connection import LocalConnectionHolder
 
 
@@ -245,12 +250,6 @@ async def test_sweep_client_coupled_watches_is_noop_without_session_watches(tmp_
 
 
 # ── Event trigger expression tests ────────────────────────────────────────────
-
-import pytest
-
-from leapflow.scheduler.coordinator import parse_trigger_expression
-from leapflow.scheduler.triggers import create_trigger
-from leapflow.scheduler.triggers.event import EventTrigger
 
 
 def test_parse_event_trigger_fs_change() -> None:

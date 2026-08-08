@@ -1062,8 +1062,8 @@ async def test_composite_event_source_drop_count_property() -> None:
             return EventSourceStatus(ok=True, backend_kind=self.backend_kind)
 
         async def events(self):
-            return
-            yield  # noqa: unreachable — makes this an async generator
+            if False:
+                yield {}
 
     composite = CompositeEventSource([EmptySource()], platform_id="empty")
     assert composite.drop_count == 0
