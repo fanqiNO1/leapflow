@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -51,6 +52,7 @@ class CacheManager:
     def __init__(self, layout: CacheLayout, *, profile_id: str) -> None:
         self._layout = layout
         self._profile_id = profile_id
+        self._connect_lock = threading.Lock()
         self._layout.ensure()
         self._init_schema()
 
@@ -322,7 +324,9 @@ class CacheManager:
         )
 
     def _connect(self):
-        return duckdb.connect(str(self._layout.index_path))
+        """Create a DuckDB connection, serialized to protect against concurrent writes."""
+        with self._connect_lock:
+            return duckdb.connect(str(self._layout.index_path))
 
     def _is_managed_path(self, path: Path) -> bool:
         try:

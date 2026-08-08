@@ -7,6 +7,7 @@ covered by an importorskip guard.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -44,6 +45,20 @@ def test_state_roundtrip(tmp_path: Path) -> None:
     assert launcher.load_state(settings)["token"] == "t"
     launcher.clear_state(settings)
     assert launcher.load_state(settings) is None
+
+
+def test_clear_state_is_best_effort_on_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+
+    class _DeniedPath:
+        def unlink(self, *, missing_ok: bool = False) -> None:
+            raise PermissionError("sandbox denied")
+
+    monkeypatch.setattr(launcher, "state_path", lambda _settings: _DeniedPath())
+
+    launcher.clear_state(settings)  # must not raise; /board can pick a fresh port
 
 
 def test_server_running_requires_open_port_and_valid_token(
@@ -98,6 +113,63 @@ def test_ensure_server_requires_aiohttp(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr(launcher, "aiohttp_available", lambda: False)
     with pytest.raises(RuntimeError, match="aiohttp"):
         launcher.ensure_server(settings)
+
+
+# ── fetch_server_info: probes the *separate* long-lived server's own staleness ──
+
+
+class _FakeUrlResponse:
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> "_FakeUrlResponse":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+def test_fetch_server_info_parses_json_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {"build": {"commit": "abc123", "pid": 42}, "stale": True}
+
+    def _fake_urlopen(url: str, timeout: float = 0.0) -> _FakeUrlResponse:
+        assert "/api/server-info" in url and "token=tok" in url
+        return _FakeUrlResponse(200, json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    assert launcher.fetch_server_info("127.0.0.1", 8766, "tok") == payload
+
+
+def test_fetch_server_info_returns_none_without_token() -> None:
+    assert launcher.fetch_server_info("127.0.0.1", 8766, "") is None
+
+
+def test_fetch_server_info_returns_none_when_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise(url: str, timeout: float = 0.0) -> None:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", _raise)
+    assert launcher.fetch_server_info("127.0.0.1", 8766, "tok") is None
+
+
+def test_fetch_server_info_returns_none_on_non_2xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda url, timeout=0.0: _FakeUrlResponse(401, b'{"error": "unauthorized"}'),
+    )
+    assert launcher.fetch_server_info("127.0.0.1", 8766, "tok") is None
+
+
+def test_fetch_server_info_returns_none_on_malformed_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda url, timeout=0.0: _FakeUrlResponse(200, b"not json"),
+    )
+    assert launcher.fetch_server_info("127.0.0.1", 8766, "tok") is None
 
 
 def test_retire_stale_server_skips_kill_when_pid_unverified(
@@ -191,3 +263,64 @@ def test_server_build_app_requires_aiohttp() -> None:
     server = DashboardServer(client=_FakeClient(), token="t")
     app = server.build_app()
     assert app is not None
+
+
+# ── DashboardServer build/staleness self-report (own long-lived-process check) ──
+
+
+class _FakeViewProvider:
+    """Minimal DashboardDataProvider double: enough for _handle_view to render."""
+
+    async def watches(self) -> list:
+        return []
+
+    async def findings(self, *, watch_id: str = "", limit: int = 50) -> list:
+        return []
+
+    async def signal_metrics(self) -> dict:
+        return {"metrics": {}, "signal_stream": []}
+
+
+async def test_handle_view_attaches_server_build_meta() -> None:
+    pytest.importorskip("aiohttp")
+    server = DashboardServer(client=_FakeClient(), token="t")
+    server._provider = _FakeViewProvider()
+    request = SimpleNamespace(query={"token": "t", "template": "generic"}, headers={})
+
+    response = await server._handle_view(request)
+    spec = json.loads(response.text)
+
+    server_meta = spec["meta"]["server"]
+    assert server_meta["build"]["pid"] == server._build_info.pid
+    assert server_meta["stale"] in (True, False, None)
+
+
+async def test_handle_server_info_requires_token() -> None:
+    pytest.importorskip("aiohttp")
+    server = DashboardServer(client=_FakeClient(), token="t")
+    request = SimpleNamespace(query={}, headers={})
+
+    response = await server._handle_server_info(request)
+
+    assert response.status == 401
+
+
+async def test_handle_server_info_reports_captured_build_and_stale_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("aiohttp")
+    from leapflow.dashboard import server as server_module
+
+    server = DashboardServer(client=_FakeClient(), token="t")
+    # This process's own fingerprint check is irrelevant to the endpoint's
+    # wiring; pin the verdict so the assertion is deterministic.
+    monkeypatch.setattr(server_module, "is_stale", lambda info: True)
+    request = SimpleNamespace(query={"token": "t"}, headers={})
+
+    response = await server._handle_server_info(request)
+    payload = json.loads(response.text)
+
+    assert payload["stale"] is True
+    assert payload["build"]["pid"] == server._build_info.pid
+    assert payload["build"]["version"] == server._build_info.version
+

@@ -150,6 +150,26 @@ def test_template_library_unknown_falls_back_to_generic() -> None:
     assert spec["meta"]["template"] == "generic"
 
 
+def test_template_library_hides_retired_builtin_nav_even_with_override(tmp_path) -> None:
+    for name in ("finance", "research", "sentiment"):
+        (tmp_path / f"{name}.yaml").write_text(
+            f"template: {name}\ntitle: '{name}'\nlayout:\n  - type: Page\n    props:\n      title: '{name}'\n",
+            encoding="utf-8",
+        )
+    (tmp_path / "crypto.yaml").write_text(
+        "template: crypto\ntitle: 'Crypto'\nlayout:\n  - type: Page\n    props:\n      title: 'Crypto'\n",
+        encoding="utf-8",
+    )
+
+    lib = TemplateLibrary(override_dir=tmp_path)
+
+    assert "crypto" in lib.visible_names()
+    assert "finance" not in lib.visible_names()
+    assert "research" not in lib.visible_names()
+    assert "sentiment" not in lib.visible_names()
+    assert {"finance", "research", "sentiment"}.issubset(set(lib.hidden_names()))
+
+
 # ── DashboardIntent (dual entry) ────────────────────────────────────────────
 
 

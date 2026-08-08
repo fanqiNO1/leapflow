@@ -268,6 +268,76 @@ make test-live      # or: make record-traffic
 
 ---
 
+## Mock Signal Injection (`tests/mock_signals/`)
+
+Standalone framework for injecting simulated real-time streaming signals into the full LeapFlow pipeline. Exercises: EventBus → normalize → memory → EventBridge → EventTrigger → MonitorManager → Finding.
+
+### How it works
+
+```
+SignalGenerator(config) → EventBus.handle_event(event_type, payload)
+  → normalize → privacy gate → memory ingest → _notify_subscribers()
+    → EventBridge.on_event() → trigger.matches() → debounce → trigger.notify()
+      → MonitorManager.run_watch_once() → Producer.observe() → Finding
+```
+
+The runner builds an in-process pipeline (pure-memory providers + temp DuckDB), arms event-driven watches for each signal type, then injects events concurrently via `asyncio.gather`.
+
+### Usage
+
+```bash
+# Local mode (in-process pipeline, no daemon needed)
+python -m tests.mock_signals                     # Default "normal" profile
+python -m tests.mock_signals -p burst            # High-frequency burst
+python -m tests.mock_signals -p stress           # Max throughput stress test
+python -m tests.mock_signals -p mixed            # All signal types simultaneously
+python -m tests.mock_signals -p gateway          # External platform signals
+python -m tests.mock_signals --list              # Show all profiles
+python -m tests.mock_signals -p normal -d 30     # Override duration (seconds)
+python -m tests.mock_signals -p burst -f 2.0     # Frequency multiplier
+
+# Daemon mode (inject into running leapd — TUI + LeapBoard see results in real time)
+python -m tests.mock_signals --daemon                  # Normal profile → leapd
+python -m tests.mock_signals --daemon -p burst         # Burst → leapd
+python -m tests.mock_signals --daemon -p stress -d 30  # 30s stress test → leapd
+```
+
+**Local mode** builds an isolated in-process pipeline for fast iteration. **Daemon mode** (`--daemon`) connects to the running `leapd` via RPC and injects signals into the daemon's live EventBus — use this to verify the full end-to-end chain including TUI notifications, LeapBoard updates (`/board signals`), and event-driven watch triggers.
+
+### Signal types
+
+| Generator | Event type | Configurable parameters |
+|-----------|------------|------------------------|
+| `FsChangeGenerator` | `fs.change` | paths, actions (created/modified/deleted/moved) |
+| `AppFocusGenerator` | `app.focus_change` | apps (bundle_id + app_name) |
+| `ClipboardGenerator` | `clipboard.change` | texts, content_type |
+| `InputGenerator` | `ui.action` | action_type (click/type/scroll), app_bundle_id |
+| `GatewaySignalGenerator` | `gateway.signal` | platform_id, signal_type |
+| `GatewayMessageGenerator` | `gateway.message.received` | platform_id, sender |
+
+### SignalConfig (common to all generators)
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `frequency_hz` | 1.0 | Events per second |
+| `burst_size` | 1 | Events per burst |
+| `burst_interval_s` | 0.0 | Pause between bursts |
+| `duration_s` | 5.0 | Total generation time |
+| `jitter_ms` | 50.0 | Random timing jitter |
+
+### File structure
+
+```
+tests/mock_signals/
+├── __init__.py       # Public API exports
+├── __main__.py       # CLI entry point
+├── generators.py     # 6 signal generators (BaseGenerator + subclasses)
+├── profiles.py       # 5 predefined scenarios (normal/burst/mixed/stress/gateway)
+└── runner.py         # Orchestrator: pipeline setup → inject → measure → report
+```
+
+---
+
 ## Quick Start
 
 ```bash

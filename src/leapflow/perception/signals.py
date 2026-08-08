@@ -22,18 +22,22 @@ _MAX_SIGNALS_PER_INTERVAL = 50
 class SignalBuffer:
     """Thread-safe bounded buffer for interaction signals between polling frames."""
 
-    __slots__ = ("_signals", "_lock", "_capacity")
+    __slots__ = ("_signals", "_lock", "_capacity", "_dropped_count")
 
     def __init__(self, capacity: int = _MAX_SIGNALS_PER_INTERVAL) -> None:
         self._signals: List[InteractionSignal] = []
         self._lock = threading.Lock()
         self._capacity = capacity
+        self._dropped_count: int = 0
 
     def record(self, signal: InteractionSignal) -> None:
         """Append a signal to the buffer (dropped if at capacity)."""
         with self._lock:
             if len(self._signals) < self._capacity:
                 self._signals.append(signal)
+            else:
+                self._dropped_count += 1
+                logger.debug("SignalBuffer at capacity (%d), dropping signal", self._capacity)
 
     def drain(self) -> List[InteractionSignal]:
         """Return all buffered signals and clear the buffer."""
@@ -43,9 +47,15 @@ class SignalBuffer:
             return result
 
     def clear(self) -> None:
-        """Discard all buffered signals."""
+        """Discard all buffered signals and reset drop counter."""
         with self._lock:
             self._signals.clear()
+            self._dropped_count = 0
+
+    @property
+    def dropped_count(self) -> int:
+        """Number of signals dropped due to capacity overflow."""
+        return self._dropped_count
 
     @property
     def count(self) -> int:

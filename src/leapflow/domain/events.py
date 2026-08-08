@@ -17,12 +17,22 @@ PRIORITY_DEFERRED: int = 1   # System: unmapped / internal
 
 @dataclass(frozen=True)
 class SystemEvent:
-    """Normalized system event — uniform across all platforms."""
+    """Normalized system event — uniform across all platforms.
+
+    Timebase convention:
+    - ``timestamp``: wall-clock time (``time.time()`` epoch seconds). Suitable
+      for persistence and display but **not** for ordering or causal inference
+      because wall-clock can jump (NTP, suspend/resume, manual adjustment).
+    - ``payload["_mono_ts"]``: monotonic origin time (``time.monotonic()``)
+      injected by each observer at event creation. Used by
+      :class:`~leapflow.platform.reorder_buffer.EventReorderBuffer` for
+      arrival-order correction and temporal sorting.
+    """
 
     event_type: str
     source: str
     payload: Dict[str, Any]
-    timestamp: float
+    timestamp: float  # Wall-clock (time.time()); for storage/display only, NOT for ordering.
     platform_hint: str = ""
     priority: int = PRIORITY_NORMAL
 

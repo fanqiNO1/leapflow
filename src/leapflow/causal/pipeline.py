@@ -57,6 +57,17 @@ class ReorderBuffer:
     Holds events for up to `window_s` seconds before releasing them in
     timestamp order. This handles platform-level delivery jitter (e.g.,
     app_switch arriving 200ms after the keyboard shortcut that caused it).
+
+    Timebase note:
+        This buffer sorts by ``CausalEvent.timestamp`` (wall-clock, ``time.time()``
+        origin) because causal events are domain objects that may be serialized,
+        persisted, and correlated across sessions — monotonic clocks are not
+        comparable across processes or restarts.
+
+        In contrast, :class:`~leapflow.platform.reorder_buffer.EventReorderBuffer`
+        sorts by ``payload["_mono_ts"]`` (``time.monotonic()``) because it operates
+        within a single process lifetime on raw observer events where monotonic
+        ordering is both available and more reliable than wall-clock.
     """
 
     __slots__ = ("_window_s", "_buffer")

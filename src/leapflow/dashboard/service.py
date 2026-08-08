@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 @runtime_checkable
 class DashboardDataProvider(Protocol):
-    """Read-only data access the builder needs (watches and findings)."""
+    """Read-only data access the builder needs (watches, findings, signal metrics)."""
 
     async def watches(self) -> list[dict[str, Any]]:
         """Return all watch views."""
@@ -28,6 +28,10 @@ class DashboardDataProvider(Protocol):
 
     async def findings(self, *, watch_id: str = "", limit: int = 50) -> list[dict[str, Any]]:
         """Return findings, optionally scoped to a watch."""
+        ...
+
+    async def signal_metrics(self) -> dict[str, Any]:
+        """Return signal flow health metrics."""
         ...
 
 
@@ -43,6 +47,16 @@ class DaemonDataProvider:
     async def findings(self, *, watch_id: str = "", limit: int = 50) -> list[dict[str, Any]]:
         return list(await self._client.watch_findings(watch_id=watch_id, limit=limit))
 
+    async def signal_metrics(self) -> dict[str, Any]:
+        """Return signal flow health metrics and live stream from the daemon."""
+        result = await self._client.monitor_signal_metrics()
+        if result.get("ok"):
+            return {
+                "metrics": result.get("metrics", {}),
+                "signal_stream": result.get("signal_stream", []),
+            }
+        return {"metrics": {}, "signal_stream": []}
+
 
 def select_template(template: str, names: list[str]) -> str:
     """Return the requested template if available, else the generic fallback.
@@ -51,6 +65,64 @@ def select_template(template: str, names: list[str]) -> str:
     built-in ``generic`` default rather than failing.
     """
     return template if template and template in names else "generic"
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _sum_int_values(value: Any) -> int:
+    if isinstance(value, dict):
+        values = value.values()
+    elif isinstance(value, (list, tuple)):
+        values = value
+    else:
+        return 0
+    return sum(_safe_int(item) for item in values)
+
+
+def _distribution(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        label = str(row.get(key) or "unknown")
+        counts[label] = counts.get(label, 0) + 1
+    return [{"label": label, "value": count} for label, count in sorted(counts.items())]
+
+
+def _event_family(event_type: str) -> str:
+    normalized = str(event_type or "unknown").replace(":", ".")
+    return normalized.split(".", 1)[0] or "unknown"
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _signal_stream_item(evt: dict[str, Any]) -> dict[str, Any]:
+    event_type = str(evt.get("event_type") or evt.get("type") or "")
+    source = str(evt.get("source") or "")
+    family = _event_family(event_type)
+    timestamp = _safe_float(evt.get("ts") or evt.get("timestamp"))
+    return {
+        "title": event_type,
+        "event_type": event_type,
+        "summary": source,
+        "source": source,
+        "severity": "info",
+        "family": family,
+        "ts": timestamp,
+    }
+
+
+def _short_id(value: Any) -> str:
+    text = str(value or "")
+    return text[:8] if len(text) > 8 else text
 
 
 class DashboardViewBuilder:
@@ -65,6 +137,9 @@ class DashboardViewBuilder:
         LeapBoard has one analysis target (the current session); the intent only
         carries which template lens to render it with.
         """
+        template_name = intent.template
+        if template_name == "signals":
+            return await self._build_signals(template_name, provider)
         return await self._build_session(intent.template, provider)
 
     async def _build_session(self, template: str, provider: DashboardDataProvider) -> dict[str, Any]:
@@ -113,7 +188,64 @@ class DashboardViewBuilder:
         if isinstance(spec, dict):
             meta = spec.setdefault("meta", {})
             if isinstance(meta, dict):
-                meta["templates"] = self._templates.names()
+                meta["templates"] = self._templates.visible_names()
+                meta["hidden_templates"] = self._templates.hidden_names()
+                meta["active_template"] = name
+        return spec
+
+    async def _build_signals(self, template: str, provider: DashboardDataProvider) -> dict[str, Any]:
+        """Build signal flow observation view."""
+        metrics_result = await provider.signal_metrics()
+        watches = await provider.watches()
+        findings = await provider.findings(limit=20)
+        raw_metrics = metrics_result.get("metrics", {}) if isinstance(metrics_result, dict) else metrics_result
+        metrics = dict(raw_metrics or {}) if isinstance(raw_metrics, dict) else {}
+
+        # Use the raw signal event stream from the daemon ring buffer. Sort by
+        # event timestamp descending so "recent" is true on first render; the
+        # frontend still receives the full ring buffer and handles tab/limit UI.
+        raw_stream = metrics_result.get("signal_stream", []) if isinstance(metrics_result, dict) else []
+        stream_events = [dict(evt) for evt in raw_stream if isinstance(evt, dict)]
+        stream_events.sort(key=lambda evt: _safe_float(evt.get("ts") or evt.get("timestamp")), reverse=True)
+        signal_stream = [_signal_stream_item(evt) for evt in stream_events] or None
+
+        debounce_total = _sum_int_values(metrics.get("debounce_stats"))
+        metrics["total_debounced"] = debounce_total
+        metrics["signal_stream_count"] = len(stream_events)
+        metrics["total_drop_count"] = (
+            _safe_int(metrics.get("signal_buffer_dropped"))
+            + _safe_int(metrics.get("composite_source_dropped"))
+        )
+
+        trigger_rows = []
+        for trigger in metrics.get("trigger_stats") or []:
+            if not isinstance(trigger, dict):
+                continue
+            trigger_rows.append({
+                "watch": _short_id(trigger.get("watch_id")),
+                "pattern": str(trigger.get("pattern") or ""),
+                "triggered": "yes" if trigger.get("triggered") else "no",
+                "last_event": str(trigger.get("last_event") or ""),
+            })
+
+        event_family_rows = [{"family": str(evt.get("family") or "unknown")} for evt in (signal_stream or [])]
+        data = {
+            "signal_metrics": metrics,
+            "signal_stream": signal_stream,
+            "watches": watches if watches else None,
+            "findings": findings if findings else None,
+            "trigger_rows": trigger_rows,
+            "event_family_distribution": _distribution(event_family_rows, "family") if event_family_rows else None,
+            "watch_state_distribution": _distribution(watches, "state") if watches else None,
+            "finding_severity_distribution": _distribution(findings, "severity") if findings else None,
+        }
+        name = select_template(template, self._templates.names())
+        spec = self._templates.render(name, data)
+        if isinstance(spec, dict):
+            meta = spec.setdefault("meta", {})
+            if isinstance(meta, dict):
+                meta["templates"] = self._templates.visible_names()
+                meta["hidden_templates"] = self._templates.hidden_names()
                 meta["active_template"] = name
         return spec
 

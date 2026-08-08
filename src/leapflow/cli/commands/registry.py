@@ -137,6 +137,7 @@ COMMAND_REGISTRY: Tuple[CommandDef, ...] = (
     # Board & Monitors (LeapBoard) — one analysis target (current session),
     # rendered through a selectable template lens.
     CommandDef("board", "Analyze the current session; optionally pick a template lens", "Board", args_hint="[<template> | templates|refresh|pause|resume|stop|status]", effect=CommandEffect.SESSION, execution=CommandExecution.SHORT_OPERATION),
+    CommandDef("board signals", "View signal flow health and live event stream", "Board", effect=CommandEffect.READ_ONLY, execution=CommandExecution.SHORT_OPERATION),
     CommandDef("board templates", "List, add, remove, or show board templates", "Board", args_hint="[list|add <path.yaml> [--name id] [--force]|remove <id>|show <id>]", effect=CommandEffect.SESSION, execution=CommandExecution.SHORT_OPERATION),
     CommandDef("board refresh", "Re-analyze the current session (or a watch by id) now", "Board", args_hint="[<id>]", effect=CommandEffect.SESSION, execution=CommandExecution.SHORT_OPERATION),
     CommandDef("board pause", "Pause session analysis (or a watch by id)", "Board", args_hint="[<id>]", effect=CommandEffect.SESSION),

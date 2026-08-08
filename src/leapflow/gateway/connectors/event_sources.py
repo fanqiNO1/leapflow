@@ -5,11 +5,13 @@ import asyncio
 import json
 import logging
 import re
+import signal
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Mapping
 
 from leapflow.gateway.connectors.protocol import BackendEvent, EventSourceStatus
+from leapflow.utils.process_group import ProcessGroup
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +106,7 @@ class CliNdjsonEventSource:
         self._config = config
         self.platform_id = config.platform_id
         self._proc: asyncio.subprocess.Process | None = None
+        self._group: ProcessGroup | None = None
         self._running = False
         self._ready = asyncio.Event()
         self._restart_count = 0
@@ -232,7 +235,11 @@ class CliNdjsonEventSource:
     # ── Internal ─────────────────────────────────────────────
 
     async def _spawn_process(self) -> None:
-        """Spawn the CLI subprocess with stdin/stdout/stderr pipes."""
+        """Spawn the CLI subprocess with stdin/stdout/stderr pipes.
+
+        Uses ProcessGroup to track the process tree so that termination
+        kills all descendants, preventing orphan accumulation.
+        """
         if self._stderr_task is not None and not self._stderr_task.done():
             self._stderr_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -250,7 +257,20 @@ class CliNdjsonEventSource:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            start_new_session=True,
         )
+        # Attach to a ProcessGroup immediately so the whole process tree
+        # can be terminated cleanly on stop/restart.
+        try:
+            self._group = ProcessGroup()
+            self._group.attach(self._proc.pid)
+        except OSError:
+            logger.debug(
+                "Event source %s: process group unavailable",
+                self.platform_id, exc_info=True,
+            )
+            self._group = None
+
         self._stderr_task = asyncio.create_task(
             self._monitor_stderr(),
             name=f"stderr-{self.platform_id}",
@@ -341,7 +361,7 @@ class CliNdjsonEventSource:
             logger.error("Event source %s spawn failed: %s", self.platform_id, exc)
 
     async def _kill_process(self) -> None:
-        """Terminate the subprocess gracefully, then forcefully."""
+        """Terminate the subprocess gracefully, then forcefully via ProcessGroup."""
         if self._stderr_task and not self._stderr_task.done():
             self._stderr_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -349,10 +369,13 @@ class CliNdjsonEventSource:
             self._stderr_task = None
 
         proc = self._proc
+        group = self._group
         self._proc = None
+        self._group = None
         if proc is None or proc.returncode is not None:
             return
 
+        # Graceful: close stdin (signals the CLI to exit on its own).
         if proc.stdin and not proc.stdin.is_closing():
             proc.stdin.close()
             with suppress(Exception):
@@ -361,13 +384,21 @@ class CliNdjsonEventSource:
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
         except asyncio.TimeoutError:
-            with suppress(ProcessLookupError):
-                proc.terminate()
+            # Escalate: use ProcessGroup to SIGTERM the whole tree.
+            if group:
+                group.terminate(signal.SIGTERM)
+            else:
+                with suppress(ProcessLookupError):
+                    proc.terminate()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=3.0)
             except asyncio.TimeoutError:
-                with suppress(ProcessLookupError):
-                    proc.kill()
+                # Final escalation: SIGKILL via group or direct kill.
+                if group:
+                    group.terminate(signal.SIGKILL)
+                else:
+                    with suppress(ProcessLookupError):
+                        proc.kill()
                 with suppress(ProcessLookupError):
                     await proc.wait()
 

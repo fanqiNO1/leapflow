@@ -29,9 +29,10 @@ class EventReorderBuffer:
       relative to each other, but placed after all timestamped events in the window).
     """
 
-    def __init__(self, settle_s: float, emit: EmitFn) -> None:
+    def __init__(self, settle_s: float, emit: EmitFn, max_buffer_size: int = 5000) -> None:
         self._settle_s = settle_s
         self._emit = emit
+        self._max_buffer_size = max_buffer_size
         self._buffer: List[Tuple[float, str, Dict[str, Any]]] = []
         self._flush_task: Optional[asyncio.Task[None]] = None
         self._arrival_counter: int = 0
@@ -43,17 +44,25 @@ class EventReorderBuffer:
             self._arrival_counter += 1
             ts = float("inf") - 1.0 / self._arrival_counter
         self._buffer.append((ts, event_type, payload))
+
+        if len(self._buffer) >= self._max_buffer_size:
+            logger.warning(
+                "EventReorderBuffer reached capacity (%d), forcing flush",
+                self._max_buffer_size,
+            )
+            # Wait for any in-progress flush to complete (do NOT cancel it)
+            if self._flush_task is not None and not self._flush_task.done():
+                await self._flush_task
+            await self._flush()
+            return
+
         if self._flush_task is None or self._flush_task.done():
             self._flush_task = asyncio.create_task(self._delayed_flush())
 
     async def drain(self) -> None:
         """Flush all buffered events immediately (used on recording stop)."""
         if self._flush_task is not None and not self._flush_task.done():
-            self._flush_task.cancel()
-            try:
-                await self._flush_task
-            except asyncio.CancelledError:
-                pass
+            await self._flush_task  # Wait instead of cancel
         await self._flush()
 
     @property

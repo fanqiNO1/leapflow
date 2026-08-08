@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 EventCallback = Callable[[SystemEvent], None]
 
 _DEDUP_WINDOW_S = 2.0
+_SLOW_SUBSCRIBER_THRESHOLD_S = 0.1
 
 
 class EventBus:
@@ -203,51 +204,80 @@ class EventBus:
 
     def _notify_subscribers(self, event: SystemEvent) -> None:
         for cb in self._subscribers:
+            t0 = time.monotonic()
             try:
                 cb(event)
             except Exception:
                 logger.error("Event subscriber error", exc_info=True)
+            elapsed = time.monotonic() - t0
+            if elapsed >= _SLOW_SUBSCRIBER_THRESHOLD_S:
+                name = getattr(cb, "__qualname__", repr(cb))
+                logger.warning(
+                    "Slow event subscriber: %s took %.3fs", name, elapsed,
+                )
 
     def _fallback_normalize(self, event_type: str, payload: Dict[str, Any]) -> SystemEvent:
         """Legacy normalization when no EventNormalizer is configured."""
         import time
 
+        mono_ts = payload.get("_mono_ts")
+
         if event_type == EventTypes.FS_CHANGE:
             path = str(payload.get("path", ""))
             flags = payload.get("flags", 0)
             action = _infer_fs_action(int(flags))
+            normalized: Dict[str, Any] = {"path": path, "action": action, "raw_flags": flags}
+            if mono_ts is not None:
+                normalized["_mono_ts"] = mono_ts
             return SystemEvent(
                 event_type="fs.change",
                 source=path,
-                payload={"path": path, "action": action, "raw_flags": flags},
+                payload=normalized,
                 timestamp=payload.get("ts", time.time()),
             )
         if event_type == EventTypes.CLIPBOARD_CHANGE:
             text = str(payload.get("text", ""))
+            normalized = {"text": text, "char_count": len(text)}
+            if mono_ts is not None:
+                normalized["_mono_ts"] = mono_ts
             return SystemEvent(
                 event_type="clipboard.change",
                 source="system.clipboard",
-                payload={"text": text, "char_count": len(text)},
+                payload=normalized,
                 timestamp=payload.get("change_ts", time.time()),
             )
         if event_type == EventTypes.APP_FOCUS_CHANGE:
             bundle_id = str(payload.get("bundle_id", ""))
             app_name = str(payload.get("app_name", bundle_id))
+            normalized = {"bundle_id": bundle_id, "app_name": app_name}
+            if mono_ts is not None:
+                normalized["_mono_ts"] = mono_ts
             return SystemEvent(
                 event_type="app.focus_change",
                 source=bundle_id,
-                payload={"bundle_id": bundle_id, "app_name": app_name},
+                payload=normalized,
                 timestamp=time.time(),
             )
         if event_type == EventTypes.UI_ACTION:
             action = str(payload.get("action", "unknown"))
             app_bundle_id = str(payload.get("app_bundle_id", ""))
+            # UI_ACTION already spreads the full payload which includes _mono_ts
             return SystemEvent(
                 event_type="ui.action",
                 source=app_bundle_id,
                 payload={"sub_type": action, "app_bundle_id": app_bundle_id, **payload},
                 timestamp=payload.get("timestamp", time.time()),
             )
+        # Gateway/daemon events are pre-normalized upstream; pass through so
+        # downstream subscribers see the original event_type for matching.
+        if event_type.startswith("gateway.") or event_type.startswith("daemon."):
+            return SystemEvent(
+                event_type=event_type,
+                source=str(payload.get("_platform", payload.get("source", event_type))),
+                payload=payload,
+                timestamp=payload.get("timestamp", payload.get("ts", time.time())),
+            )
+        # internal.unmapped spreads the full payload which includes _mono_ts
         return SystemEvent(
             event_type="internal.unmapped",
             source=event_type,

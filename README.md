@@ -104,6 +104,77 @@ Inspect the agent's layered orientation and pending re-entries anytime with the 
 
 ---
 
+## Real-Time Signal Processing
+
+LeapFlow continuously observes the operating environment through a unified signal pipeline — signals are never dropped, noise never reaches the agent, and resources are never wasted on redundant data.
+
+### End-to-End Pipeline
+
+```
+Signal Sources ─────────────────────────────────────────────────────────────
+  app_focus │ clipboard │ fs_watcher │ input_tap │ gateway │ perception
+       │          │           │           │          │          │
+       ▼──────────▼───────────▼───────────▼──────────▼──────────▼
+EventBus ─────────────────────────────────────────────────────────────────
+  normalize → privacy gate → dedup (2s) → memory ingest → subscriber fan-out
+       │                                              │
+       ▼                                              ▼
+  EventReorderBuffer (50ms settle, monotonic sort)    Monitor / Scheduler
+       │                                              │
+       ▼                                              ▼
+CausalFusionPipeline (<10ms SLA)                   EventTrigger → Finding
+  denoise → chain_build → infer → hotspots            │
+       │                                              ▼
+       ▼                                         NotificationBus → LeapBoard
+CausalGraph (ring_limit=100)
+       │
+       ▼
+Learning (Progressive Trust: DRAFT → CANDIDATE → VERIFIED → PRODUCTION)
+```
+
+### Signal Sources
+
+| Source | Transport | Rate / Throttle | Module |
+|--------|-----------|-----------------|--------|
+| `app_focus` | 0.5s polling | — | `platform/observers/` |
+| `clipboard` | 1.0s polling | — | `platform/observers/` |
+| `fs_watcher` | watchdog push | — | `platform/observers/` |
+| `input_tap` | CGEventTap / pynput | 50ms throttle | `platform/observers/` |
+| `gateway` | NDJSON / webhook / long-poll | per-platform | `gateway/` |
+| `perception` | information-gain gated | max 5 fps | `perception/` |
+
+### Core Mechanisms
+
+- **EventBus** (`platform/event_bus.py`) — single entry point for all signals. Applies normalization, a privacy gate (redaction before downstream), deduplication within a 2-second sliding window, and routes to subscribers in batch.
+- **EventReorderBuffer** — optional 50ms settling window that re-sorts out-of-order events by monotonic timestamp before processing, critical for fusing cross-channel signals.
+- **CausalFusionPipeline** (`causal/`) — T1 tier with <10ms SLA; constructs causal chains from temporally adjacent events, infers reliability, and maintains a ring-buffered `CausalGraph` (100 nodes max).
+- **Monitor / EventBridge** (`monitor/`) — pattern-matched subscribers (fnmatch globs) with 1s debounce; triggers wake the Scheduler (<2s), which drives Producers to emit scored Findings onto the NotificationBus.
+
+### LeapBoard Observation
+
+The `/board` web dashboard exposes real-time signal health:
+
+- **Signal Health** — subscriber count, active triggers, watches, drops, debounced events
+- **Live Signal Stream** — last 50 raw events, rolling
+- **Watch Portfolio** — active event-driven watches and their trigger state
+- **Recent Findings** — latest scored observations from Producers
+
+### Testing Signals Locally
+
+```bash
+# Emit mock signals for development / integration tests
+uv run pytest tests/mock_signals/ -q
+
+# Inject a synthetic event into the running EventBus
+from leapflow.platform.event_bus import EventBus
+bus = EventBus()
+bus.handle_event("clipboard_change", {"content": "test", "app": "Terminal"})
+```
+
+See `tests/mock_signals/` for ready-made fixtures covering all six source types.
+
+---
+
 ## Built-in Coding Tools
 
 LeapFlow ships a first-class coding toolset so the agent can *locate → read → edit → verify* code precisely instead of rewriting whole files or shelling out blindly. Every tool is registered with governance metadata (`x_leapflow`) so it flows through the existing idempotency, approval, redaction, path-sensitivity, and audit paths.

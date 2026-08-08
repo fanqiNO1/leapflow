@@ -117,6 +117,7 @@ class ClipboardObserver:
             "content_type": content_type,
             "source_app": "",  # Platform-specific enrichment possible
             "change_ts": time.time(),
+            "_mono_ts": time.monotonic(),
         }
         try:
             await self._bus.handle_event(EventTypes.CLIPBOARD_CHANGE, payload)

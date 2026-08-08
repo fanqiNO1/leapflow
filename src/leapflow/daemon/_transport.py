@@ -89,7 +89,13 @@ class TcpLoopbackTransport(DaemonTransport):
 
     def _read_port(self, runtime_dir: Path) -> int:
         port_path = self._port_path(runtime_dir)
-        return int(port_path.read_text(encoding="utf-8").strip())
+        try:
+            port = int(port_path.read_text(encoding="utf-8").strip())
+        except ValueError as exc:
+            raise OSError(f"invalid daemon port file: {port_path}") from exc
+        if port <= 0 or port > 65535:
+            raise OSError(f"invalid daemon port value: {port}")
+        return port
 
     async def start_server(
         self,

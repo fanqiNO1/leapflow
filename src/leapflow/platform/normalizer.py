@@ -141,6 +141,17 @@ class EventNormalizer:
             event = self._normalize_context(payload)
         elif event_type == "event.intent_signal":
             event = self._normalize_intent(payload)
+        elif event_type.startswith("gateway.") or event_type.startswith("daemon."):
+            # Gateway/daemon events are pre-normalized; pass through as-is so
+            # downstream subscribers (e.g. MonitorManager EventBridge) see the
+            # original event_type for pattern-matching.
+            event = SystemEvent(
+                event_type=event_type,
+                source=str(payload.get("_platform", payload.get("source", event_type))),
+                payload=payload,
+                timestamp=payload.get("timestamp", payload.get("ts", time.time())),
+                platform_hint=self._manifest.platform_id.value,
+            )
         else:
             event = SystemEvent(
                 event_type="internal.unmapped",
@@ -165,6 +176,9 @@ class EventNormalizer:
             "semantic_actions": actions,
             "raw_flags": payload.get("flags"),
         }
+        mono_ts = payload.get("_mono_ts")
+        if mono_ts is not None:
+            normalized["_mono_ts"] = mono_ts
         return SystemEvent(
             event_type="fs.change",
             source=path,
@@ -175,10 +189,14 @@ class EventNormalizer:
 
     def _normalize_clipboard(self, payload: Dict[str, Any]) -> SystemEvent:
         text = str(payload.get("text", ""))
+        normalized: Dict[str, Any] = {"text": text, "char_count": len(text)}
+        mono_ts = payload.get("_mono_ts")
+        if mono_ts is not None:
+            normalized["_mono_ts"] = mono_ts
         return SystemEvent(
             event_type="clipboard.change",
             source="system.clipboard",
-            payload={"text": text, "char_count": len(text)},
+            payload=normalized,
             timestamp=payload.get("change_ts", payload.get("ts", time.time())),
             platform_hint=self._manifest.platform_id.value,
         )
@@ -190,6 +208,9 @@ class EventNormalizer:
         window_title = payload.get("window_title")
         if window_title:
             normalized["window_title"] = str(window_title)
+        mono_ts = payload.get("_mono_ts")
+        if mono_ts is not None:
+            normalized["_mono_ts"] = mono_ts
         return SystemEvent(
             event_type="app.focus_change",
             source=bundle_id,
@@ -245,6 +266,10 @@ class EventNormalizer:
             normalized["mouse_x"] = payload.get("mouse_x", 0)
             normalized["mouse_y"] = payload.get("mouse_y", 0)
 
+        mono_ts = payload.get("_mono_ts")
+        if mono_ts is not None:
+            normalized["_mono_ts"] = mono_ts
+
         return SystemEvent(
             event_type="ui.action",
             source=app_bundle_id or "unknown",
@@ -274,6 +299,9 @@ class EventNormalizer:
             "end_app": str(payload.get("end_app", "")),
             "cross_app": bool(payload.get("cross_app", False)),
         }
+        mono_ts = payload.get("_mono_ts")
+        if mono_ts is not None:
+            normalized["_mono_ts"] = mono_ts
         return SystemEvent(
             event_type="ui.action",
             source=app_bundle_id or "unknown",
@@ -292,6 +320,9 @@ class EventNormalizer:
         url = payload.get("url")
         if url:
             normalized["url"] = str(url)
+        mono_ts = payload.get("_mono_ts")
+        if mono_ts is not None:
+            normalized["_mono_ts"] = mono_ts
         return SystemEvent(
             event_type="context.change",
             source=bundle_id,

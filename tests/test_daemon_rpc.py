@@ -527,6 +527,26 @@ async def test_runtime_service_default_admission_capacity_is_three(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_runtime_service_status_reports_own_build_staleness(tmp_path, monkeypatch) -> None:
+    """status() must self-report whether this daemon process (captured once at
+    __init__) still matches the source tree, so a stale long-lived leapd is
+    diagnosable from 'leap daemon status' instead of looking like a bug.
+    """
+    from conftest import make_settings
+    import leapflow.daemon.service as service_module
+
+    service = service_module.RuntimeLeapService(make_settings(str(tmp_path)), mock_host=True)
+    captured_pid = service._build_info.pid
+    monkeypatch.setattr(service_module, "is_stale", lambda info: True)
+
+    status = await service.status()
+
+    assert status["build"]["pid"] == captured_pid
+    assert status["build"]["version"]
+    assert status["build"]["stale"] is True
+
+
+@pytest.mark.asyncio
 async def test_engine_chat_emits_queued_status_when_busy() -> None:
     """When the daemon is at capacity (all turn slots busy), a waiting client
     gets an immediate 'queued' status instead of a silent hang."""

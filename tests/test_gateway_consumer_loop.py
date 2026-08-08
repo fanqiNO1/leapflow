@@ -379,3 +379,85 @@ def test_has_rich_formatting_detects_headers_and_lists() -> None:
 
     md = "# Title\n\n- item one\n- item two"
     assert _has_rich_formatting(md) is True
+
+
+# ── Gateway signal → EventBus → Monitor EventBridge integration ───────
+
+
+@pytest.mark.asyncio
+async def test_gateway_signal_reaches_monitor_event_bridge(tmp_path: Any) -> None:
+    """BackendEvent(SIGNAL) → GatewayEventBridge → EventBus → Monitor EventBridge.
+
+    Verifies the full bypass path: a platform signal event flows through the
+    GatewayEventBridge into EventBus, and the Monitor EventBridge's trigger
+    fires when subscribed as an EventBus subscriber.
+    """
+    from leapflow.gateway.event_bridge import GatewayEventBridge
+    from leapflow.monitor.event_bridge import EventBridge as MonitorEventBridge
+    from leapflow.platform.event_bus import EventBus
+    from leapflow.memory.providers.episodic import EpisodicMemoryProvider
+    from leapflow.memory.providers.working import WorkingMemoryProvider
+    from leapflow.scheduler.triggers.event import EventTrigger
+
+    # Build a minimal EventBus (no normalizer — uses fallback, but we
+    # now have passthrough for gateway.* event types).
+    episodic = EpisodicMemoryProvider(ttl=60.0)
+    working = WorkingMemoryProvider()
+    event_bus = EventBus(immediate=episodic, working=working)
+
+    # Wire GatewayEventBridge → EventBus
+    gw_bridge = GatewayEventBridge(event_bus)
+
+    # Wire Monitor EventBridge ← EventBus (subscriber)
+    monitor_bridge = MonitorEventBridge()
+    trigger = EventTrigger(event_pattern="gateway.*")
+    monitor_bridge.register("watch-gw", trigger)
+    event_bus.subscribe(monitor_bridge.on_event)
+
+    # Simulate a SIGNAL BackendEvent arriving via gateway on_event callback
+    signal_event = BackendEvent(
+        event_id="ev_signal_1",
+        event_type="im.message.reaction.created_v1",
+        platform_id="feishu",
+        payload={"sender_id": "ou_user1"},
+    )
+    await gw_bridge.on_gateway_event(signal_event)
+
+    # The Monitor EventBridge trigger should have fired
+    assert trigger.is_triggered
+    assert trigger.last_event == "gateway.signal"
+
+
+@pytest.mark.asyncio
+async def test_gateway_message_event_reaches_monitor_event_bridge(tmp_path: Any) -> None:
+    """GatewayMessageReceived → GatewayEventBridge → EventBus → Monitor trigger."""
+    from leapflow.gateway.event_bridge import GatewayEventBridge
+    from leapflow.gateway.events import GatewayMessageReceived
+    from leapflow.gateway.protocol import MessageSource
+    from leapflow.monitor.event_bridge import EventBridge as MonitorEventBridge
+    from leapflow.platform.event_bus import EventBus
+    from leapflow.memory.providers.episodic import EpisodicMemoryProvider
+    from leapflow.memory.providers.working import WorkingMemoryProvider
+    from leapflow.scheduler.triggers.event import EventTrigger
+
+    episodic = EpisodicMemoryProvider(ttl=60.0)
+    working = WorkingMemoryProvider()
+    event_bus = EventBus(immediate=episodic, working=working)
+
+    gw_bridge = GatewayEventBridge(event_bus)
+
+    monitor_bridge = MonitorEventBridge()
+    trigger = EventTrigger(event_pattern="gateway.message.*")
+    monitor_bridge.register("watch-msg", trigger)
+    event_bus.subscribe(monitor_bridge.on_event)
+
+    # Simulate a GatewayMessageReceived event
+    msg_event = GatewayMessageReceived(
+        source=MessageSource(platform="feishu", chat_id="oc_1", user_id="ou_1"),
+        session_key="feishu:oc_1",
+        text="hello world",
+    )
+    await gw_bridge.on_gateway_event(msg_event)
+
+    assert trigger.is_triggered
+    assert trigger.last_event == "gateway.message.received"

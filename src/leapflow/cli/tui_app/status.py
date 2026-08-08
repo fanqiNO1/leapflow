@@ -103,6 +103,7 @@ class StatusBar:
         self.daemon_turn_waiting: int = 0
         self.watch_count: int = 0
         self.alert_count: int = 0
+        self.signal_stream_count: int = 0
         self.last_turn_elapsed: float = 0.0
         self._turn_start: float = 0.0
         self._session_start: float = time.monotonic()
@@ -303,3 +304,7 @@ class StatusBar:
             self.watch_count = max(0, watches)
         if alerts is not None:
             self.alert_count = max(0, alerts)
+
+    def increment_signal_stream(self) -> None:
+        """Increment the signal stream event counter (called on each signal.stream push)."""
+        self.signal_stream_count += 1

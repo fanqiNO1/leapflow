@@ -70,6 +70,7 @@ class FakeProcess:
             else [b"[event] ready event_key=test.event\n"],
         )
         self.stdin = FakeStreamWriter()
+        self.pid: int = 99999  # Fake PID for ProcessGroup.attach()
         self.returncode: int | None = None
         self._exit_code = exit_code
 

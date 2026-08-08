@@ -1573,6 +1573,9 @@ async def cmd_interactive_daemon(
                         app.invalidate()
                     elif event_type == "watch.state":
                         await _refresh_watch_count()
+                    elif event_type == "signal.stream":
+                        # Track signal flow activity for health visibility
+                        status.increment_signal_stream()
                     elif event_type == "monitor.error":
                         logger.debug("monitor error notification: %s", payload)
             except (DaemonUnavailableError, OSError, asyncio.IncompleteReadError):

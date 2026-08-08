@@ -70,7 +70,11 @@ def write_state(settings: Any, state: dict[str, Any]) -> None:
 
 
 def clear_state(settings: Any) -> None:
-    state_path(settings).unlink(missing_ok=True)
+    """Best-effort removal of dashboard discovery state."""
+    try:
+        state_path(settings).unlink(missing_ok=True)
+    except OSError:
+        logger.debug("dashboard: failed to clear discovery state", exc_info=True)
 
 
 def _host_for_bind(bind: str) -> str:
@@ -136,6 +140,33 @@ def probe_token(bind: str, port: int, token: str, *, timeout: float = 0.6) -> bo
         return False  # 401 -> token rejected by the running server
     except OSError:
         return False
+
+
+def fetch_server_info(bind: str, port: int, token: str, *, timeout: float = 0.8) -> Optional[dict[str, Any]]:
+    """Fetch the running dashboard server's own build/staleness self-report.
+
+    Best-effort: this is a diagnostic side-channel (``/board status`` and
+    ``leap daemon status`` use it to warn a developer that the *separate*
+    long-lived web server process has not picked up a recent source change),
+    never a hard dependency — any failure (server down, wrong token, bad JSON,
+    old server predating this endpoint) returns None rather than raising.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    if not token:
+        return None
+    try:
+        with urllib.request.urlopen(  # noqa: S310 - fixed localhost URL
+            build_url(bind, port, token, path="/api/server-info"), timeout=timeout
+        ) as response:
+            if not (200 <= int(getattr(response, "status", 200)) < 400):
+                return None
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError, UnicodeDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def server_running(settings: Any) -> Optional[dict[str, Any]]:
@@ -293,6 +324,7 @@ __all__ = [
     "build_view_url",
     "is_port_open",
     "probe_token",
+    "fetch_server_info",
     "server_running",
     "open_in_browser",
     "ensure_server",

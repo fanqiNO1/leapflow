@@ -10,11 +10,18 @@ import asyncio
 import logging
 from typing import AsyncIterator, Sequence
 
-from leapflow.gateway.connectors.protocol import BackendEvent, EventSourceStatus
+from leapflow.gateway.connectors.protocol import (
+    BackendEvent,
+    BackendEventSource,
+    EventSourceStatus,
+)
 
 logger = logging.getLogger(__name__)
 
 _SENTINEL = object()
+
+
+_DEFAULT_QUEUE_SIZE = 2048
 
 
 class CompositeEventSource:
@@ -22,24 +29,34 @@ class CompositeEventSource:
 
     Satisfies the ``BackendEventSource`` protocol.  Each child source
     gets its own consumer task that pushes events into a shared
-    ``asyncio.Queue``.  ``events()`` yields from the queue.
+    bounded ``asyncio.Queue``.  ``events()`` yields from the queue.
+
+    When the queue is full, the oldest event is discarded to make room
+    for the incoming one (drop-oldest back-pressure strategy).
+
+    The *maxsize* parameter controls the internal queue capacity
+    (default: ``_DEFAULT_QUEUE_SIZE = 2048``).  Callers can override it
+    to tune back-pressure behavior for high-throughput or
+    resource-constrained deployments.
     """
 
     backend_kind = "composite"
 
     def __init__(
         self,
-        sources: Sequence[object],
+        sources: Sequence[BackendEventSource],
         *,
         platform_id: str = "",
+        maxsize: int = _DEFAULT_QUEUE_SIZE,
     ) -> None:
         self._sources = list(sources)
         self.platform_id = platform_id or (
-            self._sources[0].platform_id if self._sources else "unknown"  # type: ignore[union-attr]
+            self._sources[0].platform_id if self._sources else "unknown"
         )
-        self._queue: asyncio.Queue[BackendEvent | object] = asyncio.Queue()
+        self._queue: asyncio.Queue[BackendEvent | object] = asyncio.Queue(maxsize=maxsize)
         self._tasks: list[asyncio.Task[None]] = []
         self._running = False
+        self._drop_count: int = 0
 
     async def start(self, *, checkpoint: str = "") -> EventSourceStatus:
         """Start all child sources."""
@@ -48,7 +65,7 @@ class CompositeEventSource:
 
         results: list[EventSourceStatus] = []
         for src in self._sources:
-            status = await src.start(checkpoint=checkpoint)  # type: ignore[union-attr]
+            status = await src.start(checkpoint=checkpoint)
             results.append(status)
 
         all_ok = all(r.ok for r in results)
@@ -74,7 +91,7 @@ class CompositeEventSource:
 
         for src in self._sources:
             try:
-                await src.stop()  # type: ignore[union-attr]
+                await src.stop()
             except Exception:
                 logger.debug("Error stopping child source", exc_info=True)
 
@@ -112,11 +129,30 @@ class CompositeEventSource:
                 await asyncio.gather(*self._tasks, return_exceptions=True)
             self._tasks.clear()
 
-    async def _consume_child(self, index: int, source: object) -> None:
+    @property
+    def drop_count(self) -> int:
+        """Number of events dropped due to queue back-pressure."""
+        return self._drop_count
+
+    async def _consume_child(self, index: int, source: BackendEventSource) -> None:
         """Read events from one child source and push them to the shared queue."""
         try:
-            async for event in source.events():  # type: ignore[union-attr]
-                await self._queue.put(event)
+            async for event in source.events():  # type: ignore[attr-defined]  # async-gen vs Protocol
+                try:
+                    self._queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    # Drop oldest event to make room (back-pressure strategy).
+                    try:
+                        self._queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                    self._queue.put_nowait(event)
+                    self._drop_count += 1
+                    logger.debug(
+                        "Composite queue full, dropped oldest event "
+                        "(child=%d, platform=%s, total_drops=%d)",
+                        index, self.platform_id, self._drop_count,
+                    )
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -132,7 +168,7 @@ class CompositeEventSource:
         statuses = []
         for src in self._sources:
             try:
-                statuses.append(await src.status())  # type: ignore[union-attr]
+                statuses.append(await src.status())
             except Exception:
                 statuses.append(EventSourceStatus(
                     ok=False, backend_kind="unknown", detail="status check failed",

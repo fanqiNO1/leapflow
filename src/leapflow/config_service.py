@@ -178,6 +178,12 @@ _FIELD_DESCRIPTIONS = {
     "web.extractor": "HTML reader for web_fetch. auto prefers trafilatura when the `web` extra is installed (`pip install 'leapflow[web]'`) and falls back to the built-in stdlib reader; stdlib pins the dependency-free reader.",
     "web.private_targets": "How web_fetch treats URLs resolving to loopback, private, link-local, or cloud-metadata addresses. approval asks the user each session (default), deny refuses without prompting (for unattended deployments), allow permits them silently and is only appropriate on a trusted network.",
     "web.cache_ttl_s": "Seconds a fetched body is reused from the session cache (0 disables caching). Entries are session-scoped and never synced.",
+    "signal.noise_gate_enabled": "Enable monitor/LeapBoard suppression of low-value signal noise before it wakes watches or enters the live stream.",
+    "signal.noise_same_source_cooldown_s": "Suppress repeated fs.change events from the same source path within this many seconds (0 disables burst suppression).",
+    "signal.noise_allow_fs_outside_workspace": "Allow fs.change events outside the active workspace into monitor/LeapBoard signal flow (default false to avoid system and unrelated-project churn).",
+    "signal.noise_path_fragments": "Path fragments treated as monitor/display noise for fs.change events, e.g. OS caches and tool state directories.",
+    "signal.noise_dir_names": "Directory names treated as monitor/display noise for fs.change events.",
+    "signal.noise_suffixes": "Filename suffixes treated as transient fs.change noise, e.g. WAL/SHM/journal/temp/log files.",
 }
 
 _SECTION_CATEGORIES = {
@@ -226,6 +232,9 @@ _VALUE_HINTS = {
     "daemon.log_level": "DEBUG|INFO|WARNING|ERROR",
     "recording.mode": "video|default|vision_only",
     "signal.channels": "all or comma-separated channel names",
+    "signal.noise_path_fragments": "comma-separated path fragments",
+    "signal.noise_dir_names": "comma-separated directory names",
+    "signal.noise_suffixes": "comma-separated suffixes",
     "web.transport": "auto|httpx|curl",
     "web.extractor": "auto|stdlib",
     "web.private_targets": "approval|deny|allow",
