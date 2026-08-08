@@ -315,6 +315,10 @@ async def test_handle_server_info_reports_captured_build_and_stale_verdict(
     # This process's own fingerprint check is irrelevant to the endpoint's
     # wiring; pin the verdict so the assertion is deterministic.
     monkeypatch.setattr(server_module, "is_stale", lambda info: True)
+    # _server_info() is a non-blocking cache read; force one deterministic
+    # refresh so the assertion below does not race the background task that
+    # current() would otherwise schedule.
+    await server._build_staleness.refresh(server_module.is_stale)
     request = SimpleNamespace(query={"token": "t"}, headers={})
 
     response = await server._handle_server_info(request)

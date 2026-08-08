@@ -25,7 +25,7 @@ from leapflow.dashboard.intent import DashboardIntent
 from leapflow.dashboard.service import DaemonDataProvider, DashboardViewBuilder
 from leapflow.dashboard.templates import TemplateLibrary
 from leapflow.monitor.types import EVENT_ERROR, EVENT_FINDING, EVENT_HEARTBEAT, EVENT_WATCH_STATE
-from leapflow.utils.build_info import capture_build_info, is_stale
+from leapflow.utils.build_info import StalenessMonitor, capture_build_info, is_stale
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +60,11 @@ class DashboardServer:
         self._upstream_task: Optional[asyncio.Task[None]] = None
         # Captured once at server startup so /api/server-info and the ViewSpec
         # meta can report whether this long-lived process is still fresh
-        # relative to the source tree (see leapflow.utils.build_info).
+        # relative to the source tree (see leapflow.utils.build_info). Wrapped
+        # in a non-blocking cache so a browser refresh never waits on a git
+        # subprocess.
         self._build_info = capture_build_info()
+        self._build_staleness = StalenessMonitor(self._build_info)
 
     # ── App wiring ─────────────────────────────────────────────────────────
 
@@ -95,6 +98,7 @@ class DashboardServer:
             while True:
                 await asyncio.sleep(3600)
         finally:
+            self._build_staleness.cancel_pending()
             await runner.cleanup()
 
     # ── Auth ───────────────────────────────────────────────────────────────
@@ -160,8 +164,14 @@ class DashboardServer:
         return web.json_response(await self._server_info())
 
     async def _server_info(self) -> dict[str, Any]:
-        """Build the {build, stale} payload shared by the view meta and the endpoint."""
-        stale = await asyncio.to_thread(is_stale, self._build_info)
+        """Build the {build, stale} payload shared by the view meta and the endpoint.
+
+        Non-blocking: returns the last cached verdict and refreshes it in the
+        background once due, rather than awaiting the git subprocess on every
+        request. `is_stale` is looked up here (not bound at __init__ time) so
+        tests can still `monkeypatch.setattr(server_module, "is_stale", ...)`.
+        """
+        stale = self._build_staleness.current(is_stale)
         return {"build": self._build_info.to_dict(), "stale": stale}
 
     async def _handle_action(self, request: Any) -> Any:

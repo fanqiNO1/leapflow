@@ -7,6 +7,7 @@ git being installed at all) and run identically in any CI environment.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 from pathlib import Path
@@ -112,6 +113,92 @@ def test_to_dict_is_plain_json_safe_and_coerces_none_to_empty_string(
         "pid": os.getpid(),
         "started_at": info.started_at,
     }
+
+
+# ── StalenessMonitor: non-blocking cache around is_stale ─────────────────────
+
+
+def _info(commit: str = "abc123") -> build_info.BuildInfo:
+    return build_info.BuildInfo(
+        version=__version__, commit=commit, dirty_digest="d1", pid=os.getpid(), started_at=0.0,
+    )
+
+
+def test_staleness_monitor_current_is_none_before_first_refresh_completes() -> None:
+    """The first call must return instantly, never blocking on ``checker``."""
+    monitor = build_info.StalenessMonitor(_info())
+
+    verdict = monitor.current(lambda captured: True)
+
+    assert verdict is None  # unknown: the background refresh has not run yet
+
+
+async def test_staleness_monitor_current_reflects_background_refresh_once_it_completes() -> None:
+    monitor = build_info.StalenessMonitor(_info())
+    monitor.current(lambda captured: True)  # schedules the background refresh
+
+    for _ in range(50):
+        if monitor.current(lambda captured: True) is not None:
+            break
+        await asyncio.sleep(0.01)
+
+    assert monitor.current(lambda captured: True) is True
+
+
+async def test_staleness_monitor_does_not_reschedule_refresh_within_ttl() -> None:
+    calls = 0
+
+    def _checker(captured: build_info.BuildInfo) -> Optional[bool]:
+        nonlocal calls
+        calls += 1
+        return False
+
+    monitor = build_info.StalenessMonitor(_info(), ttl_s=60.0)
+    await monitor.refresh(_checker)
+    assert calls == 1
+
+    # Within the TTL window, repeated current() calls must not schedule
+    # another background refresh.
+    for _ in range(5):
+        monitor.current(_checker)
+    await asyncio.sleep(0)
+    assert calls == 1
+
+
+async def test_staleness_monitor_refresh_is_synchronous_and_deterministic() -> None:
+    monitor = build_info.StalenessMonitor(_info())
+
+    verdict = await monitor.refresh(lambda captured: True)
+
+    assert verdict is True
+    assert monitor.current(lambda captured: True) is True
+
+
+def test_staleness_monitor_current_without_running_loop_degrades_gracefully() -> None:
+    """Called from sync code (no running loop), current() must not raise."""
+    monitor = build_info.StalenessMonitor(_info())
+
+    assert monitor.current(lambda captured: True) is None
+
+
+def test_staleness_monitor_cancel_pending_is_noop_without_pending_refresh() -> None:
+    monitor = build_info.StalenessMonitor(_info())
+
+    monitor.cancel_pending()  # must not raise when nothing is in flight
+
+
+async def test_staleness_monitor_cancel_pending_cancels_inflight_refresh() -> None:
+    async def _hang() -> Optional[bool]:
+        await asyncio.sleep(3600)
+        return True
+
+    monitor = build_info.StalenessMonitor(_info())
+    monitor._refresh_task = asyncio.ensure_future(_hang())
+
+    monitor.cancel_pending()
+
+    with pytest.raises(asyncio.CancelledError):
+        await monitor._refresh_task
 
 
 # ── _run_git: graceful degradation on subprocess failure ────────────────────
