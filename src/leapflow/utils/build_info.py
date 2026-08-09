@@ -20,13 +20,14 @@ than ``_GIT_TIMEOUT_S``.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from leapflow.version import __version__
 
@@ -147,4 +148,73 @@ def is_stale(captured: BuildInfo) -> Optional[bool]:
     return commit != captured.commit or digest != captured.dirty_digest
 
 
-__all__ = ["BuildInfo", "capture_build_info", "is_stale"]
+# Refresh cadence for :class:`StalenessMonitor`. Staleness is a "restart me"
+# hint for a developer, not a real-time signal, so a coarse cadence trades an
+# acceptable amount of freshness for zero risk of blocking a status call.
+_DEFAULT_STALENESS_TTL_S = 30.0
+
+
+class StalenessMonitor:
+    """Non-blocking, TTL-cached wrapper around a staleness check.
+
+    ``is_stale`` re-derives its verdict via a fresh subprocess call every
+    time, which is exactly right for correctness but wrong for a hot path:
+    daemon ``status()`` RPCs and dashboard view handlers must return promptly
+    even while other background work (e.g. a deferred DB worker) is busy, and
+    a caller-facing deadline can be shorter than a loaded git invocation.
+
+    :meth:`current` never awaits the check itself — it returns the
+    last-known verdict (``None`` = "unknown, still checking" before the
+    first refresh completes) and, once ``ttl_s`` has elapsed, schedules a
+    fire-and-forget background refresh via :meth:`refresh`. Callers that need
+    a deterministic, synchronous result (tests, a first-use warmup) can
+    ``await monitor.refresh(checker)`` directly.
+
+    ``checker`` is accepted as a parameter (defaulting to :func:`is_stale`)
+    rather than bound at construction time, so call sites that pass their own
+    module-level ``is_stale`` reference keep working with
+    ``monkeypatch.setattr(module, "is_stale", ...)``-style test doubles.
+    """
+
+    def __init__(self, captured: BuildInfo, ttl_s: float = _DEFAULT_STALENESS_TTL_S) -> None:
+        self._captured = captured
+        self._ttl_s = ttl_s
+        self._value: Optional[bool] = None
+        self._checked_at: float = 0.0
+        self._refresh_task: "Optional[asyncio.Task[Optional[bool]]]" = None
+
+    def current(self, checker: Callable[[BuildInfo], Optional[bool]] = is_stale) -> Optional[bool]:
+        """Return the last-known verdict; never blocks on ``checker``.
+
+        Schedules a background refresh once ``ttl_s`` has elapsed since the
+        last completed check (or immediately, on first use).
+        """
+        due = time.time() - self._checked_at >= self._ttl_s
+        if due and (self._refresh_task is None or self._refresh_task.done()):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                self._refresh_task = loop.create_task(self.refresh(checker))
+        return self._value
+
+    async def refresh(self, checker: Callable[[BuildInfo], Optional[bool]] = is_stale) -> Optional[bool]:
+        """Synchronously run ``checker`` off-thread and cache the verdict.
+
+        Safe to ``await`` directly when a caller needs a deterministic result
+        (e.g. right after startup, or in a test) instead of racing the
+        background refresh that :meth:`current` schedules.
+        """
+        self._value = await asyncio.to_thread(checker, self._captured)
+        self._checked_at = time.time()
+        return self._value
+
+    def cancel_pending(self) -> None:
+        """Cancel any in-flight background refresh; call during shutdown."""
+        task = self._refresh_task
+        if task is not None and not task.done():
+            task.cancel()
+
+
+__all__ = ["BuildInfo", "StalenessMonitor", "capture_build_info", "is_stale"]

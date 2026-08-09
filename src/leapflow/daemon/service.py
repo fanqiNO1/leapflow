@@ -39,7 +39,7 @@ from leapflow.daemon.session_coordinator import SessionCoordinator
 from leapflow.daemon.turn_admission import TurnAdmission
 from leapflow.engine import StreamEvent
 from leapflow.memory.protocol import MemoryQuery
-from leapflow.utils.build_info import capture_build_info, is_stale
+from leapflow.utils.build_info import StalenessMonitor, capture_build_info, is_stale
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +70,13 @@ class RuntimeLeapService:
         self._started_at = time.time()
         # Captured once at daemon startup so status() can tell a developer
         # this process is stale (source changed since it started) instead of
-        # a fixed behavior change looking like a code defect.
+        # a fixed behavior change looking like a code defect. The staleness
+        # check itself shells out to git, so it is wrapped in a non-blocking
+        # cache: status() must return promptly even while other background
+        # work (e.g. a deferred DB worker) is busy (see
+        # test_daemon_event_loop_blocking.py).
         self._build_info = capture_build_info()
+        self._build_staleness = StalenessMonitor(self._build_info)
         self._client_count: Callable[[], int] = lambda: 0
         self._client_leases: Callable[[], list[ClientLeaseSnapshot]] = lambda: []
         self._approval_coordinator = ApprovalCoordinator(
@@ -133,6 +138,7 @@ class RuntimeLeapService:
                     self._observation = None
 
     async def shutdown(self) -> None:
+        self._build_staleness.cancel_pending()
         if self._ctx is None:
             return
         ctx = self._ctx
@@ -756,7 +762,12 @@ class RuntimeLeapService:
         self._approval_coordinator.prune_stale()
         clients = await asyncio.to_thread(self._safe_client_lease_summaries)
         host = await asyncio.to_thread(host_backend_status, ctx)
-        build_stale = await asyncio.to_thread(is_stale, self._build_info)
+        # Non-blocking: returns the last cached verdict (None on the very
+        # first call) and refreshes it in the background, never awaiting the
+        # git subprocess on this hot path. `is_stale` is looked up here (not
+        # bound at __init__ time) so tests can still
+        # `monkeypatch.setattr(service_module, "is_stale", ...)`.
+        build_stale = self._build_staleness.current(is_stale)
         return {
             "pid": os.getpid(),
             "profile": getattr(settings, "profile", "default"),

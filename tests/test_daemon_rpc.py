@@ -538,6 +538,10 @@ async def test_runtime_service_status_reports_own_build_staleness(tmp_path, monk
     service = service_module.RuntimeLeapService(make_settings(str(tmp_path)), mock_host=True)
     captured_pid = service._build_info.pid
     monkeypatch.setattr(service_module, "is_stale", lambda info: True)
+    # status() itself is a non-blocking cache read (see
+    # test_daemon_event_loop_blocking.py); force one deterministic refresh so
+    # this assertion does not race the background task current() schedules.
+    await service._build_staleness.refresh(service_module.is_stale)
 
     status = await service.status()
 
