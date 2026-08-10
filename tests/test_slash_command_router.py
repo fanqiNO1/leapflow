@@ -151,6 +151,10 @@ def test_tools_payload_groups_desktop_tools_when_perception_online() -> None:
 
     ctx = SimpleNamespace(rpc=SimpleNamespace(connected=False), platform_tools=[])
 
+    # An earlier test in this worker may have constructed an AgentEngine, which
+    # installs a catalog provider globally; the offline baseline needs a clean
+    # slate.
+    rb.set_capability_catalog_provider(None)
     offline = build_tool_payload(ctx)
     assert "desktop" not in offline["groups"]
     offline_total = offline["total"]
