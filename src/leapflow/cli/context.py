@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -1508,6 +1507,12 @@ class Context:
             logger.debug("Shell approval gate: action orchestrator mode")
         except Exception:
             logger.debug("Shell approval gate setup skipped", exc_info=True)
+        try:
+            from leapflow.tools.registry_bootstrap import set_desktop_gate
+            set_desktop_gate(self._approval_orchestrator)
+            logger.debug("Desktop approval gate: action orchestrator mode")
+        except Exception:
+            logger.debug("Desktop approval gate setup skipped", exc_info=True)
 
         self._critical_tool_bridge = tool_bridge
 

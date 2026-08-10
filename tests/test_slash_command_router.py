@@ -138,3 +138,34 @@ def test_build_orient_payload_renders_layers_and_guards_missing_engine() -> None
     assert payload["ok"] is True
     assert "finding A" in payload["message"]
     assert payload["orientation"]["total"] == 2
+
+
+def test_tools_payload_groups_desktop_tools_when_perception_online() -> None:
+    """/tools must reflect the live catalog, not just the static registry."""
+    from types import SimpleNamespace
+
+    from leapflow.cli.commands.slash_handlers import build_tool_payload
+    from leapflow.skills.semantic_schema import semantic_tool_to_openai
+    from leapflow.skills.tool_executor import ToolDefinition
+    from leapflow.tools import registry_bootstrap as rb
+
+    ctx = SimpleNamespace(rpc=SimpleNamespace(connected=False), platform_tools=[])
+
+    offline = build_tool_payload(ctx)
+    assert "desktop" not in offline["groups"]
+    offline_total = offline["total"]
+
+    desktop_defs = [
+        semantic_tool_to_openai(ToolDefinition(name=name, description="d", parameters={}))
+        for name in ("click", "observe_ui", "list_apps")
+    ]
+    rb.set_capability_catalog_provider(lambda: list(rb.TOOL_DEFINITIONS) + desktop_defs)
+    try:
+        online = build_tool_payload(ctx)
+        assert set(online["groups"]["desktop"]) == {"click", "list_apps", "observe_ui"}
+        assert online["total"] == offline_total + 3
+        # Existing display categories stay untouched.
+        assert "shell_run" in online["groups"]["shell"]
+        assert "file_read" in online["groups"]["file"]
+    finally:
+        rb.set_capability_catalog_provider(None)

@@ -66,6 +66,7 @@ class Methods:
     APP_LAUNCH = "app.launch"
     APP_ACTIVATE = "app.activate"
     APP_LIST = "app.list"
+    OPEN_URL = "url.open"
 
     CLIPBOARD_GET = "clipboard.get"
     CLIPBOARD_SET = "clipboard.set"

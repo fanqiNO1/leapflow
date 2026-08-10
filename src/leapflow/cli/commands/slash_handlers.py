@@ -23,9 +23,11 @@ logger = logging.getLogger(__name__)
 def build_tool_payload(ctx: "Context") -> dict[str, Any]:
     """Build a serializable tool summary for local or daemon rendering."""
     from leapflow.cli.banner import _categorize_tools
-    from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+    from leapflow.tools.registry_bootstrap import _capability_catalog
 
-    tool_groups = _categorize_tools(TOOL_DEFINITIONS)
+    # Live catalog: static registry plus semantic desktop tools while
+    # perception is online (falls back to the static list otherwise).
+    tool_groups = _categorize_tools(_capability_catalog())
     groups = {category: sorted(names) for category, names in tool_groups.items()}
     mcp_count = 0
     if hasattr(ctx.rpc, "connected") and ctx.rpc.connected:

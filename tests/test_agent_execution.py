@@ -2128,19 +2128,280 @@ def test_record_tool_call_categories_caches_capability_manifests(monkeypatch) ->
     import leapflow.engine.engine as engine_module
 
     calls = 0
+    real_build = engine_module.build_capability_manifests
 
-    def fake_build_capability_manifests(tool_definitions):
+    def counting_build(tool_definitions):
         nonlocal calls
         calls += 1
-        return [SimpleNamespace(name="text_replace", category="write")]
+        return real_build(tool_definitions)
 
-    monkeypatch.setattr(engine_module, "build_capability_manifests", fake_build_capability_manifests)
-    engine = object.__new__(AgentEngine)
-    engine._last_turn_tool_categories = frozenset()
-    engine._manifests_by_name = None
+    monkeypatch.setattr(engine_module, "build_capability_manifests", counting_build)
 
-    engine._record_tool_call_categories([SimpleNamespace(name="text_replace")])
-    engine._record_tool_call_categories([SimpleNamespace(name="text_replace")])
+    with tempfile.TemporaryDirectory() as td:
+        settings = make_settings(td)
+        from leapflow.platform.mock import MockBridge
 
-    assert calls == 1
-    assert engine._last_turn_tool_categories == frozenset({"write"})
+        rpc = MockBridge()
+        llm = StubLLM(["ok"])
+        wm = WorkingMemoryProvider(max_tokens=1024)
+        lt = SemanticMemoryProvider(source=settings.duckdb_path)
+        imm = EpisodicMemoryProvider()
+        try:
+            reg = build_default_registry(rpc, llm, wm, lt)
+            engine = AgentEngine(
+                settings, rpc, llm, wm, lt, imm, reg, _FixedClassifier("chat"),
+            )
+
+            engine._record_tool_call_categories([SimpleNamespace(name="shell_run")])
+            engine._record_tool_call_categories([SimpleNamespace(name="shell_run")])
+
+            assert calls == 1
+            assert engine._last_turn_tool_categories == frozenset({"shell"})
+        finally:
+            lt.close()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Semantic desktop tool injection (perception online)
+# ═══════════════════════════════════════════════════════════════════
+
+
+def _desktop_bridge():
+    """Real ToolBridge carrying semantic tools registered like bridge_factory does."""
+    from leapflow.skills.tool_executor import ToolBridge
+
+    bridge = ToolBridge(object())
+    calls: list = []
+
+    async def _observe(params):
+        calls.append(("observe_ui", dict(params)))
+        return {"ok": True, "tree": "app:Browser"}
+
+    async def _click(params):
+        calls.append(("click", dict(params)))
+        return {"ok": True, "clicked": params.get("selector")}
+
+    bridge.register(
+        "observe_ui", "Observe the current UI state",
+        {"app": "string (optional) — application name"}, _observe,
+    )
+    bridge.register(
+        "click", "Click a UI element",
+        {"selector": "string (required) — element selector"}, _click,
+        mutates_state=True,
+    )
+    return bridge, calls
+
+
+def _build_desktop_engine(td: str, bridge, llm=None, **settings_overrides):
+    from conftest import StubLLM
+    from leapflow.platform.mock import MockBridge
+
+    settings = make_settings(td)
+    settings = settings.__class__(
+        **{**settings.__dict__, "native_tool_calling_enabled": True, **settings_overrides}
+    )
+    rpc = MockBridge()
+    llm = llm or StubLLM(["ok"])
+    wm = WorkingMemoryProvider(max_tokens=1024)
+    lt = SemanticMemoryProvider(source=settings.duckdb_path)
+    imm = EpisodicMemoryProvider()
+    reg = build_default_registry(rpc, llm, wm, lt)
+    engine = AgentEngine(
+        settings, rpc, llm, wm, lt, imm, reg,
+        _FixedClassifier("chat"), tool_bridge=bridge,
+    )
+    return engine, lt
+
+
+@pytest.mark.asyncio
+async def test_unified_catalog_merges_semantic_tools_when_bridge_online() -> None:
+    """Catalog and handler table gain the bridge's semantic tools; static registry untouched."""
+    from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+
+    bridge, _ = _desktop_bridge()
+    with tempfile.TemporaryDirectory() as td:
+        engine, lt = _build_desktop_engine(td, bridge)
+        try:
+            catalog_names = {
+                item.get("function", {}).get("name")
+                for item in engine._unified_tool_catalog()
+            }
+            assert {"observe_ui", "click"} <= catalog_names
+            handlers = engine._unified_tool_handlers()
+            assert "observe_ui" in handlers and "click" in handlers
+            static_names = {
+                item.get("function", {}).get("name") for item in TOOL_DEFINITIONS
+            }
+            assert "click" not in static_names
+        finally:
+            lt.close()
+
+
+@pytest.mark.asyncio
+async def test_desktop_tools_flag_disables_semantic_disclosure() -> None:
+    """desktop_tools_enabled=False hides semantic tools even with an online bridge."""
+    bridge, _ = _desktop_bridge()
+    with tempfile.TemporaryDirectory() as td:
+        engine, lt = _build_desktop_engine(td, bridge, desktop_tools_enabled=False)
+        try:
+            catalog_names = {
+                item.get("function", {}).get("name")
+                for item in engine._unified_tool_catalog()
+            }
+            assert "observe_ui" not in catalog_names
+            assert "click" not in catalog_names
+            handlers = engine._unified_tool_handlers()
+            assert "observe_ui" not in handlers and "click" not in handlers
+        finally:
+            lt.close()
+
+
+@pytest.mark.asyncio
+async def test_unified_catalog_rebuilds_when_static_registry_grows() -> None:
+    """Tools appended after engine construction (session_search pattern) are picked up."""
+    from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+
+    bridge, _ = _desktop_bridge()
+    with tempfile.TemporaryDirectory() as td:
+        engine, lt = _build_desktop_engine(td, bridge)
+        try:
+            assert engine._unified_tool_catalog()  # prime the cache
+            TOOL_DEFINITIONS.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "late_registered_probe",
+                        "description": "probe",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            )
+            try:
+                names = {
+                    item.get("function", {}).get("name")
+                    for item in engine._unified_tool_catalog()
+                }
+                assert "late_registered_probe" in names
+            finally:
+                TOOL_DEFINITIONS.pop()
+        finally:
+            lt.close()
+
+
+@pytest.mark.asyncio
+async def test_core_turn_hides_desktop_schemas_but_lists_them_in_index() -> None:
+    """CORE keeps desktop out of the native tools kwarg while the index names them."""
+    from leapflow.llm.base import LLMChatResponse, LLMProvider
+
+    class CaptureLLM(LLMProvider):
+        def __init__(self) -> None:
+            self.messages: list[dict] = []
+            self.kwargs: dict = {}
+
+        async def achat(self, messages, *, stream=True, enable_thinking=False, on_chunk=None, **kwargs):
+            self.messages = list(messages)
+            self.kwargs = dict(kwargs)
+            return LLMChatResponse(content="hello")
+
+        async def achat_stream(self, messages, *, enable_thinking=False, **kwargs):
+            if False:
+                yield ""
+
+    bridge, _ = _desktop_bridge()
+    with tempfile.TemporaryDirectory() as td:
+        llm = CaptureLLM()
+        engine, lt = _build_desktop_engine(td, bridge, llm=llm)
+        try:
+            await engine.run("hello")
+            native_names = {
+                tool.get("function", {}).get("name", "")
+                for tool in llm.kwargs.get("tools", [])
+            }
+            assert "click" not in native_names
+            assert "observe_ui" not in native_names
+            system_prompt = str(llm.messages[0].get("content", ""))
+            assert "click" in system_prompt
+            assert "capability_expand category: desktop" in system_prompt
+        finally:
+            lt.close()
+
+
+@pytest.mark.asyncio
+async def test_semantic_execution_gate_and_perception_offline() -> None:
+    """Observation runs ungated; mutating tools fail closed without approval;
+    offline the tool is unavailable rather than unknown."""
+    import types
+
+    from leapflow.tools import registry_bootstrap as rb
+
+    bridge, calls = _desktop_bridge()
+    with tempfile.TemporaryDirectory() as td:
+        engine, lt = _build_desktop_engine(td, bridge)
+        try:
+            handlers = engine._unified_tool_handlers()
+
+            observed = await engine._execute_general_tool(
+                {"name": "observe_ui", "arguments": {"app": "Safari"}}, handlers
+            )
+            assert observed.get("ok") is True
+            assert calls == [("observe_ui", {"app": "Safari"})]
+
+            rb.set_desktop_gate(None)
+            denied = await engine._execute_general_tool(
+                {"name": "click", "arguments": {"selector": "#go"}}, handlers
+            )
+            assert denied.get("ok") is False
+            assert "blocked" in denied["error"] or "approval" in denied["error"]
+            assert len(calls) == 1  # never executed
+
+            class _Approve:
+                async def evaluate(self, action):
+                    return types.SimpleNamespace(approved=True, denial_message="")
+
+            rb.set_desktop_gate(_Approve())
+            clicked = await engine._execute_general_tool(
+                {"name": "click", "arguments": {"selector": "#go"}}, handlers
+            )
+            assert clicked.get("ok") is True
+            assert calls[-1] == ("click", {"selector": "#go"})
+        finally:
+            rb.set_desktop_gate(None)
+            lt.close()
+
+    # Perception offline: no bridge handlers -> explicit unavailability.
+    with tempfile.TemporaryDirectory() as td:
+        engine, lt = _build_desktop_engine(td, None)
+        try:
+            result = await engine._execute_general_tool(
+                {"name": "click", "arguments": {"selector": "#go"}},
+                engine._unified_tool_handlers(),
+            )
+            assert result.get("ok") is False
+            assert "unavailable" in result["error"]
+        finally:
+            lt.close()
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_host_backend_drops_semantic_tools() -> None:
+    """Hot-swapping to a bridge without semantic tools removes desktop from the catalog."""
+    bridge, _ = _desktop_bridge()
+    with tempfile.TemporaryDirectory() as td:
+        engine, lt = _build_desktop_engine(td, bridge)
+        try:
+            assert any(
+                item.get("function", {}).get("name") == "click"
+                for item in engine._unified_tool_catalog()
+            )
+            engine.reconfigure_host_backend(
+                rpc=engine._rpc, perception=None, execution=None, tool_bridge=None,
+            )
+            names = {
+                item.get("function", {}).get("name")
+                for item in engine._unified_tool_catalog()
+            }
+            assert "click" not in names
+            assert "observe_ui" not in engine._unified_tool_handlers()
+        finally:
+            lt.close()

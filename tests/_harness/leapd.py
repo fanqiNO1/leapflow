@@ -109,6 +109,9 @@ def hermetic_env(
             "LEAPFLOW_DATA_DIR": str(data_dir),
             "LEAPFLOW_PROFILE": profile,
             "LEAPFLOW_MOCK_HOST": "1",
+            # The mock host reports perception online; keep desktop tools out of
+            # the prompt so cassette fingerprints stay stable.
+            "LEAPFLOW_DESKTOP_TOOLS_ENABLED": "0",
             "LEAPFLOW_LLM_API_KEY": llm_api_key,
             "LEAPFLOW_LLM_BASE_URL": llm_base_url,
             "LEAPFLOW_LLM_MODEL": llm_model,
