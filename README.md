@@ -33,6 +33,7 @@ Unlike instruction-driven agents (Computer-Use, RPA) that reason from scratch on
 
 ## Core Philosophy
 
+- **Signal-Grounded Intelligence** — All intelligence derives from observing real-world signals. LeapFlow learns from what actually happens in the environment, not from brittle hardcoded rules.
 - **Evolution over Instruction** — Learning is not a one-shot prompt; it is a continuous loop of observation, hypothesis, verification, and refinement across episodes.
 - **Signals as First-Class Citizens** — Multi-modal signals (visual, accessibility tree, file system, clipboard, keyboard, etc.) are fused into a unified causal timeline, not treated as isolated events.
 - **Persistent Knowledge** — Skills, world-model experiences, and causal patterns are durably stored and compound over time. Nothing learned is ever lost to a session boundary.
