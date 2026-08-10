@@ -32,6 +32,7 @@ def build_tool_payload(ctx: "Context") -> dict[str, Any]:
         mcp_count = len(getattr(ctx, "platform_tools", []))
     return {
         "ok": True,
+        "view": "tools",
         "groups": groups,
         "total": sum(len(names) for names in groups.values()),
         "mcp_count": mcp_count,
@@ -1885,6 +1886,9 @@ def render_command_payload(console: "LeapConsole", payload: dict[str, Any]) -> N
 
     if view == "status":
         _render_status_view(console, payload)
+        return
+    if view == "tools":
+        render_tool_payload(console, payload)
         return
     if view == "model":
         render_model_payload(console, payload)
