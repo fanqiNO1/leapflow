@@ -80,6 +80,8 @@ def _resolve_mcp_invocation(
             [driver_cmd, "manifest"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             stdin=subprocess.DEVNULL,
         )
@@ -161,7 +163,12 @@ class _AsyncBridge:
                 coro.close()
             raise RuntimeError("cua-driver bridge not running")
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return fut.result(timeout=timeout)
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            raise RuntimeError(
+                f"cua-driver call timed out after {timeout}s"
+            ) from None
 
     def stop(self) -> None:
         if self._loop and self._loop.is_running():
@@ -462,7 +469,10 @@ def _clipboard_get() -> str:
     else:
         cmd = ["xclip", "-selection", "clipboard", "-o"]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5.0)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            errors="replace", timeout=5.0,
+        )
         return result.stdout
     except Exception as e:
         raise RpcError("clipboard_error", f"Failed to read clipboard: {e}", {})
@@ -595,7 +605,7 @@ class CuaDriverClient(HostRpc):
     - Capability negotiation: tools/list discovery at startup
     - Verify-Then-Escalate: AX background → PX pixel → foreground
     - Element Token: opaque token tracking for staleness detection
-    - Heartbeat keepalive: periodic list_apps probe, auto-reconnect
+    - Heartbeat keepalive: periodic get_screen_size probe, auto-reconnect
     """
 
     def __init__(
@@ -699,7 +709,10 @@ class CuaDriverClient(HostRpc):
                 if self._closed:
                     break
                 try:
-                    await self._session.call_tool("list_apps", {})
+                    # get_screen_size is an instant liveness round-trip;
+                    # list_apps enumerates the UI tree (~20s on Windows)
+                    # and would saturate the serial MCP pipe.
+                    await self._session.call_tool("get_screen_size", {})
                 except Exception as e:
                     logger.debug("keepalive probe failed: %s", e)
                     break
@@ -850,7 +863,10 @@ class CuaDriverClient(HostRpc):
             return "stop_recording", {}
 
         elif method == Methods.PING:
-            return "list_apps", {}
+            # Liveness probe only — callers never read the payload, and
+            # list_apps' UI enumeration (~20s on Windows) would exceed
+            # the 3s ping timeout.
+            return "get_screen_size", {}
 
         elif method == Methods.SYSTEM_INFO:
             return self._build_system_info(params)
