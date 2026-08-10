@@ -133,7 +133,7 @@ async def skill_view(params: Dict[str, Any]) -> Dict[str, Any]:
     if not skill_md.exists():
         return {"ok": False, "error": f"SKILL.md not found in {skill_dir}"}
 
-    content = skill_md.read_text(errors="replace")
+    content = skill_md.read_text(encoding="utf-8", errors="replace")
     # Cap content to prevent oversized tool results (configurable)
     max_chars = _skill_view_max_chars
     truncated = len(content) > max_chars

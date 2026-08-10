@@ -52,7 +52,7 @@ class SkillInjector:
         if not skill_md.exists():
             return None
 
-        content = skill_md.read_text(errors="replace")
+        content = skill_md.read_text(encoding="utf-8", errors="replace")
 
         # Build 5-phase injection
         parts: List[str] = []

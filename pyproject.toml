@@ -35,6 +35,7 @@ dependencies = [
     "pyreadline3>=3.5; sys_platform == 'win32'",
     "rich>=13.0",
     "prompt_toolkit>=3.0.40",
+    "pynput>=1.8.0"
 ]
 
 [project.optional-dependencies]

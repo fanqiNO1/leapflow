@@ -118,18 +118,23 @@ def _parse_manifest(raw: dict) -> PlatformManifest:
 
 # ── Capability mapping from cua-driver tools to PlatformManifest ─────────────
 
-_CUA_TOOL_TO_CAPABILITIES: dict[str, list[str]] = {
-    "get_window_state": ["accessibility", "ax_tree"],
-    "click": ["accessibility", "ax_perform"],
-    "type_text": ["accessibility", "input"],
-    "set_value": ["accessibility", "ax_perform"],
-    "scroll": ["accessibility", "input"],
-    "hotkey": ["input"],
-    "screenshot": ["screen_capture"],
-    "launch_app": ["app_management"],
-    "list_apps": ["app_management"],
-    "start_recording": ["recording"],
-    "stop_recording": ["recording"],
+# Map discovered cua-driver tools to host capabilities. Values are Capability
+# members directly — string round-trips through capability_from_str previously
+# matched nothing here and silently produced an empty capability set.
+_CUA_TOOL_TO_CAPABILITIES: dict[str, list[Capability]] = {
+    "get_window_state": [Capability.AX_TREE_READ],
+    "click": [Capability.AX_PERFORM_ACTION],
+    "type_text": [Capability.AX_PERFORM_ACTION],
+    "set_value": [Capability.AX_PERFORM_ACTION],
+    "scroll": [Capability.AX_PERFORM_ACTION],
+    "hotkey": [Capability.AX_PERFORM_ACTION],
+    "screenshot": [Capability.SCREEN_CAPTURE],
+    "launch_app": [Capability.APP_LAUNCH],
+    "list_apps": [Capability.APP_ACTIVATE],
+    # No Capability member exists for recording yet; re-enable by adding e.g.
+    # SCREEN_RECORD to the enum and uncommenting:
+    # "start_recording": [Capability.SCREEN_RECORD],
+    # "stop_recording": [Capability.SCREEN_RECORD],
 }
 
 
@@ -142,21 +147,17 @@ def _manifest_from_cua_tools(rpc: "CuaDriverClient") -> PlatformManifest:
     tools = session.available_tools
 
     # Derive capabilities from discovered tool names
-    caps_strs: set[str] = set()
+    caps: set[Capability] = set()
     for tool_name in tools:
         if tool_name in _CUA_TOOL_TO_CAPABILITIES:
-            caps_strs.update(_CUA_TOOL_TO_CAPABILITIES[tool_name])
-
-    caps = frozenset(
-        cap for s in caps_strs if (cap := capability_from_str(s)) is not None
-    )
+            caps.update(_CUA_TOOL_TO_CAPABILITIES[tool_name])
 
     pid = PlatformID.resolve()
 
     return PlatformManifest(
         platform_id=pid,
         os_version=_platform.version(),
-        capabilities=caps,
+        capabilities=frozenset(caps),
         metadata={
             "driver": "cua-driver",
             "capability_version": session.capability_version,
