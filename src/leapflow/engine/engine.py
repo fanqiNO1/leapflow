@@ -103,11 +103,31 @@ _TOOL_RESULT_PREVIEW_LIMIT = 240
 _TASK_CONTRACT_HEADING = "## Task Contract"
 
 
-def _default_tool_registry() -> ToolRegistry:
-    """Return the canonical runtime tool registry."""
-    from leapflow.tools.registry_bootstrap import TOOL_REGISTRY
+_registry_cache: tuple[int, int, ToolRegistry] | None = None
 
-    return TOOL_REGISTRY
+
+def _default_tool_registry() -> ToolRegistry:
+    """Return the runtime tool registry, rebuilding when late-registered tools arrive."""
+    global _registry_cache
+    from leapflow.tools.registry_bootstrap import (
+        TOOL_DEFINITIONS, TOOL_HANDLERS, TOOL_REGISTRY, _BRIDGE_TOOLS,
+    )
+    from leapflow.tools.name_resolver import TOOL_NAME_ALIASES
+
+    size_key = (len(TOOL_DEFINITIONS), len(TOOL_HANDLERS))
+    if _registry_cache is not None and _registry_cache[:2] == size_key:
+        return _registry_cache[2]
+    # First call: if sizes match the static registry, use it directly (no rebuild cost)
+    if _registry_cache is None and len(TOOL_REGISTRY.specs) >= len(TOOL_DEFINITIONS):
+        _registry_cache = (*size_key, TOOL_REGISTRY)
+        return TOOL_REGISTRY
+    # Late registrations detected — rebuild
+    registry = ToolRegistry.from_definitions(
+        TOOL_DEFINITIONS, TOOL_HANDLERS,
+        bridge_tools=_BRIDGE_TOOLS, aliases=TOOL_NAME_ALIASES,
+    )
+    _registry_cache = (*size_key, registry)
+    return registry
 
 
 def _resolve_tool_name(tool_name: str, arguments: Dict[str, Any] | None = None) -> ToolResolution:
