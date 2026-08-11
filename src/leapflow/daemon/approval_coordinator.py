@@ -29,6 +29,7 @@ class ApprovalCoordinator:
             from leapflow.security.approval import SessionAwareGate
             from leapflow.security.actions import ActionDescriptor
             from leapflow.security.orchestrator import ApprovalOrchestrator
+            from leapflow.security.policy import ApprovalPolicyEngine
             from leapflow.tools.config_tools import set_config_approval_gate
             from leapflow.tools.gateway_tool import set_gateway_approval_gate
             from leapflow.tools.registry_bootstrap import (
@@ -43,6 +44,7 @@ class ApprovalCoordinator:
             gate = SessionAwareGate(_DaemonApprovalGate(self))
             orchestrator = ApprovalOrchestrator(
                 gate,
+                policy=ApprovalPolicyEngine(bypass=getattr(getattr(ctx, 'settings', None), 'approval_bypass', False)),
                 grants=getattr(existing, "grants", None),
                 audit=getattr(existing, "audit", None),
             )

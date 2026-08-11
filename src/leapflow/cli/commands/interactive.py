@@ -533,7 +533,7 @@ async def cmd_interactive(ctx: "Context", *, resume_id: Optional[str] = None) ->
         renderer.start()
         turn_completed = False
         try:
-            async for event in ctx.engine.run_stream(prompt_text, enable_thinking=True):
+            async for event in ctx.engine.run_stream(prompt_text, enable_thinking=ctx.settings.show_thinking):
                 if isinstance(event, StreamEvent):
                     if event.type == "chunk":
                         renderer.feed(event.content)
@@ -922,6 +922,8 @@ async def cmd_interactive(ctx: "Context", *, resume_id: Optional[str] = None) ->
             console.warning(f"Session '{resume_id}' not found; starting a new session.")
 
     _render_banner()
+    if ctx.settings.approval_bypass:
+        console.print("\u26a0 Approval bypass active \u2014 all non-hardline actions auto-approved", style="bold yellow")
     _print_auth_setup_hint(console, ctx.settings)
     _update_status()
     exit_code = 0
@@ -1200,7 +1202,7 @@ async def cmd_interactive_daemon(
                 prompt_text,
                 session_id=active_session_id,
                 workspace_root=str(Path.cwd().resolve()),
-                enable_thinking=True,
+                enable_thinking=settings.show_thinking,
             ):
                 metadata = event.metadata or {}
                 is_heartbeat = event.type == "status" and metadata.get("heartbeat")
@@ -1507,6 +1509,8 @@ async def cmd_interactive_daemon(
         console.warning(f"Daemon status unavailable: {exc}")
 
     _render_banner()
+    if settings.approval_bypass:
+        console.print("\u26a0 Approval bypass active \u2014 all non-hardline actions auto-approved", style="bold yellow")
     _print_auth_setup_hint(console, settings)
     _update_status()
 

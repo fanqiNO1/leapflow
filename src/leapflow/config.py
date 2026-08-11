@@ -342,6 +342,7 @@ class Settings:
     native_tool_calling_enabled: bool = True   # Use native OpenAI tool_calls when available
     stream_output: bool = True                   # Enable LLM streaming in interactive mode
     verbose_progress: bool = True                # Show detailed tool execution progress
+    show_thinking: bool = True                   # Display LLM thinking/reasoning in TUI
 
     # Context Compression
     compress_threshold: int = 16
@@ -354,7 +355,7 @@ class Settings:
     tools_ripgrep_autoinstall: bool = True
     tools_test_command: str = ""  # empty => auto-detect (pytest/npm/go/cargo)
     tools_lint_command: str = ""  # empty => auto-detect (ruff/eslint/go vet/clippy)
-    tools_terminal_session_enabled: bool = False  # persistent shell sessions (opt-in, high risk)
+    tools_terminal_session_enabled: bool = True   # persistent shell sessions
     tools_verify_edits: bool = True  # post-edit syntax check (advisory) for edit_file/file_write
 
     # web_fetch: first-class read-only HTTP access, so reading a public page is
@@ -409,6 +410,7 @@ class Settings:
     # still making progress, so legitimate batch/sequential work on a long task
     # is not cut short. Thresholds are configurable; the guard can be disabled.
     guardrail_enabled: bool = True
+    approval_bypass: bool = False            # Skip all approval prompts for non-hardline actions
     guardrail_max_repeats: int = 3
     guardrail_max_consecutive_same: int = 8
     guardrail_stagnation_window: int = 10
@@ -586,11 +588,8 @@ def load_config() -> Settings:
     bundle = load_config_bundle(layout, profile_layout, workspace_root)
 
     original_env = dict(os.environ)
-    injected_keys: list[str] = []
     for key, value in bundle.env.items():
-        if key not in original_env:
-            os.environ[key] = value
-            injected_keys.append(key)
+        os.environ[key] = value
     try:
         settings = _build_settings_from_env(
             layout=layout,
@@ -601,8 +600,12 @@ def load_config() -> Settings:
             config_warnings=bundle.warnings,
         )
     finally:
-        for key in injected_keys:
-            os.environ.pop(key, None)
+        # Restore original env to avoid polluting caller's global state.
+        for key in bundle.env:
+            if key in original_env:
+                os.environ[key] = original_env[key]
+            else:
+                os.environ.pop(key, None)
     return settings
 
 
@@ -887,7 +890,7 @@ def _build_settings_from_env(
     tools_ripgrep_autoinstall = os.getenv("LEAPFLOW_TOOLS_RIPGREP_AUTOINSTALL", "1").strip().lower() in ("1", "true", "yes")
     tools_test_command = os.getenv("LEAPFLOW_TOOLS_TEST_COMMAND", "").strip()
     tools_lint_command = os.getenv("LEAPFLOW_TOOLS_LINT_COMMAND", "").strip()
-    tools_terminal_session_enabled = os.getenv("LEAPFLOW_TOOLS_TERMINAL_SESSION_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+    tools_terminal_session_enabled = os.getenv("LEAPFLOW_TOOLS_TERMINAL_SESSION_ENABLED", "1").strip().lower() in ("1", "true", "yes")
     tools_verify_edits = os.getenv("LEAPFLOW_TOOLS_VERIFY_EDITS", "1").strip().lower() in ("1", "true", "yes")
     web_transport = os.getenv("LEAPFLOW_WEB_TRANSPORT", "auto").strip().lower() or "auto"
     web_timeout_s = float(os.getenv("LEAPFLOW_WEB_TIMEOUT_S", "20"))
@@ -922,6 +925,7 @@ def _build_settings_from_env(
     recovery_total_actions = int(os.getenv("LEAPFLOW_RECOVERY_TOTAL_ACTIONS", "24"))
     recovery_max_retry_per_category = int(os.getenv("LEAPFLOW_RECOVERY_MAX_RETRY_PER_CATEGORY", "4"))
     guardrail_enabled = os.getenv("LEAPFLOW_GUARDRAIL_ENABLED", "1").strip().lower() in ("1", "true", "yes")
+    approval_bypass = os.getenv("LEAPFLOW_APPROVAL_BYPASS", "0").strip().lower() in ("1", "true", "yes")
     guardrail_max_repeats = int(os.getenv("LEAPFLOW_GUARDRAIL_MAX_REPEATS", "3"))
     guardrail_max_consecutive_same = int(os.getenv("LEAPFLOW_GUARDRAIL_MAX_CONSECUTIVE_SAME", "8"))
     guardrail_stagnation_window = int(os.getenv("LEAPFLOW_GUARDRAIL_STAGNATION_WINDOW", "10"))
@@ -1276,6 +1280,7 @@ def _build_settings_from_env(
         recovery_total_actions=recovery_total_actions,
         recovery_max_retry_per_category=recovery_max_retry_per_category,
         guardrail_enabled=guardrail_enabled,
+        approval_bypass=approval_bypass,
         guardrail_max_repeats=guardrail_max_repeats,
         guardrail_max_consecutive_same=guardrail_max_consecutive_same,
         guardrail_stagnation_window=guardrail_stagnation_window,

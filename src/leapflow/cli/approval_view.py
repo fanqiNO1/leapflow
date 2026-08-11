@@ -23,6 +23,7 @@ class ApprovalChoice:
 _CHOICE_LABELS = {
     "allow_once": "Allow once",
     "allow_session": "Allow for this session",
+    "allow_all_session": "Allow ALL for this session (bypass mode)",
     "allow_always": "Add to permanent allowlist",
     "deny": "Deny",
     "deny_always": "Deny for this session",
@@ -32,6 +33,7 @@ _CHOICE_LABELS = {
 _CHOICE_DECISIONS = {
     "allow_once": ApprovalDecision.ALLOW_ONCE,
     "allow_session": ApprovalDecision.ALLOW_SESSION,
+    "allow_all_session": ApprovalDecision.ALLOW_ALL_SESSION,
     "allow_always": ApprovalDecision.ALLOW_ALWAYS,
     "deny": ApprovalDecision.DENY,
     "deny_always": ApprovalDecision.DENY_ALWAYS,

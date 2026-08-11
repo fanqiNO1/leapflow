@@ -30,6 +30,15 @@ from leapflow.utils.shell_lex import split_args
 
 logger = logging.getLogger(__name__)
 
+
+def _is_bypass_active() -> bool:
+    """Check if approval bypass mode is active for the current context."""
+    ctx = current_tool_context()
+    if ctx is None:
+        return False
+    return getattr(ctx, 'approval_bypass', False)
+
+
 # Raw capture ceilings. These bound what the tool returns before the context
 # layers (evidence builder, result budget, trim) decide how much reaches the
 # model. Build and test logs routinely exceed 10K, and truncating there dropped
@@ -147,6 +156,36 @@ async def _approve_command(command: str, cwd: str | None) -> tuple[bool, str]:
         return False, "Dangerous command requires approval (denied)"
 
 
+async def _approve_workspace_escape(command: str, target_path: str, error_info: dict) -> tuple[bool, str]:
+    """Request user approval for a command that accesses paths outside workspace."""
+    from leapflow.security.actions import ActionDescriptor
+
+    ctx = current_tool_context()
+    orchestrator = getattr(ctx, 'orchestrator', None) if ctx else None
+    if orchestrator is None:
+        orchestrator = _approval_gate  # module-level fallback
+    if orchestrator is None or not isinstance(orchestrator, ActionApprovalEvaluator):
+        return False, "No approval gate available"
+
+    action = ActionDescriptor(
+        kind="shell.workspace_escape",
+        summary=f"Allow shell access to {target_path}?",
+        detail=f"shell_run wants to access path outside workspace: {target_path}",
+        effect="access_external",
+        resource=target_path,
+        metadata={"command": command, "error_info": error_info},
+    )
+    try:
+        result = await orchestrator.evaluate(action)
+        if getattr(result, "approved", False):
+            return True, ""
+        reason = str(getattr(result, "denial_message", "") or "User denied workspace escape")
+        return False, reason
+    except Exception:
+        logger.debug("workspace escape approval check failed", exc_info=True)
+        return False, "Workspace escape approval failed"
+
+
 def _expand_operand(token: str) -> str:
     """Return the inspectable path operand carried by a shell token.
 
@@ -225,8 +264,7 @@ def _command_workspace_escape(command: str, cwd: Path | None = None) -> dict[str
                 "error": (
                     "shell_run command references a path outside the active workspace. "
                     f"Path: {resolved}; workspace root: {ctx.workspace_root}. "
-                    "This boundary cannot be lifted by approval; work inside the workspace, "
-                    "or ask the user to open a session in that directory."
+                    "Approval is required to access paths outside the workspace."
                     + leapflow_managed_hint(resolved)
                 ),
                 "error_type": "outside_workspace",
@@ -261,12 +299,20 @@ async def shell_run(params: Dict[str, Any]) -> Dict[str, Any]:
 
     if cwd_path is not None:
         scope_error = workspace_scope_error(cwd_path, operation="shell_run cwd")
-        if scope_error:
-            return scope_error
+        if scope_error and not _is_bypass_active():
+            approved, _ = await _approve_workspace_escape(
+                command, str(cwd_path), scope_error
+            )
+            if not approved:
+                return scope_error
 
     command_scope_error = _command_workspace_escape(str(command), cwd=cwd_path)
-    if command_scope_error:
-        return command_scope_error
+    if command_scope_error and not _is_bypass_active():
+        approved, _ = await _approve_workspace_escape(
+            command, command_scope_error.get("resolved_path", ""), command_scope_error
+        )
+        if not approved:
+            return command_scope_error
 
     if _is_dangerous(command):
         approved, message = await _approve_command(command, cwd)

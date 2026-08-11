@@ -369,4 +369,4 @@ def test_shell_gate_redirects_leapflow_config_targets(tmp_path) -> None:
     assert error is not None
     assert error["error_type"] == "outside_workspace"
     assert "config_get" in error["error"]
-    assert "cannot be lifted by approval" in error["error"]
+    assert "Approval is required" in error["error"]

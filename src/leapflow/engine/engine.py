@@ -4538,11 +4538,19 @@ class AgentEngine:
             return None
         from leapflow.tools.execution_context import ToolExecutionContext
 
+        try:
+            from leapflow.tools.shell_tools import _approval_gate
+            orchestrator = _approval_gate
+        except Exception:  # noqa: BLE001
+            orchestrator = None
+
         return ToolExecutionContext.from_strings(
             workspace_root=contract.workspace_root,
             allowed_roots=contract.allowed_roots,
             session_id=str(self._current_session_id or ""),
             task_id=contract.task_id,
+            approval_bypass=getattr(self._settings, 'approval_bypass', False),
+            orchestrator=orchestrator,
         )
 
     async def _execute_tool_scoped(

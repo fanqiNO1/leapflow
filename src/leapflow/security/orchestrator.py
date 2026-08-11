@@ -218,7 +218,7 @@ class ApprovalOrchestrator:
 
     @staticmethod
     def _choices(allow_permanent: bool) -> tuple[str, ...]:
-        base = ["allow_once", "allow_session"]
+        base = ["allow_once", "allow_session", "allow_all_session"]
         if allow_permanent:
             base.append("allow_always")
         base.extend(["deny", "deny_always", "show_details"])

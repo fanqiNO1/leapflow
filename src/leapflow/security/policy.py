@@ -36,21 +36,26 @@ class ApprovalPolicyRule(Protocol):
 class ApprovalPolicyEngine:
     """Small policy engine: hardline deny, meaningful risk ask, safe allow."""
 
-    def __init__(self, rules: list[ApprovalPolicyRule] | None = None) -> None:
+    def __init__(self, rules: list[ApprovalPolicyRule] | None = None, *, bypass: bool = False) -> None:
         self._rules = list(rules or [])
+        self._bypass = bypass
 
     def evaluate(self, action: ActionDescriptor, risk: RiskAssessment) -> PolicyDecision:
-        for rule in self._rules:
-            decision = rule.check(action, risk)
-            if decision is not None:
-                return decision
-
+        # Hardline/CRITICAL always denied regardless of bypass
         if risk.hardline or risk.level == RiskLevel.CRITICAL:
             return PolicyDecision(
                 verdict=PolicyVerdict.DENY,
                 reason="; ".join(risk.reasons) or "hardline_block",
                 allow_permanent=False,
             )
+        # Bypass mode: auto-allow everything below CRITICAL
+        if self._bypass:
+            return PolicyDecision(verdict=PolicyVerdict.ALLOW, reason="bypass_mode")
+        # Normal rule-based evaluation
+        for rule in self._rules:
+            decision = rule.check(action, risk)
+            if decision is not None:
+                return decision
         if risk.level in {RiskLevel.HIGH, RiskLevel.MEDIUM} or risk.score >= 0.35:
             return PolicyDecision(
                 verdict=PolicyVerdict.ASK,
