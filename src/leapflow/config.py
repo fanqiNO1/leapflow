@@ -321,6 +321,7 @@ class Settings:
     agent_iter_hard_cap: int = 500
     agent_iter_extension_step: int = 25
     agent_stall_rounds: int = 6
+    agent_checkpoint_interval: int = 15  # Force checkpoint every N rounds in research posture
     agent_cost_ceiling_context_multiple: float = 0.0
     agent_subagent_max_depth: int = 2
     agent_subagent_max_concurrent: int = 3
@@ -860,6 +861,7 @@ def _build_settings_from_env(
     agent_iter_hard_cap = int(os.getenv("LEAPFLOW_AGENT_ITER_HARD_CAP", "500"))
     agent_iter_extension_step = int(os.getenv("LEAPFLOW_AGENT_ITER_EXTENSION_STEP", "25"))
     agent_stall_rounds = int(os.getenv("LEAPFLOW_AGENT_STALL_ROUNDS", "6"))
+    agent_checkpoint_interval = int(os.getenv("LEAPFLOW_AGENT_CHECKPOINT_INTERVAL", "15"))
     agent_cost_ceiling_context_multiple = float(os.getenv("LEAPFLOW_AGENT_COST_CEILING_CONTEXT_MULTIPLE", "0.0"))
     agent_subagent_max_depth = int(os.getenv("LEAPFLOW_AGENT_SUBAGENT_MAX_DEPTH", "2"))
     agent_subagent_max_concurrent = int(os.getenv("LEAPFLOW_AGENT_SUBAGENT_MAX_CONCURRENT", "3"))
@@ -1217,6 +1219,7 @@ def _build_settings_from_env(
         agent_iter_hard_cap=agent_iter_hard_cap,
         agent_iter_extension_step=agent_iter_extension_step,
         agent_stall_rounds=agent_stall_rounds,
+        agent_checkpoint_interval=agent_checkpoint_interval,
         agent_cost_ceiling_context_multiple=agent_cost_ceiling_context_multiple,
         agent_subagent_max_depth=agent_subagent_max_depth,
         agent_subagent_max_concurrent=agent_subagent_max_concurrent,

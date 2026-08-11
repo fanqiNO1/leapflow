@@ -1858,21 +1858,37 @@ class AgentEngine:
             research_protocol=protocol,
         )
 
+    _LARGE_TASK_PROTOCOL: tuple[str, ...] = (
+        "DECOMPOSE before reading: identify sub-goals, then address each one.",
+        "PREFER targeted search (code_search, symbols) over full file reads.",
+        "RECORD findings with research_note after each sub-goal — they survive context compression.",
+        "WRITE intermediate results to a file if the task produces a deliverable.",
+        "AVOID reading files >500 lines in full — use outline mode or line ranges.",
+    )
+
     @staticmethod
     def _research_protocol_for(user_text: str) -> tuple[str, ...]:
         normalized = user_text.lower()
         architecture_tokens = (
             "architecture", "diagram", "design", "架构", "架构图", "系统设计", "框图",
         )
-        if not any(token in normalized for token in architecture_tokens):
-            return ()
-        return (
-            "Identify the active project root before reading files.",
-            "Start from README, AGENTS, docs index, and top-level source layout.",
-            "Use outlines, symbols, and bounded ranges before raw full-file reads.",
-            "Cross-check entrypoints, core orchestration, representative modules, and tests.",
-            "Produce a concise subsystem map and Mermaid architecture diagram grounded in evidence.",
+        if any(token in normalized for token in architecture_tokens):
+            return (
+                "Identify the active project root before reading files.",
+                "Start from README, AGENTS, docs index, and top-level source layout.",
+                "Use outlines, symbols, and bounded ranges before raw full-file reads.",
+                "Cross-check entrypoints, core orchestration, representative modules, and tests.",
+                "Produce a concise subsystem map and Mermaid architecture diagram grounded in evidence.",
+            )
+        # General large-task protocol: fires for long or complex requests
+        _large_task_keywords = (
+            "codebase", "代码库", "implement", "实现", "investigate", "调查",
+            "refactor", "重构", "analyze", "分析", "review", "审查",
+            "所有", "全部", "across", "整个",
         )
+        if len(user_text) > 200 or any(kw in normalized for kw in _large_task_keywords):
+            return LeapFlowEngine._LARGE_TASK_PROTOCOL
+        return ()
 
     def _task_scope_keywords(self, user_text: str) -> list[str]:
         keywords = _keywords_from_query(user_text)
@@ -2221,6 +2237,56 @@ class AgentEngine:
             return {"tools": list(plan.tool_definitions)}
         return {}
 
+    # ------------------------------------------------------------------
+    # P2-2: Pre-compression knowledge auto-extraction
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _auto_extract_findings(messages: List[Dict[str, Any]]) -> List[str]:
+        """Extract key file-read findings before compression discards them."""
+        findings: List[str] = []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = str(msg.get("content", ""))
+            # Only extract from tool results (file reads) with substantial content
+            if role not in ("tool", "function"):
+                continue
+            if len(content) < 300:
+                continue
+            if '"ok": false' in content[:100].lower() or '"ok":false' in content[:100].lower():
+                continue
+            finding = LeapFlowEngine._extract_compact_finding(content)
+            if finding:
+                findings.append(finding)
+        return findings
+
+    @staticmethod
+    def _extract_compact_finding(content: str, max_chars: int = 400) -> str:
+        """Extract a compact summary from a tool result."""
+        lines = content.split('\n')
+        # Look for file path in first few lines
+        path_line = ""
+        for line in lines[:5]:
+            if '/' in line and ('.' in line.split('/')[-1]):
+                path_line = line.strip()[:120]
+                break
+        if not path_line:
+            # Fallback: take first non-empty line
+            for line in lines:
+                stripped = line.strip()
+                if stripped and len(stripped) > 10:
+                    path_line = stripped[:120]
+                    break
+        if not path_line:
+            return ""
+        # Take first substantial paragraph as context
+        body = content[:max_chars - len(path_line) - 20].strip()
+        # Truncate to last complete line
+        last_newline = body.rfind('\n')
+        if last_newline > 100:
+            body = body[:last_newline]
+        return f"[auto-extracted] {path_line}: {body[:max_chars - len(path_line) - 30]}"
+
     def _prepare_llm_messages(
         self,
         messages: List[Dict[str, Any]],
@@ -2231,7 +2297,13 @@ class AgentEngine:
         """Compress and hard-gate messages before sending them to the provider."""
         context_length = self._active_context_length()
         token_count = self._context_controller.estimator.estimate_messages(messages)
+        # P2-2: extract findings from messages that may be discarded by compression
+        pre_compression_findings = self._auto_extract_findings(messages)
         prepared = self._compressor.compress(messages, token_count=token_count)
+        # Inject extracted findings into research ledger if compression actually ran
+        if len(prepared) < len(messages) and pre_compression_findings:
+            for finding in pre_compression_findings:
+                self._research_ledger.note("finding", finding)
         if (
             getattr(self._settings, "agent_compression_writeback", False)
             and len(prepared) < len(messages)
@@ -2264,8 +2336,9 @@ class AgentEngine:
         convergence = self._context_governance_controller.convergence_notice(
             round_number, open_questions=open_questions,
         )
+        checkpoint_msg = self._context_governance_controller.checkpoint_notice(round_number)
         cost_notice = self._cost_ceiling_notice()
-        for notice in (warning, convergence, cost_notice):
+        for notice in (warning, convergence, checkpoint_msg, cost_notice):
             if notice:
                 prepared = [*prepared, build_user_message_text(notice)]
         ledger_block = self._research_ledger.render()
@@ -2446,9 +2519,10 @@ class AgentEngine:
 
         Combines the research-ledger shape (findings / open questions /
         decisions / next step) with governance evidence breadth (evidence count,
-        distinct sources). A change between rounds means the task advanced; an
-        unchanged marker across rounds indicates a stall. Works for ledger-using
-        tasks and, via governance signals, for tasks that never call research_note.
+        distinct sources, repeated reads). A change between rounds means the task
+        advanced; an unchanged marker across rounds indicates a stall. Including
+        repeated_reads ensures that growing re-reads (with no other progress)
+        keep the marker unchanged, so stalled_rounds increments correctly.
         """
         d = self._research_ledger.as_dict()
         gov = self._last_context_snapshot.get("context_governance", {}) or {}
@@ -2459,6 +2533,7 @@ class AgentEngine:
             d.get("next_step", ""),
             int(gov.get("evidence_count", 0) or 0),
             int(gov.get("sources_seen", 0) or 0),
+            int(gov.get("repeated_reads", 0) or 0),
         )
 
     def _update_progress_and_stall(self, frame: AgentLoopFrame) -> None:
@@ -2879,6 +2954,7 @@ class AgentEngine:
             convergence_round=self._settings.long_task_convergence_round,
             convergence_round_ceiling=self._settings.convergence_round_ceiling,
             convergence_scale=self._settings.convergence_scale,
+            checkpoint_interval=self._settings.agent_checkpoint_interval,
             posture_config=ContextPostureConfig(
                 expanded_ratio=self._settings.context_expanded_ratio,
                 finalizing_ratio=(

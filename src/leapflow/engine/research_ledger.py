@@ -20,8 +20,9 @@ from typing import Any, Callable, Dict, List, Optional
 # it as a finding, so the open-question set reflects only what remains.
 LEDGER_KINDS = ("finding", "open_question", "resolved", "decision", "next_step")
 
-_MAX_ITEMS = 24     # per-list cap; keep the most recent (SNR over completeness)
-_MAX_CHARS = 200    # per-note cap: one concise sentence (bounds every-round re-injection)
+_MAX_ITEMS = 32     # per-list cap; keep the most recent (SNR over completeness)
+_MAX_CHARS = 600    # per-note cap: one concise paragraph (bounds every-round re-injection)
+_MAX_TOTAL_CHARS = 16_000  # total chars across all categories; FIFO eviction from largest bucket
 
 
 @dataclass
@@ -30,6 +31,7 @@ class ResearchLedger:
 
     max_items: int = _MAX_ITEMS
     max_chars: int = _MAX_CHARS
+    max_total_chars: int = _MAX_TOTAL_CHARS
 
     def __post_init__(self) -> None:
         self._findings: List[str] = []
@@ -77,6 +79,30 @@ class ResearchLedger:
         bucket.append(text)
         if len(bucket) > self.max_items:  # keep most recent
             del bucket[: len(bucket) - self.max_items]
+        self._enforce_total_capacity()
+
+    def _enforce_total_capacity(self) -> None:
+        """Evict oldest notes (FIFO) from the largest category until under budget."""
+        while self._total_chars() > self.max_total_chars:
+            largest = self._largest_bucket()
+            if not largest:
+                break
+            largest.pop(0)
+
+    def _total_chars(self) -> int:
+        return (
+            sum(len(n) for n in self._findings)
+            + sum(len(n) for n in self._open_questions)
+            + sum(len(n) for n in self._decisions)
+            + len(self._next_step)
+        )
+
+    def _largest_bucket(self) -> List[str] | None:
+        buckets = [self._findings, self._open_questions, self._decisions]
+        non_empty = [b for b in buckets if b]
+        if not non_empty:
+            return None
+        return max(non_empty, key=lambda b: sum(len(n) for n in b))
 
     def _resolve(self, text: str) -> None:
         low = text.lower()
