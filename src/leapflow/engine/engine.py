@@ -1887,7 +1887,7 @@ class AgentEngine:
             "所有", "全部", "across", "整个",
         )
         if len(user_text) > 200 or any(kw in normalized for kw in _large_task_keywords):
-            return LeapFlowEngine._LARGE_TASK_PROTOCOL
+            return AgentEngine._LARGE_TASK_PROTOCOL
         return ()
 
     def _task_scope_keywords(self, user_text: str) -> list[str]:
@@ -2255,7 +2255,7 @@ class AgentEngine:
                 continue
             if '"ok": false' in content[:100].lower() or '"ok":false' in content[:100].lower():
                 continue
-            finding = LeapFlowEngine._extract_compact_finding(content)
+            finding = AgentEngine._extract_compact_finding(content)
             if finding:
                 findings.append(finding)
         return findings

@@ -85,9 +85,13 @@ class ResearchLedger:
         """Evict oldest notes (FIFO) from the largest category until under budget."""
         while self._total_chars() > self.max_total_chars:
             largest = self._largest_bucket()
-            if not largest:
-                break
-            largest.pop(0)
+            if largest:
+                largest.pop(0)
+                continue
+            # No list buckets to evict; truncate next_step as last resort
+            if self._next_step:
+                self._next_step = self._next_step[:self.max_chars]
+            break
 
     def _total_chars(self) -> int:
         return (

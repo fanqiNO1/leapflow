@@ -40,10 +40,17 @@ def _is_bypass_active() -> bool:
         return True
     # Session-level bypass: user selected "Allow ALL for this session"
     orchestrator = getattr(ctx, 'orchestrator', None) or _approval_gate
-    if orchestrator is not None:
-        gate = getattr(orchestrator, '_gate', None)
-        if gate is not None and getattr(gate, '_bypass_all', False):
-            return True
+    if orchestrator is None:
+        return False
+    # Direct ApprovalOrchestrator → SessionAwareGate
+    gate = getattr(orchestrator, '_gate', None)
+    # SmartApprovalGate wrapper: penetrate _delegate
+    if gate is None:
+        delegate = getattr(orchestrator, '_delegate', None)
+        if delegate is not None:
+            gate = getattr(delegate, '_gate', None)
+    if gate is not None and getattr(gate, '_bypass_all', False):
+        return True
     return False
 
 
