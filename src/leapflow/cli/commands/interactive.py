@@ -533,7 +533,7 @@ async def cmd_interactive(ctx: "Context", *, resume_id: Optional[str] = None) ->
         renderer.start()
         turn_completed = False
         try:
-            async for event in ctx.engine.run_stream(prompt_text):
+            async for event in ctx.engine.run_stream(prompt_text, enable_thinking=True):
                 if isinstance(event, StreamEvent):
                     if event.type == "chunk":
                         renderer.feed(event.content)
@@ -1200,6 +1200,7 @@ async def cmd_interactive_daemon(
                 prompt_text,
                 session_id=active_session_id,
                 workspace_root=str(Path.cwd().resolve()),
+                enable_thinking=True,
             ):
                 metadata = event.metadata or {}
                 is_heartbeat = event.type == "status" and metadata.get("heartbeat")

@@ -443,6 +443,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 },
             },
         },
+        "x_leapflow": {"category": "read", "plane": "task"},
     },
     {
         "type": "function",
@@ -457,6 +458,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 "required": ["name"],
             },
         },
+        "x_leapflow": {"category": "read", "plane": "task"},
     },
     # ── Memory tools (agent can actively search/add memory) ──
     {

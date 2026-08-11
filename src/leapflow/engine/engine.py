@@ -3735,6 +3735,11 @@ class AgentEngine:
                 if self._sanitizer:
                     content = self._sanitizer.sanitize(content)
 
+                # Surface provider reasoning/thinking to TUI
+                thinking = getattr(resp, 'thinking_content', None)
+                if thinking and thinking.strip():
+                    yield StreamEvent(type="thinking", content=thinking.strip())
+
                 # Length continuation for native tool path
                 finish = getattr(resp, 'finish_reason', None)
                 if finish in ("length", "max_tokens") and turn_recovery.try_length_continuation():
@@ -3745,6 +3750,10 @@ class AgentEngine:
 
                 native_calls = getattr(resp, "tool_calls", None) or []
                 if native_calls:
+                    # Surface pre-tool-call reasoning to TUI as thinking
+                    # (excluded from context to prevent repetition, but valuable for user visibility)
+                    if content:
+                        yield StreamEvent(type="thinking", content=content)
                     # Preamble exclusion: content alongside tool_calls is ephemeral
                     # reasoning — exclude from context to prevent final-answer repetition.
                     assistant_msg: Dict[str, Any] = {"role": "assistant", "content": ""}
@@ -3992,6 +4001,11 @@ class AgentEngine:
                     content = (resp.content or "").strip()
                     if self._sanitizer:
                         content = self._sanitizer.sanitize(content)
+
+                    # Surface provider reasoning/thinking to TUI
+                    thinking = getattr(resp, 'thinking_content', None)
+                    if thinking and thinking.strip():
+                        yield StreamEvent(type="thinking", content=thinking.strip())
 
                     # Length continuation for non-stream path
                     finish = getattr(resp, 'finish_reason', None)

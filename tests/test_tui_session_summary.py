@@ -157,11 +157,11 @@ def test_stream_renderer_spaces_and_indents_final_response_only() -> None:
     renderer = StreamRenderer(console)
     renderer.start()
 
-    renderer.feed_thinking("internal reasoning")
+    renderer.feed_thinking("internal reasoning steps")
     renderer.feed("final **answer**")
     renderer.finish()
 
-    assert console.thinking_calls == ["internal reasoning"]
+    assert console.thinking_calls == ["internal reasoning steps"]
     assert console.markdown_calls == [{
         "text": "final **answer**",
         "indent": 4,
