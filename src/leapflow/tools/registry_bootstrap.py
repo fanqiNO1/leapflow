@@ -117,7 +117,8 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "function": {
             "name": "code_search",
             "description": (
-                "Search file CONTENTS by regex across a directory tree (ripgrep-backed). "
+                "Search file CONTENTS by regex pattern across a directory tree (ripgrep-backed). "
+                "Requires a regex pattern. NOT for listing or browsing directory contents — use file_list for that. "
                 "Prefer this over shell_run grep: faster, skips VCS/dependency/build dirs, "
                 "and returns structured path:line:column matches. Batch related lookups "
                 "into ONE call via `patterns` (OR-combined, single pass) instead of "
@@ -127,7 +128,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "Regex pattern to search for"},
+                    "pattern": {"type": "string", "description": "Regex pattern to search for (REQUIRED — this tool searches file contents, not file names)"},
                     "patterns": {
                         "type": "array",
                         "items": {"type": "string"},

@@ -702,7 +702,7 @@ async def code_search(params: Dict[str, Any]) -> Dict[str, Any]:
     extra = [str(item) for item in extra_raw if str(item or "").strip()] if isinstance(extra_raw, (list, tuple)) else []
     all_patterns = [p for p in [pattern, *extra] if p]
     if not all_patterns:
-        return {"ok": False, "error": "Missing required parameter: pattern"}
+        return {"ok": False, "error": "Missing required parameter: pattern. code_search is for regex content search across files. To list/browse files in a directory, use file_list instead."}
     if len(all_patterns) > 1:
         pattern = "|".join(f"(?:{p})" for p in all_patterns)
     else:
