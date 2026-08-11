@@ -213,6 +213,7 @@ class ApprovalCoordinator:
             "allow",
             "allow_once",
             "allow_session",
+            "allow_all_session",
             "allow_always",
             "deny",
             "deny_always",
