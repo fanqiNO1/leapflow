@@ -32,11 +32,19 @@ logger = logging.getLogger(__name__)
 
 
 def _is_bypass_active() -> bool:
-    """Check if approval bypass mode is active for the current context."""
+    """Check if approval bypass mode is active (config-level or session-level)."""
     ctx = current_tool_context()
     if ctx is None:
         return False
-    return getattr(ctx, 'approval_bypass', False)
+    if getattr(ctx, 'approval_bypass', False):
+        return True
+    # Session-level bypass: user selected "Allow ALL for this session"
+    orchestrator = getattr(ctx, 'orchestrator', None) or _approval_gate
+    if orchestrator is not None:
+        gate = getattr(orchestrator, '_gate', None)
+        if gate is not None and getattr(gate, '_bypass_all', False):
+            return True
+    return False
 
 
 # Raw capture ceilings. These bound what the tool returns before the context
@@ -314,7 +322,7 @@ async def shell_run(params: Dict[str, Any]) -> Dict[str, Any]:
         if not approved:
             return command_scope_error
 
-    if _is_dangerous(command):
+    if _is_dangerous(command) and not _is_bypass_active():
         approved, message = await _approve_command(command, cwd)
         if not approved:
             return {"ok": False, "error": message}
