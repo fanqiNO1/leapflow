@@ -47,13 +47,20 @@ _TOOL_CATEGORIES: Dict[str, str] = {
 def _categorize_tools(
     tool_defs: Sequence[Dict[str, Any]],
 ) -> Dict[str, List[str]]:
-    """Group tool names by category for display."""
+    """Group tool names by category for display.
+
+    The static display map wins for known names; tools injected at runtime
+    (semantic desktop schemas) fall back to their declared x_leapflow
+    category instead of collapsing into "other".
+    """
     groups: Dict[str, List[str]] = {}
     for td in tool_defs:
         name = td.get("function", {}).get("name", "")
         if not name:
             continue
-        cat = _TOOL_CATEGORIES.get(name, "other")
+        cat = _TOOL_CATEGORIES.get(name)
+        if not cat:
+            cat = str((td.get("x_leapflow") or {}).get("category") or "") or "other"
         groups.setdefault(cat, []).append(name)
     return dict(sorted(groups.items()))
 

@@ -198,3 +198,94 @@ def test_config_tools_are_core_and_writes_are_not() -> None:
     assert "config_get" in names
     assert "config_list" in names
     assert "config_set" not in names
+
+
+# ── Desktop (semantic tool) disclosure ─────────────────────────────────
+
+
+def _desktop_definitions() -> list[dict]:
+    from leapflow.skills.semantic_schema import semantic_tool_to_openai
+    from leapflow.skills.tool_executor import ToolDefinition
+
+    defs = []
+    for name in ("observe_ui", "click", "list_apps"):
+        schema = semantic_tool_to_openai(
+            ToolDefinition(name=name, description=f"test {name}", parameters={})
+        )
+        assert schema is not None
+        defs.append(schema)
+    return defs
+
+
+def test_desktop_tools_are_non_core_and_expandable_by_continuity() -> None:
+    """Desktop schemas stay out of the CORE floor but reopen via Tier 1 continuity."""
+    catalog = list(TOOL_DEFINITIONS) + _desktop_definitions()
+    planner = DisclosurePlanner()
+
+    core_plan = planner.plan(catalog, DisclosureRuntimeState(native_tools_enabled=True))
+    core_names = _tool_names(core_plan)
+    assert core_plan.level == DisclosureLevel.CORE
+    assert "click" not in core_names
+    # Observation tools are read-only but schema_cost=high keeps them non-core.
+    assert "observe_ui" not in core_names
+    catalog_names = {
+        td.get("function", {}).get("name") for td in core_plan.catalog_definitions
+    }
+    assert {"click", "observe_ui", "list_apps"} <= catalog_names
+
+    expanded_plan = planner.plan(
+        catalog,
+        DisclosureRuntimeState(
+            native_tools_enabled=True,
+            last_turn_tool_categories=frozenset({"desktop"}),
+        ),
+    )
+    assert expanded_plan.level == DisclosureLevel.EXPANDED
+    assert {"click", "observe_ui", "list_apps"} <= _tool_names(expanded_plan)
+    assert "desktop" in expanded_plan.expanded_categories
+
+
+def test_desktop_tools_included_in_full_plan() -> None:
+    catalog = list(TOOL_DEFINITIONS) + _desktop_definitions()
+    plan = DisclosurePlanner().full_plan(
+        catalog, DisclosureRuntimeState(native_tools_enabled=True), "test"
+    )
+    assert {"click", "observe_ui", "list_apps"} <= _tool_names(plan)
+
+
+def test_capability_expand_provider_exposes_desktop_category() -> None:
+    import asyncio
+
+    from leapflow.tools import registry_bootstrap as rb
+
+    desktop_defs = _desktop_definitions()
+    rb.set_capability_catalog_provider(lambda: list(TOOL_DEFINITIONS) + desktop_defs)
+    try:
+        result = asyncio.run(rb._capability_expand_handler({"category": "desktop"}))
+        assert result["ok"] is True
+        expanded_names = {td["function"]["name"] for td in result["expanded_tools"]}
+        assert expanded_names == {"observe_ui", "click", "list_apps"}
+
+        unknown = asyncio.run(rb._capability_expand_handler({"category": "nope"}))
+        assert unknown["ok"] is False
+        assert "desktop" in unknown["available_categories"]
+
+        desc = next(
+            td["function"]["description"]
+            for td in TOOL_DEFINITIONS
+            if td["function"]["name"] == "capability_expand"
+        )
+        assert "desktop" in desc
+    finally:
+        rb.set_capability_catalog_provider(None)
+
+
+def test_capability_expand_falls_back_to_static_catalog_without_provider() -> None:
+    import asyncio
+
+    from leapflow.tools import registry_bootstrap as rb
+
+    rb.set_capability_catalog_provider(None)
+    result = asyncio.run(rb._capability_expand_handler({"category": "file"}))
+    assert result["ok"] is True
+    assert result["expanded_tools"]

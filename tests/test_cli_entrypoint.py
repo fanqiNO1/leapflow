@@ -909,7 +909,7 @@ async def test_host_doctor_stops_client_when_probe_fails(monkeypatch) -> None:
     calls: list[str] = []
 
     class FakeSession:
-        available_tools = {"list_apps": set()}
+        available_tools = {"get_screen_size": set()}
         capability_version = "test-cap"
 
         def call_tool_sync(self, name, args, timeout=5.0):
@@ -934,7 +934,7 @@ async def test_host_doctor_stops_client_when_probe_fails(monkeypatch) -> None:
     result = await host_module._cmd_doctor()
 
     assert result == 1
-    assert calls == ["start", "probe:list_apps", "stop"]
+    assert calls == ["start", "probe:get_screen_size", "stop"]
 
 
 @pytest.mark.asyncio

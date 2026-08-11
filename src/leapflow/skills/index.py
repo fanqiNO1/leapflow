@@ -143,7 +143,7 @@ class SkillIndex:
     def _parse_skill_md(self, path: Path, skill_dir: Path) -> Optional[SkillEntry]:
         """Parse SKILL.md frontmatter YAML into SkillEntry."""
         try:
-            content = path.read_text(errors="replace")
+            content = path.read_text(encoding="utf-8", errors="replace")
 
             # No frontmatter — use directory name and first heading
             if not content.startswith("---"):

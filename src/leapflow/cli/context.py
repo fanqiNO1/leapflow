@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -263,13 +262,6 @@ def _build_promotion_callback(lt: SemanticMemoryProvider):
     return _promote
 
 
-def sanitize_skill_name(title: str) -> str:
-    """Convert a skill title to a registry-safe name."""
-    name = re.sub(r"[^\w\s-]", "", title.lower())
-    name = re.sub(r"[\s]+", "-", name.strip())
-    return name or "unnamed-skill"
-
-
 def _make_stored_skill_fn(stored: "StoredSkill", llm: Any):
     """Create an LLM-backed execution function from a StoredSkill."""
     steps_text = "\n".join(f"  {i+1}. {step}" for i, step in enumerate(stored.steps))
@@ -310,6 +302,7 @@ def _register_stored_skill_fallbacks(
     llm: Any,
 ) -> int:
     """Register StoredSkills that lack a parameterized or doc counterpart."""
+    from leapflow.learning.document import title_to_kebab
     from leapflow.skills.registry import Skill, SkillMetadata
 
     registered_names = set(registry.names()) if hasattr(registry, 'names') else {s.name for s in registry.list_all()}
@@ -317,7 +310,9 @@ def _register_stored_skill_fallbacks(
     count = 0
 
     for s in stored:
-        name = sanitize_skill_name(s.title)
+        # Same naming function as the SKILL.md write paths, otherwise the
+        # dedup below misses doc-backed skills and registers a duplicate.
+        name = title_to_kebab(s.title)
         if name in registered_names:
             continue
         if not s.trigger_phrases:
@@ -1512,6 +1507,12 @@ class Context:
             logger.debug("Shell approval gate: action orchestrator mode")
         except Exception:
             logger.debug("Shell approval gate setup skipped", exc_info=True)
+        try:
+            from leapflow.tools.registry_bootstrap import set_desktop_gate
+            set_desktop_gate(self._approval_orchestrator)
+            logger.debug("Desktop approval gate: action orchestrator mode")
+        except Exception:
+            logger.debug("Desktop approval gate setup skipped", exc_info=True)
 
         self._critical_tool_bridge = tool_bridge
 

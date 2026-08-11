@@ -43,6 +43,11 @@ _SESSION_READY_TIMEOUT_S = float(os.environ.get("LEAPFLOW_CUA_SESSION_TIMEOUT", 
 _CALL_TIMEOUT_S = float(os.environ.get("LEAPFLOW_CUA_CALL_TIMEOUT", "30.0"))
 _KEEPALIVE_INTERVAL_S = float(os.environ.get("LEAPFLOW_CUA_KEEPALIVE_INTERVAL", "20.0"))
 _MANIFEST_TIMEOUT_S = float(os.environ.get("LEAPFLOW_CUA_MANIFEST_TIMEOUT", "6.0"))
+# Cold app.list on Windows enumerates Start-Menu shortcuts + WinRT packages and
+# can exceed a minute. Cutting it short does not free the serial MCP pipe — the
+# driver keeps enumerating and every later call queues behind it — so the
+# timeout must outlast the worst cold enumeration.
+_APP_LIST_TIMEOUT_S = float(os.environ.get("LEAPFLOW_CUA_APP_LIST_TIMEOUT", "120.0"))
 
 
 # ── Telemetry policy ─────────────────────────────────────────────────────────
@@ -80,6 +85,8 @@ def _resolve_mcp_invocation(
             [driver_cmd, "manifest"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             stdin=subprocess.DEVNULL,
         )
@@ -161,7 +168,12 @@ class _AsyncBridge:
                 coro.close()
             raise RuntimeError("cua-driver bridge not running")
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return fut.result(timeout=timeout)
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            raise RuntimeError(
+                f"cua-driver call timed out after {timeout}s"
+            ) from None
 
     def stop(self) -> None:
         if self._loop and self._loop.is_running():
@@ -462,7 +474,10 @@ def _clipboard_get() -> str:
     else:
         cmd = ["xclip", "-selection", "clipboard", "-o"]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5.0)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            errors="replace", timeout=5.0,
+        )
         return result.stdout
     except Exception as e:
         raise RpcError("clipboard_error", f"Failed to read clipboard: {e}", {})
@@ -534,6 +549,20 @@ def _file_delete(params: Dict[str, Any]) -> Dict[str, str]:
 
 # ── Dispatch helpers ─────────────────────────────────────────────────────────
 
+def _launch_app_key(app: str) -> str:
+    """Pick the launch_app schema field for an app identifier.
+
+    cua-driver 0.17 distinguishes AUMIDs (``bundle_id``), executable paths
+    (``path``), and plain aliases (``name``); sending the wrong one makes
+    resolution fail.
+    """
+    if "!" in app:
+        return "bundle_id"
+    if "/" in app or "\\" in app:
+        return "path"
+    return "name"
+
+
 def _resolve_ax_perform_tool(params: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     """Map ax.perform params to the appropriate cua-driver tool + args.
 
@@ -595,7 +624,7 @@ class CuaDriverClient(HostRpc):
     - Capability negotiation: tools/list discovery at startup
     - Verify-Then-Escalate: AX background → PX pixel → foreground
     - Element Token: opaque token tracking for staleness detection
-    - Heartbeat keepalive: periodic list_apps probe, auto-reconnect
+    - Heartbeat keepalive: periodic get_screen_size probe, auto-reconnect
     """
 
     def __init__(
@@ -613,11 +642,14 @@ class CuaDriverClient(HostRpc):
         self._closed = False
         self._last_start_time: Optional[float] = None
         self._last_error = ""
-        # Per-method-prefix timeout overrides
+        # Per-method-prefix timeout overrides. Exact method names win over
+        # prefixes: app.list enumerates installed + running apps on Windows
+        # (can exceed a minute when cold), far beyond any fast-path budget.
         self._timeout_map: Dict[str, float] = {
             "ping": 3.0,
             "ax": 8.0,
-            "app": 5.0,
+            "app": 30.0,
+            "app.list": _APP_LIST_TIMEOUT_S,
             "input": 5.0,
             "screen": 10.0,
             "recording": 10.0,
@@ -629,7 +661,10 @@ class CuaDriverClient(HostRpc):
             self._timeout_map.update(timeout_overrides)
 
     def _resolve_timeout(self, method: str) -> float:
-        """Resolve timeout by method prefix."""
+        """Resolve timeout by exact method name, then by method prefix."""
+        exact = self._timeout_map.get(method)
+        if exact is not None:
+            return exact
         prefix = method.split(".", 1)[0] if method else ""
         return self._timeout_map.get(prefix, self._call_timeout)
 
@@ -699,7 +734,10 @@ class CuaDriverClient(HostRpc):
                 if self._closed:
                     break
                 try:
-                    await self._session.call_tool("list_apps", {})
+                    # get_screen_size is an instant liveness round-trip;
+                    # list_apps enumerates the UI tree (~20s on Windows)
+                    # and would saturate the serial MCP pipe.
+                    await self._session.call_tool("get_screen_size", {})
                 except Exception as e:
                     logger.debug("keepalive probe failed: %s", e)
                     break
@@ -806,11 +844,17 @@ class CuaDriverClient(HostRpc):
 
         elif method == Methods.APP_LAUNCH:
             app = params.get("app_name") or params.get("name") or params.get("bundle_id", "")
-            return "launch_app", {"app_name": app}
+            args: Dict[str, Any] = {}
+            if app:
+                args[_launch_app_key(app)] = app
+            return "launch_app", args
 
         elif method == Methods.APP_ACTIVATE:
             app = params.get("app_name") or params.get("name") or params.get("bundle_id", "")
-            return "launch_app", {"app_name": app}
+            args = {}
+            if app:
+                args[_launch_app_key(app)] = app
+            return "launch_app", args
 
         elif method == Methods.APP_LIST:
             return "list_apps", {}
@@ -850,7 +894,10 @@ class CuaDriverClient(HostRpc):
             return "stop_recording", {}
 
         elif method == Methods.PING:
-            return "list_apps", {}
+            # Liveness probe only — callers never read the payload, and
+            # list_apps' UI enumeration (~20s on Windows) would exceed
+            # the 3s ping timeout.
+            return "get_screen_size", {}
 
         elif method == Methods.SYSTEM_INFO:
             return self._build_system_info(params)
@@ -971,6 +1018,26 @@ def _local_screen_permission_status(params: Dict[str, Any]) -> Dict[str, Any]:
     return {"status": "unknown", "message": "Permission managed by OS (check System Settings)"}
 
 
+def _local_open_url(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Open a URL via the OS default browser.
+
+    cua-driver's launch_app(urls=...) blocks until the browser window
+    settles (~80s, and effectively forever when the URL lands in an
+    already-running browser), so URL dispatch stays with the OS shell,
+    which hands off to the default handler and returns immediately.
+    """
+    import webbrowser
+
+    url = str(params.get("url", "")).strip()
+    if not url:
+        return {"ok": False, "error": "url required"}
+    try:
+        opened = webbrowser.open(url)
+    except Exception as exc:
+        return {"ok": False, "error": f"open_url failed: {exc}"}
+    return {"ok": bool(opened), "url": url}
+
+
 _LOCAL_DISPATCH: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     Methods.CLIPBOARD_GET: _local_clipboard_get,
     Methods.CLIPBOARD_SET: _local_clipboard_set,
@@ -980,5 +1047,6 @@ _LOCAL_DISPATCH: Dict[str, Callable[[Dict[str, Any]], Any]] = {
     Methods.FILE_COPY: _file_copy,
     Methods.FILE_DELETE: _file_delete,
     Methods.FS_SUBSCRIBE: _local_fs_subscribe,
+    Methods.OPEN_URL: _local_open_url,
     Methods.SCREEN_PERMISSION_STATUS: _local_screen_permission_status,
 }

@@ -31,7 +31,11 @@ class ApprovalCoordinator:
             from leapflow.security.orchestrator import ApprovalOrchestrator
             from leapflow.tools.config_tools import set_config_approval_gate
             from leapflow.tools.gateway_tool import set_gateway_approval_gate
-            from leapflow.tools.registry_bootstrap import set_file_read_gate, set_file_write_gate
+            from leapflow.tools.registry_bootstrap import (
+                set_desktop_gate,
+                set_file_read_gate,
+                set_file_write_gate,
+            )
             from leapflow.tools.shell_tools import set_approval_gate
             from leapflow.tools.web_fetch import set_web_approval_gate
 
@@ -51,6 +55,9 @@ class ApprovalCoordinator:
             set_config_approval_gate(orchestrator)
             # Same for outbound fetches that resolve to internal addresses.
             set_web_approval_gate(orchestrator)
+            # Mutating semantic desktop tools (click, type_text, ...) share the
+            # same approval path.
+            set_desktop_gate(orchestrator)
 
             class _FileReadGate:
                 def __init__(self) -> None:

@@ -247,6 +247,16 @@ class ToolBridge:
             mutates_state=mutates_state, counts_as_progress=counts_as_progress,
         )
 
+    @property
+    def handlers(self) -> Dict[str, Any]:
+        """Snapshot of name → async handler for every registered tool.
+
+        Handlers follow the unified-loop convention ``await handler(args)``
+        and are the same callables ``dispatch`` uses, so merging them into an
+        external handler table preserves bridge behavior exactly.
+        """
+        return {name: entry.handler for name, entry in self._handlers.items()}
+
     def is_mutating(self, name: str) -> bool:
         """Check if a tool is declared as state-mutating (clears dedup cache)."""
         entry = self._handlers.get(name)

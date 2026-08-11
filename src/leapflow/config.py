@@ -484,6 +484,7 @@ class Settings:
     # ── Cua Driver ──
     use_cua_driver: bool = True
     cua_driver_cmd: str = "cua-driver"
+    desktop_tools_enabled: bool = True
 
     # ── Workflow Copilot ──
     copilot_enabled: bool = True
@@ -989,6 +990,7 @@ def _build_settings_from_env(
     # Cua Driver
     use_cua_driver = _bool("LEAPFLOW_USE_CUA_DRIVER", "true")
     cua_driver_cmd = os.getenv("LEAPFLOW_CUA_DRIVER_CMD", "cua-driver").strip()
+    desktop_tools_enabled = _bool("LEAPFLOW_DESKTOP_TOOLS_ENABLED", "true")
 
     # Workflow Copilot
     copilot_enabled = _bool("LEAPFLOW_COPILOT_ENABLED", "true")
@@ -1312,6 +1314,7 @@ def _build_settings_from_env(
         # Cua Driver
         use_cua_driver=use_cua_driver,
         cua_driver_cmd=cua_driver_cmd,
+        desktop_tools_enabled=desktop_tools_enabled,
         # Workflow Copilot
         copilot_enabled=copilot_enabled,
         copilot_min_idle_ms=copilot_min_idle_ms,

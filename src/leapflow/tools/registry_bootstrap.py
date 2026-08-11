@@ -6,7 +6,7 @@ function that registers all tools into an existing ToolBridge instance.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from leapflow.tools.file_operations import (
     code_search,
@@ -1343,13 +1343,42 @@ TOOL_HANDLERS["gp_delegate_task"] = _delegate_task_handler
 # guess a tool name that was never disclosed.
 # ────────────────────────────────────────────────────────────────
 
+_capability_catalog_provider: Optional[Callable[[], List[Dict[str, Any]]]] = None
+
+
+def set_capability_catalog_provider(provider: Optional[Callable[[], List[Dict[str, Any]]]]) -> None:
+    """Install a late-bound provider for the live tool catalog.
+
+    The static TOOL_DEFINITIONS list cannot see tools injected at runtime
+    (semantic desktop schemas merged by the engine when perception is online),
+    so capability discovery resolves the catalog through this provider instead.
+    Falls back to TOOL_DEFINITIONS when no provider is installed or it fails.
+    """
+    global _capability_catalog_provider
+    _capability_catalog_provider = provider
+    _patch_capability_expand_categories()
+
+
+def _capability_catalog() -> List[Dict[str, Any]]:
+    """Resolve the live tool catalog for capability discovery."""
+    if _capability_catalog_provider is not None:
+        try:
+            catalog = _capability_catalog_provider()
+        except Exception:
+            catalog = None
+        if catalog:
+            return list(catalog)
+    return TOOL_DEFINITIONS
+
+
 async def _capability_expand_handler(params: Dict[str, Any]) -> Dict[str, Any]:
     from leapflow.engine.context_disclosure import build_capability_manifests
 
     category = str(params.get("category") or "").strip().lower()
     if not category:
         return {"ok": False, "error": "category is required"}
-    manifests = build_capability_manifests(TOOL_DEFINITIONS)
+    catalog = _capability_catalog()
+    manifests = build_capability_manifests(catalog)
     matched_names = {m.name for m in manifests if m.category == category}
     if not matched_names:
         available = sorted({m.category for m in manifests if m.category})
@@ -1359,7 +1388,7 @@ async def _capability_expand_handler(params: Dict[str, Any]) -> Dict[str, Any]:
             "available_categories": available,
         }
     expanded_tools = [
-        td for td in TOOL_DEFINITIONS
+        td for td in catalog
         if td.get("function", {}).get("name") in matched_names
     ]
     return {"ok": True, "category": category, "expanded_tools": expanded_tools}
@@ -1372,7 +1401,7 @@ def _patch_capability_expand_categories() -> None:
     """
     from leapflow.engine.context_disclosure import build_capability_manifests
 
-    manifests = build_capability_manifests(TOOL_DEFINITIONS)
+    manifests = build_capability_manifests(_capability_catalog())
     non_core_categories = sorted({m.category for m in manifests if m.category and not m.is_core})
     for td in TOOL_DEFINITIONS:
         func = td.get("function", {})
@@ -1433,6 +1462,19 @@ def set_file_write_gate(gate: Any) -> None:
 
 def get_file_write_gate() -> Any:
     return _file_write_gate
+
+
+_desktop_gate: Any = None
+
+
+def set_desktop_gate(gate: Any) -> None:
+    """Install an approval gate for mutating semantic desktop tools."""
+    global _desktop_gate
+    _desktop_gate = gate
+
+
+def get_desktop_gate() -> Any:
+    return _desktop_gate
 
 
 def bootstrap_tools(bridge: Any) -> int:
