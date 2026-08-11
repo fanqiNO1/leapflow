@@ -141,6 +141,11 @@ class DarwinExecutionAdapter:
     async def activate_app(self, app_id: str) -> Dict[str, Any]:
         return await self._rpc.call(Methods.APP_ACTIVATE, {"bundle_id": app_id})
 
+    async def open_url(self, url: str) -> Dict[str, Any]:
+        """Open a URL in the default browser (local OS dispatch)."""
+        result = await self._rpc.call(Methods.OPEN_URL, {"url": url})
+        return result if isinstance(result, dict) else {"ok": True, "result": result}
+
     async def list_apps(self, filter: str = "", running_only: bool = False) -> Dict[str, Any]:
         """List available applications on the system."""
         return await self._rpc.call(

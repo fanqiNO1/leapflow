@@ -181,7 +181,7 @@ class CopilotEventSubscriber:
             loop = asyncio.get_running_loop()
             ctx_snapshot = self._encoder.snapshot()
             loop.create_task(on_observed(
-                action_id=f"{event.event_type}:{event.source}",
+                # action_id=f"{event.event_type}:{event.source}",
                 context=ctx_snapshot,
             ))
         except RuntimeError:

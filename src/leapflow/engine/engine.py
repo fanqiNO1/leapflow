@@ -1215,6 +1215,16 @@ class AgentEngine:
         # truth — never derived from re-parsing text.
         self._last_turn_tool_categories: frozenset[str] = frozenset()
         self._manifests_by_name: Dict[str, Any] | None = None
+        # Semantic desktop schema cache: rebuilt when the bridge object changes
+        # (perception hot-swap via reconfigure_host_backend).
+        self._semantic_schema_bridge: Any = None
+        self._semantic_schemas: List[Dict[str, Any]] = []
+        self._unified_catalog_key: Any = object()
+        self._unified_catalog: List[Dict[str, Any]] = []
+        # Capability discovery resolves the live catalog through this engine, so
+        # runtime-injected categories (desktop) become expandable.
+        from leapflow.tools.registry_bootstrap import set_capability_catalog_provider
+        set_capability_catalog_provider(self._unified_tool_catalog)
         self._healer = MessageHealer()
 
         # B2: Prompt cache optimization (None = disabled)
@@ -2065,10 +2075,8 @@ class AgentEngine:
         the last round. Reset once per turn by the caller before the first round.
         """
         if self._manifests_by_name is None:
-            from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
-
             self._manifests_by_name = {
-                m.name: m for m in build_capability_manifests(TOOL_DEFINITIONS)
+                m.name: m for m in build_capability_manifests(self._unified_tool_catalog())
             }
         categories = set(self._last_turn_tool_categories)
         for call in native_calls:
@@ -2588,10 +2596,11 @@ class AgentEngine:
         )
 
     def _full_tool_schema_tokens(self) -> int:
-        """Cached token estimate of the full tool catalog schema (static per process)."""
+        """Cached token estimate of the full tool catalog schema (per bridge)."""
         if self._full_tools_tokens is None:
-            from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
-            self._full_tools_tokens = self._context_controller.estimator.estimate_tools(TOOL_DEFINITIONS)
+            self._full_tools_tokens = self._context_controller.estimator.estimate_tools(
+                self._unified_tool_catalog()
+            )
         return self._full_tools_tokens
 
     def _evaluate_prefix_commitment(self, budget: IterationBudget) -> None:
@@ -3040,19 +3049,18 @@ class AgentEngine:
                 if injection:
                     user_text = injection  # Replace user_text with skill injection
 
-        from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS, TOOL_HANDLERS
-
         # A restricted frame (e.g. a subagent) is offered only its permitted
-        # tools; the root frame (tool_filter=None) sees the full registry.
-        tool_defs = TOOL_DEFINITIONS
-        tool_handlers = TOOL_HANDLERS
+        # tools; the root frame (tool_filter=None) sees the full registry,
+        # including semantic desktop tools while perception is online.
+        tool_defs = self._unified_tool_catalog()
+        tool_handlers = self._unified_tool_handlers()
         if frame.tool_filter is not None:
             tool_defs = [
-                td for td in TOOL_DEFINITIONS
+                td for td in tool_defs
                 if td.get("function", {}).get("name", "") in frame.tool_filter
             ]
             tool_handlers = {
-                name: fn for name, fn in TOOL_HANDLERS.items() if name in frame.tool_filter
+                name: fn for name, fn in tool_handlers.items() if name in frame.tool_filter
             }
 
         trace = ExecutionTrace()
@@ -3563,13 +3571,14 @@ class AgentEngine:
                 if injection:
                     user_text = injection
 
-        from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS, TOOL_HANDLERS
+        tool_defs = self._unified_tool_catalog()
+        tool_handlers = self._unified_tool_handlers()
 
         budget = IterationBudget.for_react(self._budget_config)
         trace = ExecutionTrace()
         assembly = await self._assemble_unified_prompt(
             user_text,
-            tool_definitions=TOOL_DEFINITIONS,
+            tool_definitions=tool_defs,
             enable_thinking=enable_thinking,
             slash_command=user_text.startswith("/"),
         )
@@ -3768,7 +3777,7 @@ class AgentEngine:
                             ),
                         )
                     results = await self._execute_tools_concurrent(
-                        native_calls, TOOL_HANDLERS, trace=trace, messages=messages
+                        native_calls, tool_handlers, trace=trace, messages=messages
                     )
                     self._record_tool_call_categories(native_calls)
                     tools_kwarg = self._merge_expanded_tool_schemas(tools_kwarg, results)
@@ -3811,7 +3820,7 @@ class AgentEngine:
 
                     if retryable_unknown and not unknown_tool_retry_used:
                         unknown_tool_retry_used = True
-                        tools_kwarg = self._expand_tools_kwarg_full(tools_kwarg, TOOL_DEFINITIONS)
+                        tools_kwarg = self._expand_tools_kwarg_full(tools_kwarg, tool_defs)
                         use_native_tools = bool(tools_kwarg)
                         messages.append(build_user_message_text(_unknown_tool_retry_prompt(retryable_unknown)))
                         continue
@@ -4050,7 +4059,7 @@ class AgentEngine:
                 ),
             )
             result = await self._execute_tool_with_ledger(
-                normalized_tool_call, TOOL_HANDLERS, tool_call_id=f"text-{budget.used}",
+                normalized_tool_call, tool_handlers, tool_call_id=f"text-{budget.used}",
             )
             _clear_indicator()
             self._emit_chat_event("tool_result", {
@@ -4159,6 +4168,86 @@ class AgentEngine:
 
 
     # ── Unified Loop Helpers ───────────────────────────────────────────────
+
+    def _semantic_tool_schemas(self) -> List[Dict[str, Any]]:
+        """Callable schemas for the semantic desktop tools on the live bridge.
+
+        Empty when the bridge is absent or carries no semantic tools
+        (perception offline) — the bridge itself is the dynamic on/off switch.
+        Cached by bridge object identity so a hot-swapped bridge rebuilds on
+        first access. ``desktop_tools_enabled`` is the process-level master
+        switch (off in the journey harness to keep replayed prompts stable).
+        """
+        if not getattr(self._settings, "desktop_tools_enabled", True):
+            return []
+        if self._tool_bridge is None:
+            return []
+        if self._semantic_schema_bridge is not self._tool_bridge:
+            from leapflow.skills.semantic_schema import build_semantic_schemas
+
+            self._semantic_schemas = build_semantic_schemas(self._tool_bridge)
+            self._semantic_schema_bridge = self._tool_bridge
+        return self._semantic_schemas
+
+    def _unified_tool_catalog(self) -> List[Dict[str, Any]]:
+        """Per-turn tool catalog: static registry plus live semantic schemas.
+
+        Cached on (bridge identity, static-registry size): the registry is
+        append-only (session_search, platform schemas land after engine
+        construction), so a length change invalidates exactly like a
+        bridge hot-swap does.
+        """
+        from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+
+        cache_key = (id(self._tool_bridge), len(TOOL_DEFINITIONS))
+        if self._unified_catalog_key != cache_key:
+            self._unified_catalog = list(TOOL_DEFINITIONS) + self._semantic_tool_schemas()
+            self._unified_catalog_key = cache_key
+            # Downstream caches are keyed on the catalog contents.
+            self._manifests_by_name = None
+            self._full_tools_tokens = None
+        return self._unified_catalog
+
+    def _unified_tool_handlers(self) -> Dict[str, Any]:
+        """Per-turn handler table: static handlers plus bridge semantic handlers."""
+        from leapflow.tools.registry_bootstrap import TOOL_HANDLERS
+        from leapflow.skills.semantic_schema import build_semantic_handlers
+
+        handlers: Dict[str, Any] = dict(TOOL_HANDLERS)
+        if getattr(self._settings, "desktop_tools_enabled", True):
+            handlers.update(build_semantic_handlers(self._tool_bridge))
+        return handlers
+
+    async def _approve_desktop_action(self, name: str, args: Any) -> tuple[bool, str]:
+        """Consult the desktop approval gate before a mutating semantic tool.
+
+        Fail-closed: a missing gate or a failed evaluation blocks the action,
+        mirroring the dangerous-command gate in shell_tools.
+        """
+        from leapflow.skills.semantic_schema import semantic_requires_approval
+
+        if not semantic_requires_approval(name):
+            return True, ""
+        from leapflow.tools.registry_bootstrap import get_desktop_gate
+
+        gate = get_desktop_gate()
+        if gate is None:
+            return False, f"Desktop action '{name}' blocked: no approval gate configured"
+        try:
+            from leapflow.security.actions import ActionDescriptor
+
+            payload = args if isinstance(args, dict) else {}
+            result = await gate.evaluate(ActionDescriptor.platform_action("desktop", name, payload))
+            if getattr(result, "approved", False):
+                return True, ""
+            message = str(
+                getattr(result, "denial_message", "")
+                or f"Desktop action '{name}' requires approval (denied)"
+            )
+            return False, message
+        except Exception:
+            logger.debug("desktop approval check failed", exc_info=True)
+            return False, f"Desktop action '{name}' requires approval (denied)"
 
     @staticmethod
     def _format_tool_catalog(tool_definitions: List[Dict[str, Any]]) -> str:
@@ -4562,6 +4651,9 @@ class AgentEngine:
         """Execute a general-purpose tool via ToolBridge (preferred) or TOOL_HANDLERS fallback.
 
         Routing priority:
+        0. Semantic desktop tools (bridge-registered, not in the static
+           registry) — admitted only when this turn's handler table carries
+           them, and gated by the desktop approval gate when mutating
         1. ToolBridge dispatch (gp_-prefixed) — local Python GP tools, always available
         2. ToolBridge dispatch (exact name) — may route to ExecutionPort or semantic tools
         3. TOOL_HANDLERS dict (static fallback when no bridge)
@@ -4571,26 +4663,39 @@ class AgentEngine:
         """
         from leapflow.skills.tool_executor import ToolCall as TC
         from leapflow.security.redact import redact_sensitive_text
+        from leapflow.skills.semantic_schema import SEMANTIC_TOOL_NAMES
 
         original_name = str(tool_call.get("original_tool_name") or tool_call.get("name", ""))
         proposed_name = str(tool_call.get("name", ""))
         args = tool_call.get("arguments", {})
-        registry = _default_tool_registry()
-        resolution = registry.resolve(proposed_name, args)
-        if not resolution.auto_executable or resolution.normalized_name is None:
-            return registry.unknown_result(
-                ToolResolution(
-                    original_name=original_name,
-                    normalized_name=resolution.normalized_name,
-                    status=resolution.status,
-                    confidence=resolution.confidence,
-                    reason=resolution.reason,
-                    suggestions=resolution.suggestions,
-                    auto_executable=False,
-                    risk_level=resolution.risk_level,
+
+        if proposed_name in SEMANTIC_TOOL_NAMES:
+            if proposed_name not in handlers:
+                return {
+                    "ok": False,
+                    "error": f"Desktop tool '{proposed_name}' is unavailable (perception offline)",
+                }
+            approved, denial = await self._approve_desktop_action(proposed_name, args)
+            if not approved:
+                return {"ok": False, "error": denial}
+            name = proposed_name
+        else:
+            registry = _default_tool_registry()
+            resolution = registry.resolve(proposed_name, args)
+            if not resolution.auto_executable or resolution.normalized_name is None:
+                return registry.unknown_result(
+                    ToolResolution(
+                        original_name=original_name,
+                        normalized_name=resolution.normalized_name,
+                        status=resolution.status,
+                        confidence=resolution.confidence,
+                        reason=resolution.reason,
+                        suggestions=resolution.suggestions,
+                        auto_executable=False,
+                        risk_level=resolution.risk_level,
+                    )
                 )
-            )
-        name = resolution.normalized_name
+            name = resolution.normalized_name
 
         result: Dict[str, Any]
 
@@ -5450,10 +5555,9 @@ class AgentEngine:
             return {"ok": True, "result": result}
 
         if a_type == "tool":
-            from leapflow.tools.registry_bootstrap import TOOL_HANDLERS
             tool_call_dict = {"name": name, "arguments": payload}
             result = await self._execute_tool_with_ledger(
-                tool_call_dict, TOOL_HANDLERS, tool_call_id=f"action-{name}",
+                tool_call_dict, self._unified_tool_handlers(), tool_call_id=f"action-{name}",
             )
             logger.info("audit.tool name=%s ok=%s", name, result.get("ok"))
             return result

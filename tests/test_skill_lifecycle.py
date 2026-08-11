@@ -286,3 +286,67 @@ async def test_undo_multiple(undo_adapter: DarwinExecutionAdapter) -> None:
     results = await undo_adapter.undo(2)
     assert len(results) == 2
     assert undo_adapter.undo_depth == 1
+
+
+# ── Stored-skill fallback registration dedup ──
+
+
+class _FakeSkillLibrary:
+    """Persistence-boundary fake: returns prebuilt StoredSkills."""
+
+    def __init__(self, skills: list) -> None:
+        self._skills = skills
+
+    def load_all_active(self) -> list:
+        return list(self._skills)
+
+
+def test_fallback_registration_dedups_doc_backed_skill() -> None:
+    """A DuckDB skill whose SKILL.md counterpart is already registered must
+    not be registered a second time under a differently derived name."""
+    from leapflow.cli.context import _register_stored_skill_fallbacks
+    from leapflow.learning.document import title_to_kebab
+    from leapflow.skills.registry import Skill
+    from leapflow.storage.skill_library import StoredSkill
+
+    title = "移除下载过的安装包"
+    kebab_name = title_to_kebab(title)
+    assert kebab_name == "skill-移除下载过的安装包"
+
+    registry = SkillRegistry()
+    registry.register(Skill(
+        name=kebab_name,
+        description=title,
+        run=lambda **kwargs: "",
+    ))
+
+    store = _FakeSkillLibrary([StoredSkill(
+        skill_id="s1", title=title,
+        trigger_phrases=[title], steps=["step"],
+    )])
+
+    registered = _register_stored_skill_fallbacks(store, registry, llm=None)
+
+    assert registered == 0
+    assert registry.names().count(kebab_name) == 1
+    assert title not in registry.names()
+
+
+def test_fallback_registration_adds_undocced_skill_under_kebab_name() -> None:
+    """A DuckDB skill with no doc counterpart is registered once, under the
+    shared kebab naming."""
+    from leapflow.cli.context import _register_stored_skill_fallbacks
+    from leapflow.learning.document import title_to_kebab
+    from leapflow.storage.skill_library import StoredSkill
+
+    title = "整理桌面文件"
+    registry = SkillRegistry()
+    store = _FakeSkillLibrary([StoredSkill(
+        skill_id="s2", title=title,
+        trigger_phrases=[title], steps=["step"],
+    )])
+
+    registered = _register_stored_skill_fallbacks(store, registry, llm=None)
+
+    assert registered == 1
+    assert registry.names() == [title_to_kebab(title)]

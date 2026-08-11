@@ -79,6 +79,8 @@ def _cua_driver_version() -> Optional[str]:
             [_CUA_DRIVER_CMD, "--version"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5.0,
         )
         if result.returncode == 0 and result.stdout.strip():
@@ -377,11 +379,13 @@ async def _cmd_doctor() -> int:
         client.start()
         _ok("MCP session established")
 
-        # Step 3: Ping test (list_apps as health probe)
+        # Step 3: Ping test (get_screen_size as health probe — a real driver
+        # round-trip that responds instantly; list_apps enumerates the whole
+        # UI tree and can take 20s+ on Windows, making it a poor probe)
         print()
         print(f"  {_BOLD}3. Ping test{_RESET}")
-        _info("Sending probe (list_apps)...")
-        result = client._session.call_tool_sync("list_apps", {}, timeout=5.0)
+        _info("Sending probe (get_screen_size)...")
+        result = client._session.call_tool_sync("get_screen_size", {}, timeout=10.0)
         if result.get("isError"):
             _warn("Probe returned error (non-fatal)")
         else:
