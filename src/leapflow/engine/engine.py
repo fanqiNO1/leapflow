@@ -35,6 +35,8 @@ from leapflow.engine.context_disclosure import (
     PromptAssemblyPlan,
     build_capability_manifests,
 )
+from leapflow.engine.context_focus import ContextPlane, ReferenceResolution, SessionFocusState
+from leapflow.engine.reference_resolver import ReferenceResolver
 from leapflow.engine.error_classifier import (
     ErrorCategory,
     ErrorClassifier,
@@ -1203,6 +1205,9 @@ class AgentEngine:
         self._last_disclosure_metadata: dict[str, Any] = {}
         self._current_task_contract: TaskContract | None = None
         self._disclosure_planner = DisclosurePlanner()
+        self._focus_state = SessionFocusState()
+        self._reference_resolver = ReferenceResolver()
+        self._last_reference_resolution: ReferenceResolution | None = None
         # Tier 1 structural continuity gate: capability categories used by native
         # tool_calls in the most recently completed turn. Working memory only
         # stores a synthetic "[Called: ...]" summary (no structured tool_calls),
@@ -1905,6 +1910,82 @@ class AgentEngine:
             return prepared
         return [build_system_message(block), *prepared]
 
+    def _semantic_focus_context(self, user_text: str) -> str:
+        """Return the structured focus block for prompt assembly.
+
+        This is separate from DisclosurePlanner: tool-schema disclosure remains
+        driven only by structural gates, while this block describes the session's
+        current semantic focus and recent control-plane events.
+        """
+        resolution = self._reference_resolver.resolve(user_text, self._focus_state)
+        self._last_reference_resolution = resolution
+        visible_resolution = resolution if (resolution.target_id or resolution.needs_clarification) else None
+        return self._focus_state.render_prompt_context(visible_resolution)
+
+    def _focus_turn_id(self) -> int:
+        """Return a stable monotonic turn id for focus observations."""
+        try:
+            return int(self._session_turn_count)
+        except (TypeError, ValueError):
+            return 0
+
+    def _record_tool_focus(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any] | None,
+        result: Any,
+    ) -> None:
+        """Record semantic focus/control-plane state from a completed tool."""
+        try:
+            self._focus_state.record_tool_result(
+                tool_name,
+                arguments or {},
+                result,
+                turn_id=self._focus_turn_id(),
+            )
+        except (TypeError, ValueError, RuntimeError):
+            logger.debug("semantic focus update failed for tool %s", tool_name, exc_info=True)
+
+    def _tool_focus_metadata(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any] | None,
+        result: Any,
+    ) -> Dict[str, Any]:
+        """Return compact metadata describing a tool result's context plane."""
+        name = str(tool_name or "").removeprefix("gp_")
+        if name.startswith("config_"):
+            metadata: Dict[str, Any] = {"context_plane": ContextPlane.CONTROL_PLANE.value}
+            if isinstance(result, dict):
+                key = str(result.get("key") or (arguments or {}).get("key") or "")
+                if key:
+                    metadata["control_event_key"] = key
+            return metadata
+        if name in {"file_read", "web_fetch", "code_search", "text_search", "memory_search"}:
+            return {"context_plane": ContextPlane.TOOL_EVIDENCE.value}
+        return {}
+
+    def _tool_execution_metadata_with_focus(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any] | None,
+        result: Any,
+    ) -> Dict[str, Any]:
+        """Merge existing execution metadata with semantic-focus metadata."""
+        metadata = self._tool_execution_metadata(result)
+        metadata.update(self._tool_focus_metadata(tool_name, arguments, result))
+        return metadata
+
+    def focus_view(self) -> dict[str, Any]:
+        """Return read-only semantic focus diagnostics for /orient and tests."""
+        data = self._focus_state.summary()
+        data["last_reference_resolution"] = (
+            self._last_reference_resolution.to_dict()
+            if self._last_reference_resolution is not None
+            else None
+        )
+        return data
+
     async def _assemble_unified_prompt(
         self,
         user_text: str,
@@ -1942,6 +2023,10 @@ class AgentEngine:
             memory_context = await self._prefetch_and_freeze_memory(user_text)
         skill_section = self._build_skill_section(include_skills=plan.level != DisclosureLevel.CORE)
         app_connector_section = self._build_app_connector_section()
+        focus_context = self._semantic_focus_context(user_text)
+        memory_context = "\n\n".join(
+            part for part in (focus_context, memory_context) if part
+        )
         system = UNIFIED_SYSTEM_TEMPLATE.format(
             tool_catalog=tool_catalog,
             app_connector_section=app_connector_section,
@@ -1949,7 +2034,15 @@ class AgentEngine:
             memory_context=memory_context,
         )
         system = self._append_task_contract_to_system(system)
-        self._last_disclosure_metadata = plan.metadata()
+        self._last_disclosure_metadata = {
+            **plan.metadata(),
+            "context_planes": [ContextPlane.TASK_SEMANTIC.value, ContextPlane.CONTROL_PLANE.value],
+            "reference_resolution": (
+                self._last_reference_resolution.to_dict()
+                if self._last_reference_resolution is not None
+                else None
+            ),
+        }
         prior_turns = self._prior_turns_for_plan(plan)
         return _PromptAssembly(system=system, plan=plan, prior_turns=prior_turns)
 
@@ -3268,6 +3361,7 @@ class AgentEngine:
                 recovery.record_tool_failure()
             else:
                 recovery.record_tool_success()
+            self._record_tool_focus(tool_name, tool_arguments, result)
             result_payload = self._compact_tool_result(tool_name, tool_arguments, result)
             result_text = _truncate_result_for_budget(result_payload, result_budget)
             messages.append(build_user_message_text(
@@ -3276,7 +3370,7 @@ class AgentEngine:
             self._persist_message(
                 session_id, "tool", result_text,
                 tool_name=tool_name, tool_call_id=f"text-{budget.used}",
-                metadata=self._tool_execution_metadata(result),
+                metadata=self._tool_execution_metadata_with_focus(tool_name, tool_arguments, result),
             )
 
             if _is_permission_hard_stop_payload(result):
@@ -3994,6 +4088,7 @@ class AgentEngine:
             else:
                 turn_recovery.record_tool_success()
 
+            self._record_tool_focus(tool_name, tool_arguments, result)
             result_payload = self._compact_tool_result(tool_name, tool_arguments, result)
             result_text = _truncate_result_for_budget(result_payload, result_budget)
             messages.append(build_user_message_text(
@@ -4002,7 +4097,7 @@ class AgentEngine:
             self._persist_message(
                 session_id, "tool", result_text,
                 tool_name=tool_name, tool_call_id=f"text-{budget.used}",
-                metadata=self._tool_execution_metadata(result),
+                metadata=self._tool_execution_metadata_with_focus(tool_name, tool_arguments, result),
             )
 
             if _is_permission_hard_stop_payload(result):
@@ -4156,13 +4251,14 @@ class AgentEngine:
                     action=tool_call_dict,
                     observation=result if isinstance(result, dict) else {"result": str(result)},
                 )
+                self._record_tool_focus(normalized_name, tc.arguments, result)
                 result_payload = self._compact_tool_result(normalized_name, tc.arguments, result)
                 result_text = _truncate_result_for_budget(result_payload, result_budget)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
                 self._persist_message(
                     self._current_session_id, "tool", result_text,
                     tool_name=normalized_name, tool_call_id=str(tc.id),
-                    metadata=self._tool_execution_metadata(result),
+                    metadata=self._tool_execution_metadata_with_focus(normalized_name, tc.arguments, result),
                 )
                 executed.append({
                     "id": tc.id,
@@ -4250,11 +4346,12 @@ class AgentEngine:
                     result_payload = self._compact_tool_result(ctc.name, ctc.arguments, result)
                     result_text = _truncate_result_for_budget(result_payload, result_budget)
                 effective_result = error_result if isinstance(result, Exception) else result
+                self._record_tool_focus(ctc.name, ctc.arguments, effective_result)
                 messages.append({"role": "tool", "tool_call_id": ctc.id, "content": result_text})
                 self._persist_message(
                     self._current_session_id, "tool", result_text,
                     tool_name=ctc.name, tool_call_id=str(ctc.id),
-                    metadata=self._tool_execution_metadata(effective_result),
+                    metadata=self._tool_execution_metadata_with_focus(ctc.name, ctc.arguments, effective_result),
                 )
                 executed.append({
                     "id": ctc.id,
@@ -4300,11 +4397,12 @@ class AgentEngine:
             )
             result_payload = self._compact_tool_result(ctc.name, ctc.arguments, result)
             result_text = _truncate_result_for_budget(result_payload, result_budget)
+            self._record_tool_focus(ctc.name, ctc.arguments, result)
             messages.append({"role": "tool", "tool_call_id": ctc.id, "content": result_text})
             self._persist_message(
                 self._current_session_id, "tool", result_text,
                 tool_name=ctc.name, tool_call_id=str(ctc.id),
-                metadata=self._tool_execution_metadata(result),
+                metadata=self._tool_execution_metadata_with_focus(ctc.name, ctc.arguments, result),
             )
             executed.append({
                 "id": ctc.id,

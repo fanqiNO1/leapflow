@@ -138,6 +138,7 @@ class PromptAssemblyPlan:
     reason: str = ""
     selected_tool_names: tuple[str, ...] = ()
     expanded_categories: tuple[str, ...] = ()
+    context_planes: tuple[str, ...] = ()
     max_prior_turns: int = 2
 
     def metadata(self) -> dict[str, Any]:
@@ -148,6 +149,7 @@ class PromptAssemblyPlan:
             "tools": list(self.selected_tool_names),
             "tool_count": len(self.selected_tool_names),
             "expanded_categories": list(self.expanded_categories),
+            "context_planes": list(self.context_planes),
             "memory": self.memory.value,
             "history": self.history.value,
             "reasoning": self.reasoning.value,
@@ -245,6 +247,7 @@ class DisclosurePlanner:
             reason=reason,
             selected_tool_names=tuple(sorted(expanded_names)),
             expanded_categories=tuple(expanded_categories),
+            context_planes=("task_semantic", "control_plane"),
             max_prior_turns=6 if expanded_categories else 2,
         )
 
@@ -270,6 +273,7 @@ class DisclosurePlanner:
             reason=reason,
             selected_tool_names=names,
             expanded_categories=tuple(sorted({m.category for m in manifests if m.category})),
+            context_planes=("task_semantic", "control_plane"),
             max_prior_turns=10,
         )
 
