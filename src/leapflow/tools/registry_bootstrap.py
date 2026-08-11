@@ -141,7 +141,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                     "max_results": {"type": "integer", "description": "Max matches to return (default: 200)"},
                     "context_lines": {"type": "integer", "description": "Lines of context before/after each match (default: 0, max 10)"},
                 },
-                "required": ["pattern"],
+                "required": [],
             },
             "x_leapflow": {"category": "file", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
         },
