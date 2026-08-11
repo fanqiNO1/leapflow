@@ -5,6 +5,7 @@ Enhanced taxonomy inspired by hermes-agent/error_classifier.py:
 - Structured ClassifiedError with recovery hints
 - Provider-agnostic pattern matching
 - Config-driven recovery strategies (OCP)
+- Data-driven classification via registry tables (no if-elif chains)
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ import logging
 import random
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -149,12 +150,268 @@ _FRIENDLY_MESSAGES: Dict[ErrorCategory, str] = {
     ),
 }
 
-_AUTH_KEYWORDS = ("api_key", "api key", "unauthorized", "forbidden", "401", "403")
-_BILLING_KEYWORDS = ("insufficient_quota", "billing", "payment", "quota exceeded", "402")
-_RATE_LIMIT_KEYWORDS = ("rate", "429", "too many", "throttl")
-_OVERLOAD_KEYWORDS = ("overloaded", "503", "capacity", "server busy")
-_CONTEXT_KEYWORDS = ("context", "token", "length", "maximum context", "max_tokens")
-_CONTENT_POLICY_KEYWORDS = ("content_policy", "safety", "content filter", "moderation")
+
+# ---------------------------------------------------------------------------
+# Data-Driven HTTP Status Code Classification
+# ---------------------------------------------------------------------------
+
+# Exact status code -> category (no message refinement needed)
+_STATUS_CODE_CLASSIFICATION: Dict[int, ErrorCategory] = {
+    401: ErrorCategory.AUTH_PERMANENT,
+    413: ErrorCategory.PAYLOAD_TOO_LARGE,
+    503: ErrorCategory.OVERLOADED,
+    504: ErrorCategory.TRANSIENT,
+}
+
+# Status codes that require message-based refinement to determine category.
+# Each entry maps: status -> list of (keywords_to_check, category_if_matched)
+# with a final fallback category.
+_StatusRefinement = Tuple[List[Tuple[Tuple[str, ...], ErrorCategory]], ErrorCategory]
+
+_STATUS_REFINEMENT: Dict[int, _StatusRefinement] = {
+    403: (
+        [
+            (("billing", "quota", "payment"), ErrorCategory.BILLING),
+        ],
+        ErrorCategory.AUTH_PERMANENT,
+    ),
+    402: (
+        [
+            (("try again", "resets at", "temporary"), ErrorCategory.RATE_LIMITED),
+        ],
+        ErrorCategory.BILLING,
+    ),
+    404: (
+        [
+            (("model",), ErrorCategory.MODEL_NOT_FOUND),
+        ],
+        ErrorCategory.PERMANENT,
+    ),
+    422: (
+        [
+            (("context", "token", "length", "maximum context", "max_tokens"), ErrorCategory.CONTEXT_OVERFLOW),
+        ],
+        ErrorCategory.FORMAT_ERROR,
+    ),
+    429: (
+        [
+            (("overloaded", "capacity"), ErrorCategory.OVERLOADED),
+        ],
+        ErrorCategory.RATE_LIMITED,
+    ),
+    500: (
+        [
+            (("context", "token", "length", "maximum context", "max_tokens"), ErrorCategory.CONTEXT_OVERFLOW),
+        ],
+        ErrorCategory.TRANSIENT,
+    ),
+    502: (
+        [
+            (("context", "token", "length", "maximum context", "max_tokens"), ErrorCategory.CONTEXT_OVERFLOW),
+        ],
+        ErrorCategory.TRANSIENT,
+    ),
+}
+
+# Fallback ranges for codes not in the exact or refinement maps.
+_STATUS_RANGE_CLASSIFICATION: List[Tuple[range, _StatusRefinement]] = [
+    # 4xx fallback with message-based refinement
+    (range(400, 500), (
+        [
+            (("content_policy", "safety", "blocked"), ErrorCategory.CONTENT_BLOCKED),
+            (("image",), ErrorCategory.IMAGE_TOO_LARGE),  # refined further below
+        ],
+        ErrorCategory.FORMAT_ERROR,
+    )),
+    # 5xx fallback
+    (range(500, 600), (
+        [],
+        ErrorCategory.TRANSIENT,
+    )),
+]
+
+
+# ---------------------------------------------------------------------------
+# Data-Driven Message Classification Rules
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class MessageClassificationRule:
+    """A pattern-based rule for classifying error messages.
+
+    Rules are evaluated in registration order; the first match wins.
+    """
+    category: ErrorCategory
+    keywords: FrozenSet[str]
+    description: str = ""
+    # Optional predicate for compound conditions that cannot be expressed
+    # as simple keyword presence (e.g. require two keywords simultaneously).
+    predicate: Optional[Callable[[str], bool]] = field(default=None, compare=False)
+
+
+# Ordered rule table — first match wins.
+_MESSAGE_RULES: List[MessageClassificationRule] = [
+    # SSL/TLS (must precede transient to avoid "connection" match)
+    MessageClassificationRule(
+        category=ErrorCategory.SSL_ERROR,
+        keywords=frozenset({"ssl", "certificate"}),
+        description="SSL/TLS certificate or handshake failures",
+        predicate=lambda msg: ("ssl" in msg or "certificate" in msg) and ("verify" in msg or "expired" in msg),
+    ),
+    # Transient: timeout/connection (check early to catch network issues)
+    MessageClassificationRule(
+        category=ErrorCategory.TRANSIENT,
+        keywords=frozenset({"timeout", "timed out", "connection"}),
+        description="Transient network/timeout errors",
+    ),
+    # Rate limiting
+    MessageClassificationRule(
+        category=ErrorCategory.RATE_LIMITED,
+        keywords=frozenset({"rate", "429", "too many", "throttl"}),
+        description="Rate limiting / throttling",
+    ),
+    # Overloaded
+    MessageClassificationRule(
+        category=ErrorCategory.OVERLOADED,
+        keywords=frozenset({"overloaded", "503", "capacity", "server busy"}),
+        description="Server overload / capacity",
+    ),
+    # Context overflow
+    MessageClassificationRule(
+        category=ErrorCategory.CONTEXT_OVERFLOW,
+        keywords=frozenset({"context", "token", "length", "maximum context", "max_tokens"}),
+        description="Context window overflow",
+    ),
+    # Billing
+    MessageClassificationRule(
+        category=ErrorCategory.BILLING,
+        keywords=frozenset({"insufficient_quota", "billing", "payment", "quota exceeded", "402"}),
+        description="Billing / quota failures",
+    ),
+    # Auth (recoverable — credential rotation may help)
+    MessageClassificationRule(
+        category=ErrorCategory.AUTH_ERROR,
+        keywords=frozenset({"api_key", "api key", "unauthorized", "forbidden", "401", "403"}),
+        description="Authentication / authorization errors",
+    ),
+    # Content policy
+    MessageClassificationRule(
+        category=ErrorCategory.CONTENT_BLOCKED,
+        keywords=frozenset({"content_policy", "safety", "content filter", "moderation"}),
+        description="Content policy violations",
+    ),
+    # Format / parse (explicit keywords only)
+    MessageClassificationRule(
+        category=ErrorCategory.FORMAT_ERROR,
+        keywords=frozenset({"format", "json", "parse"}),
+        description="Format / JSON parse errors",
+    ),
+    # Model not found (compound predicate)
+    MessageClassificationRule(
+        category=ErrorCategory.MODEL_NOT_FOUND,
+        keywords=frozenset({"model"}),
+        description="Model not found",
+        predicate=lambda msg: "model" in msg and ("not found" in msg or "does not exist" in msg),
+    ),
+]
+
+# Tool error classification rules (used by classify_tool_error)
+_TOOL_ERROR_RULES: List[MessageClassificationRule] = [
+    MessageClassificationRule(
+        category=ErrorCategory.TOOL_FAILURE,
+        keywords=frozenset({"permission", "access denied"}),
+        description="Tool permission failures",
+    ),
+    MessageClassificationRule(
+        category=ErrorCategory.TRANSIENT,
+        keywords=frozenset({"timeout", "timed out"}),
+        description="Tool timeout / transient failures",
+    ),
+    MessageClassificationRule(
+        category=ErrorCategory.TOOL_FAILURE,
+        keywords=frozenset({"not found"}),
+        description="Tool resource not found",
+    ),
+    MessageClassificationRule(
+        category=ErrorCategory.RATE_LIMITED,
+        keywords=frozenset({"rate", "throttl"}),
+        description="Tool rate limiting",
+    ),
+]
+
+
+def register_message_rule(rule: MessageClassificationRule, *, priority: int = -1) -> None:
+    """Register a custom classification rule.
+
+    Args:
+        rule: The classification rule to register.
+        priority: Index at which to insert. -1 appends before the final fallback.
+    """
+    if priority < 0 or priority >= len(_MESSAGE_RULES):
+        _MESSAGE_RULES.append(rule)
+    else:
+        _MESSAGE_RULES.insert(priority, rule)
+
+
+def register_status_code(status_code: int, category: ErrorCategory) -> None:
+    """Register or override a status code -> category mapping."""
+    _STATUS_CODE_CLASSIFICATION[status_code] = category
+
+
+# ---------------------------------------------------------------------------
+# Classification Functions
+# ---------------------------------------------------------------------------
+
+def _classify_by_status(status: int, msg: str) -> Optional[ErrorCategory]:
+    """Disambiguate errors by HTTP status + message content.
+
+    Uses data-driven tables for lookup: exact match -> refinement rules -> range fallback.
+    """
+    # 1. Exact match (no refinement needed)
+    if status in _STATUS_CODE_CLASSIFICATION:
+        return _STATUS_CODE_CLASSIFICATION[status]
+
+    # 2. Status codes requiring message refinement
+    if status in _STATUS_REFINEMENT:
+        refinements, fallback = _STATUS_REFINEMENT[status]
+        for keywords, category in refinements:
+            if any(kw in msg for kw in keywords):
+                return category
+        return fallback
+
+    # 3. Range-based fallback with optional refinement
+    for code_range, (refinements, fallback) in _STATUS_RANGE_CLASSIFICATION:
+        if status in code_range:
+            for keywords, category in refinements:
+                if category == ErrorCategory.IMAGE_TOO_LARGE:
+                    # Compound check: "image" AND ("large" or "size")
+                    if "image" in msg and ("large" in msg or "size" in msg):
+                        return category
+                elif any(kw in msg for kw in keywords):
+                    return category
+            return fallback
+
+    return None
+
+
+def _classify_by_message(msg: str) -> ErrorCategory:
+    """Classify by pattern rules in error message. First matching rule wins."""
+    for rule in _MESSAGE_RULES:
+        if rule.predicate is not None:
+            if rule.predicate(msg):
+                return rule.category
+        elif any(kw in msg for kw in rule.keywords):
+            return rule.category
+    return ErrorCategory.PERMANENT
+
+
+def _classify_tool_error_by_message(error: str) -> ErrorCategory:
+    """Classify a tool error message using the tool error rule table."""
+    lower = error.lower()
+    for rule in _TOOL_ERROR_RULES:
+        if any(kw in lower for kw in rule.keywords):
+            return rule.category
+    return ErrorCategory.TOOL_FAILURE
 
 
 class ErrorClassifier:
@@ -162,7 +419,7 @@ class ErrorClassifier:
 
     Classification pipeline (priority order):
     1. HTTP status code + message refinement
-    2. Known keyword patterns
+    2. Known keyword patterns (data-driven rule table)
     3. SSL/transport errors
     4. Fallback to PERMANENT
     """
@@ -178,11 +435,11 @@ class ErrorClassifier:
 
         status = self._extract_status_code(exc)
         if status is not None:
-            category = self._classify_by_status(status, msg)
+            category = _classify_by_status(status, msg)
             if category is not None:
                 return category
 
-        return self._classify_by_message(msg)
+        return _classify_by_message(msg)
 
     def classify_detailed(self, exc: Exception) -> ClassifiedError:
         """Classify with full context for advanced recovery logic."""
@@ -204,16 +461,8 @@ class ErrorClassifier:
         """Classify a tool execution error from observation dict."""
         if observation.get("ok", True):
             return ErrorCategory.TRANSIENT
-        error = str(observation.get("error", "")).lower()
-        if "permission" in error or "access denied" in error:
-            return ErrorCategory.TOOL_FAILURE
-        if "timeout" in error or "timed out" in error:
-            return ErrorCategory.TRANSIENT
-        if "not found" in error:
-            return ErrorCategory.TOOL_FAILURE
-        if "rate" in error or "throttl" in error:
-            return ErrorCategory.RATE_LIMITED
-        return ErrorCategory.TOOL_FAILURE
+        error = str(observation.get("error", ""))
+        return _classify_tool_error_by_message(error)
 
     def get_recovery(self, category: ErrorCategory) -> RecoveryStrategy:
         return self._map.get(category, RecoveryStrategy())
@@ -245,88 +494,6 @@ class ErrorClassifier:
             if str(code) in msg:
                 return code
         return None
-
-    @staticmethod
-    def _classify_by_status(status: int, msg: str) -> Optional[ErrorCategory]:
-        """Disambiguate errors by HTTP status + message content."""
-        if status == 401:
-            return ErrorCategory.AUTH_PERMANENT
-        if status == 403:
-            if any(kw in msg for kw in ("billing", "quota", "payment")):
-                return ErrorCategory.BILLING
-            return ErrorCategory.AUTH_PERMANENT
-        if status == 402:
-            if any(kw in msg for kw in ("try again", "resets at", "temporary")):
-                return ErrorCategory.RATE_LIMITED
-            return ErrorCategory.BILLING
-        if status == 404:
-            if "model" in msg:
-                return ErrorCategory.MODEL_NOT_FOUND
-            return ErrorCategory.PERMANENT
-        if status == 413:
-            return ErrorCategory.PAYLOAD_TOO_LARGE
-        if status == 422:
-            if any(kw in msg for kw in _CONTEXT_KEYWORDS):
-                return ErrorCategory.CONTEXT_OVERFLOW
-            return ErrorCategory.FORMAT_ERROR
-        if status == 429:
-            if "overloaded" in msg or "capacity" in msg:
-                return ErrorCategory.OVERLOADED
-            return ErrorCategory.RATE_LIMITED
-        if status in (500, 502):
-            if any(kw in msg for kw in _CONTEXT_KEYWORDS):
-                return ErrorCategory.CONTEXT_OVERFLOW
-            return ErrorCategory.TRANSIENT
-        if status == 503:
-            return ErrorCategory.OVERLOADED
-        if status == 504:
-            return ErrorCategory.TRANSIENT
-        if 400 <= status < 500:
-            if any(kw in msg for kw in ("content_policy", "safety", "blocked")):
-                return ErrorCategory.CONTENT_BLOCKED
-            if "image" in msg and ("large" in msg or "size" in msg):
-                return ErrorCategory.IMAGE_TOO_LARGE
-            return ErrorCategory.FORMAT_ERROR
-        if status >= 500:
-            return ErrorCategory.TRANSIENT
-        return None
-
-    @staticmethod
-    def _classify_by_message(msg: str) -> ErrorCategory:
-        """Classify by keyword patterns in error message."""
-        if "ssl" in msg or "certificate" in msg:
-            if "verify" in msg or "expired" in msg:
-                return ErrorCategory.SSL_ERROR
-            return ErrorCategory.TRANSIENT
-
-        if "timeout" in msg or "timed out" in msg or "connection" in msg:
-            return ErrorCategory.TRANSIENT
-
-        if any(kw in msg for kw in _RATE_LIMIT_KEYWORDS):
-            return ErrorCategory.RATE_LIMITED
-
-        if any(kw in msg for kw in _OVERLOAD_KEYWORDS):
-            return ErrorCategory.OVERLOADED
-
-        if any(kw in msg for kw in _CONTEXT_KEYWORDS):
-            return ErrorCategory.CONTEXT_OVERFLOW
-
-        if any(kw in msg for kw in _BILLING_KEYWORDS):
-            return ErrorCategory.BILLING
-
-        if any(kw in msg for kw in _AUTH_KEYWORDS):
-            return ErrorCategory.AUTH_ERROR
-
-        if any(kw in msg for kw in _CONTENT_POLICY_KEYWORDS):
-            return ErrorCategory.CONTENT_BLOCKED
-
-        if "format" in msg or "json" in msg or "parse" in msg:
-            return ErrorCategory.FORMAT_ERROR
-
-        if "model" in msg and ("not found" in msg or "does not exist" in msg):
-            return ErrorCategory.MODEL_NOT_FOUND
-
-        return ErrorCategory.PERMANENT
 
 
 def jittered_backoff(attempt: int, *, base: float = 1.0, cap: float = 60.0) -> float:

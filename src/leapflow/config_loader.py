@@ -246,13 +246,31 @@ def _validate_known_sections(
             warnings.append(f"{path}: section '{key}' must be a mapping")
 
 
+# Known compound keys whose internal underscores are NOT level separators.
+# Used by _env_overrides to avoid splitting e.g. LEAPFLOW_LLM_API_KEY into
+# {"llm": {"api": {"key": ...}}} instead of the intended {"llm": {"api_key": ...}}.
+_COMPOUND_KEYS: frozenset[str] = frozenset({
+    "api_key", "base_url", "max_retries", "context_length",
+    "max_tokens", "timeout_s", "idle_ttl_s", "max_live_sessions",
+    "track_enabled", "hard_limit_ratio", "warning_ratio",
+    "result_budget", "tool_budget",
+})
+
+
 def _env_overrides() -> dict[str, Any]:
-    """Collect process LEAPFLOW_* overrides as nested config values."""
+    """Collect process LEAPFLOW_* overrides as nested config values.
+
+    The strategy is greedy: after the LEAPFLOW_ prefix, the first segment is the
+    section. The remaining segments are re-joined and checked against known
+    compound keys from longest to shortest, so that LEAPFLOW_LLM_API_KEY maps to
+    {"llm": {"api_key": "..."}} rather than {"llm": {"api": {"key": "..."}}}.
+    """
     values: dict[str, Any] = {}
     for key, value in os.environ.items():
         if not key.startswith("LEAPFLOW_"):
             continue
-        path = key[len("LEAPFLOW_"):].lower().split("_")
+        remainder = key[len("LEAPFLOW_"):].lower()
+        path = _split_env_key(remainder)
         cursor = values
         for part in path[:-1]:
             next_cursor = cursor.setdefault(part, {})
@@ -262,3 +280,21 @@ def _env_overrides() -> dict[str, Any]:
             cursor = next_cursor
         cursor[path[-1]] = value
     return values
+
+
+def _split_env_key(remainder: str) -> list[str]:
+    """Split a lowercased env suffix into config path segments.
+
+    Uses greedy matching against _COMPOUND_KEYS so that multi-word leaf keys
+    (api_key, base_url, ...) are not split into extra nesting levels.
+    """
+    parts = remainder.split("_")
+    if len(parts) <= 1:
+        return parts
+    # Try greedy: from the end, find the longest tail that matches a compound key.
+    for tail_start in range(1, len(parts)):
+        candidate = "_".join(parts[tail_start:])
+        if candidate in _COMPOUND_KEYS:
+            return parts[:tail_start] + [candidate]
+    # No compound match — fall back to original per-segment splitting.
+    return parts

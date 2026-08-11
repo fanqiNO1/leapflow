@@ -31,6 +31,7 @@ def test_disclosure_planner_core_is_never_empty_and_excludes_heavy_categories() 
     assert plan.tool_definitions  # never empty
     assert plan.catalog_definitions == tuple(TOOL_DEFINITIONS)
     assert plan.native_tools is True
+    assert plan.context_planes == ("task_semantic", "control_plane")
 
     # Always-on low-risk, cheap-schema tools.
     for expected in ("file_list", "file_read", "text_search", "memory_search", "capability_expand"):

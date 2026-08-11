@@ -25,6 +25,7 @@ class ApprovalDecision(Enum):
     ALLOW = "allow"
     ALLOW_ONCE = "allow_once"
     ALLOW_SESSION = "allow_session"
+    ALLOW_ALL_SESSION = "allow_all_session"
     ALLOW_ALWAYS = "allow_always"
     DENY = "deny"
     DENY_ALWAYS = "deny_always"
@@ -107,6 +108,7 @@ class SessionAwareGate:
     def __init__(self, delegate: ApprovalGate) -> None:
         self._delegate = delegate
         self._approved_categories: set[str] = set()
+        self._bypass_all: bool = False
         self._decision_log: list[dict[str, Any]] = []
 
     async def check(self, command: str) -> bool:
@@ -128,12 +130,21 @@ class SessionAwareGate:
     async def request_approval(
         self, request: ApprovalRequest,
     ) -> ApprovalDecision:
+        # Session-wide bypass: auto-approve everything without prompting
+        if self._bypass_all:
+            self._log_decision(request, ApprovalDecision.ALLOW, auto=True)
+            return ApprovalDecision.ALLOW
+
         grant_key = request.grant_key
         if grant_key in self._approved_categories:
             self._log_decision(request, ApprovalDecision.ALLOW, auto=True)
             return ApprovalDecision.ALLOW
 
         decision = await self._delegate.request_approval(request)
+        if decision == ApprovalDecision.ALLOW_ALL_SESSION:
+            self._bypass_all = True
+            self._log_decision(request, decision, session=True)
+            return ApprovalDecision.ALLOW
         if decision == ApprovalDecision.ALLOW_SESSION:
             self._approved_categories.add(grant_key)
             self._log_decision(request, ApprovalDecision.ALLOW_SESSION, session=True)

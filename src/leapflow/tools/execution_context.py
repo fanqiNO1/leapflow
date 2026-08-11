@@ -8,7 +8,7 @@ active turn's workspace and reject accidental cross-workspace absolute paths.
 from __future__ import annotations
 
 import contextvars
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,8 @@ class ToolExecutionContext:
     allowed_roots: tuple[Path, ...]
     session_id: str = ""
     task_id: str = ""
+    approval_bypass: bool = False
+    orchestrator: Any = field(default=None, compare=False, hash=False, repr=False)
 
     @classmethod
     def from_strings(
@@ -30,6 +32,8 @@ class ToolExecutionContext:
         allowed_roots: tuple[str, ...] = (),
         session_id: str = "",
         task_id: str = "",
+        approval_bypass: bool = False,
+        orchestrator: Any = None,
     ) -> "ToolExecutionContext":
         root = Path(workspace_root).expanduser().resolve()
         roots = tuple(Path(item).expanduser().resolve() for item in allowed_roots if item)
@@ -38,6 +42,8 @@ class ToolExecutionContext:
             allowed_roots=roots or (root,),
             session_id=session_id,
             task_id=task_id,
+            approval_bypass=approval_bypass,
+            orchestrator=orchestrator,
         )
 
 
@@ -129,9 +135,8 @@ def leapflow_managed_hint(path: Path) -> str:
 def workspace_scope_error(path: Path, *, operation: str) -> dict[str, Any] | None:
     """Return a structured error when ``path`` escapes the active workspace.
 
-    The workspace boundary is a hard gate evaluated at the tool entry point: it
-    is deliberately not routed through ApprovalGate, so the message must not
-    imply that approving something will unblock it.
+    The workspace boundary is gated by the approval orchestrator: the caller
+    routes through _approve_workspace_escape when bypass is inactive.
     """
     ctx = current_tool_context()
     if ctx is None or is_within_allowed_roots(path, ctx):
@@ -142,8 +147,8 @@ def workspace_scope_error(path: Path, *, operation: str) -> dict[str, Any] | Non
         "error": (
             f"{operation} path is outside the active workspace. "
             f"Resolved path: {path}; workspace root: {ctx.workspace_root}. "
-            "This boundary cannot be lifted by approval; work inside the workspace, "
-            "or ask the user to open a session in that directory." + hint
+            "Approval is required to access paths outside the workspace."
+            + hint
         ),
         "error_type": "outside_workspace",
         "retryable": False,

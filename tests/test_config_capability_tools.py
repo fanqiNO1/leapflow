@@ -232,8 +232,7 @@ def test_sandbox_refusal_does_not_promise_approval(cfg_home) -> None:
         reset_tool_context(token)
 
     assert error is not None
-    assert "cannot be lifted by approval" in error["error"]
-    assert "with approval" not in error["error"].replace("cannot be lifted by approval", "")
+    assert "Approval is required" in error["error"]
 
 
 def test_sandbox_refusal_redirects_config_paths_to_the_tools(cfg_home) -> None:

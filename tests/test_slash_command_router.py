@@ -133,11 +133,20 @@ def test_build_orient_payload_renders_layers_and_guards_missing_engine() -> None
         orientation_view=lambda: aggregate_orientation(
             working=["finding A", "[open] does B cache?"], now=0.0,
         ),
+        focus_view=lambda: {
+            "active_focus": {"canonical_name": "MiniCPM-O 4.5 Technical Report", "kind": "paper"},
+            "recent_control_events": [
+                {"user_visible_summary": "llm.model -> qwen3.8-max"},
+            ],
+        },
     )
     payload = build_orient_payload(SimpleNamespace(engine=fake_engine, _reentry_store=None))
     assert payload["ok"] is True
     assert "finding A" in payload["message"]
+    assert "Active focus: MiniCPM-O 4.5 Technical Report (paper)" in payload["message"]
+    assert "llm.model -> qwen3.8-max" in payload["message"]
     assert payload["orientation"]["total"] == 2
+    assert payload["focus"]["active_focus"]["canonical_name"] == "MiniCPM-O 4.5 Technical Report"
 
 
 def test_tools_payload_groups_desktop_tools_when_perception_online() -> None:

@@ -1108,12 +1108,28 @@ def build_orient_payload(ctx: "Context") -> dict[str, Any]:
     if view_fn is None:
         return {"ok": False, "error": "Orientation view not available."}
     orientation = view_fn()
+    focus_view_fn = getattr(engine, "focus_view", None)
+    focus = focus_view_fn() if callable(focus_view_fn) else {}
     lines = ["Orientation (immediate / working / long-term):"]
     items = orientation.top(12)
     if not items:
         lines.append("  (empty — no active findings or open questions yet)")
     else:
         lines.extend(f"  - ({it.layer}) {it.text}" for it in items)
+    active_focus = focus.get("active_focus") if isinstance(focus, dict) else None
+    if isinstance(active_focus, dict):
+        name = str(active_focus.get("canonical_name") or "").strip()
+        kind = str(active_focus.get("kind") or "focus").strip()
+        if name:
+            lines.append(f"Active focus: {name} ({kind})")
+    control_events = focus.get("recent_control_events") if isinstance(focus, dict) else None
+    if isinstance(control_events, list) and control_events:
+        lines.append("Recent control-plane events:")
+        for event in control_events[-3:]:
+            if isinstance(event, dict):
+                summary = str(event.get("user_visible_summary") or "").strip()
+                if summary:
+                    lines.append(f"  - {summary}")
     store = getattr(ctx, "_reentry_store", None)
     if store is not None:
         try:
@@ -1127,6 +1143,7 @@ def build_orient_payload(ctx: "Context") -> dict[str, Any]:
         "ok": True,
         "message": "\n".join(lines),
         "orientation": orientation.summary(),
+        "focus": focus,
     }
 
 

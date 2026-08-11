@@ -17,9 +17,12 @@ never presents an empty or contradictory tool contract to the model.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Iterable, Mapping, Sequence
+
+logger = logging.getLogger(__name__)
 
 
 class DisclosureLevel(str, Enum):
@@ -97,7 +100,7 @@ class CapabilityManifest:
             or {}
         )
         metadata = raw_metadata if isinstance(raw_metadata, Mapping) else {}
-        category = str(metadata.get("category") or _infer_category(name, description))
+        category = str(metadata.get("category") or _infer_category(name, tool_definition))
         signals = _metadata_signals(metadata.get("input_signals"))
         risk_level = str(metadata.get("risk_level") or _risk_for_category(category))
         requires_approval = bool(metadata.get("requires_approval", category in {"write", "shell", "gateway"}))
@@ -138,6 +141,7 @@ class PromptAssemblyPlan:
     reason: str = ""
     selected_tool_names: tuple[str, ...] = ()
     expanded_categories: tuple[str, ...] = ()
+    context_planes: tuple[str, ...] = ()
     max_prior_turns: int = 2
 
     def metadata(self) -> dict[str, Any]:
@@ -148,6 +152,7 @@ class PromptAssemblyPlan:
             "tools": list(self.selected_tool_names),
             "tool_count": len(self.selected_tool_names),
             "expanded_categories": list(self.expanded_categories),
+            "context_planes": list(self.context_planes),
             "memory": self.memory.value,
             "history": self.history.value,
             "reasoning": self.reasoning.value,
@@ -245,6 +250,7 @@ class DisclosurePlanner:
             reason=reason,
             selected_tool_names=tuple(sorted(expanded_names)),
             expanded_categories=tuple(expanded_categories),
+            context_planes=("task_semantic", "control_plane"),
             max_prior_turns=6 if expanded_categories else 2,
         )
 
@@ -270,6 +276,7 @@ class DisclosurePlanner:
             reason=reason,
             selected_tool_names=names,
             expanded_categories=tuple(sorted({m.category for m in manifests if m.category})),
+            context_planes=("task_semantic", "control_plane"),
             max_prior_turns=10,
         )
 
@@ -314,18 +321,58 @@ def _metadata_signals(value: Any) -> tuple[str, ...]:
     return tuple(str(item).lower().strip() for item in value if str(item).strip())
 
 
-def _infer_category(name: str, description: str) -> str:
-    """Best-effort category guess for tools that declare no explicit x_leapflow.
+def _infer_category(tool_name: str, tool_schema: Mapping[str, Any] | None = None) -> str:
+    """Determine tool category from schema metadata, with deprecated substring fallback.
 
-    This is purely a *bootstrap convenience* for a handful of well-known,
-    already-audited built-in tools — it must never be the mechanism that
-    grants a brand-new, unaudited tool core-whitelist eligibility. Anything
-    that does not match one of the recognized safe keyword patterns below
-    falls through to "unclassified", which `_risk_for_category` deliberately
-    treats as non-core by default (fail-closed): a future tool added without
-    explicit metadata must be reviewed and opted in, not silently trusted.
+    Priority 1: Read the explicit ``x_leapflow.category`` declaration from the
+    tool schema (the authoritative source).
+    Priority 2: Fall back to legacy substring inference on tool name and
+    description.  This path emits a debug-level deprecation notice; tool
+    authors should declare ``x_leapflow.category`` in the schema instead.
     """
-    text = f"{name} {description}".lower()
+    # Priority 1: Explicit x_leapflow.category declaration from tool schema
+    if tool_schema and isinstance(tool_schema, Mapping):
+        function = tool_schema.get("function", {})
+        if not isinstance(function, Mapping):
+            function = {}
+        raw_metadata = (
+            tool_schema.get("x_leapflow")
+            or tool_schema.get("x-leapflow")
+            or function.get("x_leapflow")
+            or function.get("x-leapflow")
+            or {}
+        )
+        metadata = raw_metadata if isinstance(raw_metadata, Mapping) else {}
+        category = str(metadata.get("category", ""))
+        if category:
+            return category
+
+    # Priority 2: Deprecated substring inference
+    description = ""
+    if tool_schema and isinstance(tool_schema, Mapping):
+        func = tool_schema.get("function", {})
+        if isinstance(func, Mapping):
+            description = str(func.get("description") or "")
+
+    category = _legacy_infer_category(tool_name, description)
+    if category != "unclassified":
+        logger.debug(
+            "Tool %s using deprecated substring category inference (%s); "
+            "declare x_leapflow.category in tool schema instead",
+            tool_name, category,
+        )
+    return category
+
+
+def _legacy_infer_category(tool_name: str, description: str = "") -> str:
+    """Deprecated: infer category from tool name/description substrings.
+
+    This is purely a bootstrap convenience for a handful of well-known,
+    already-audited built-in tools.  New tools MUST declare
+    ``x_leapflow.category`` in their schema instead of relying on this.
+    Anything unmatched falls through to 'unclassified' (fail-closed).
+    """
+    text = f"{tool_name} {description}".lower()
     if any(token in text for token in ("write", "replace", "delete", "store", "add")):
         return "write"
     if any(token in text for token in ("shell", "command", "execute")):
@@ -347,20 +394,38 @@ def _infer_category(name: str, description: str) -> str:
     return "unclassified"
 
 
-def _risk_for_category(category: str) -> str:
-    """Map a category to its default risk level.
+# ── Category → risk level data table ──────────────────────────────────
+# Configurable mapping; 'unclassified' deliberately defaults to 'medium'
+# (fail-closed) so an undeclared tool cannot silently enter Tier 0.5.
+_CATEGORY_RISK_MAP: dict[str, str] = {
+    "write": "high",
+    "shell": "high",
+    "execute": "high",
+    "gateway": "high",
+    "file": "read_only",
+    "memory": "read_only",
+    "skill": "medium",
+    "delegate": "medium",
+    "hub": "medium",
+    "read": "read_only",
+    "search": "read_only",
+    "system": "read_only",
+    "general": "read_only",
+    "dev": "read_only",
+    "scm": "high",
+    "desktop": "medium",
+    "unclassified": "medium",
+}
 
-    ``unclassified`` deliberately does *not* fall through to "read_only": a
-    tool that could not be matched against any recognized safe keyword
-    pattern (and declared no explicit ``x_leapflow`` metadata) must not be
-    silently granted Tier 0.5 core-whitelist eligibility. Only categories
-    that have been explicitly reviewed as safe reach "read_only" here.
+
+def _risk_for_category(category: str) -> str:
+    """Look up risk level from the category data table.
+
+    Unknown categories default to 'medium' (fail-closed): a tool whose
+    category is not in the table cannot silently obtain Tier 0.5
+    core-whitelist eligibility.
     """
-    if category in {"write", "shell", "gateway"}:
-        return "high"
-    if category in {"delegate", "hub", "unclassified"}:
-        return "medium"
-    return "read_only"
+    return _CATEGORY_RISK_MAP.get(category, "medium")
 
 
 def _dedupe_by_name(manifests: Iterable[CapabilityManifest]) -> list[CapabilityManifest]:

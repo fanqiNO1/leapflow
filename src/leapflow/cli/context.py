@@ -495,12 +495,14 @@ class Context:
         from leapflow.security.approval import SessionAwareGate
         from leapflow.security.grants import ApprovalAuditLog, JsonApprovalGrantStore
         from leapflow.security.orchestrator import ApprovalOrchestrator
+        from leapflow.security.policy import ApprovalPolicyEngine
 
         approval_layout = settings.profile_layout.approval
         self._tui_approval = _TUIApprovalGate()
         self._approval_gate = SessionAwareGate(self._tui_approval)
         self._approval_orchestrator = ApprovalOrchestrator(
             self._approval_gate,
+            policy=ApprovalPolicyEngine(bypass=settings.approval_bypass),
             grants=JsonApprovalGrantStore(approval_layout.grants_path),
             audit=ApprovalAuditLog(approval_layout.audit_path),
         )
@@ -713,11 +715,8 @@ class Context:
             self.settings.workspace_root,
         )
         original_env = dict(os.environ)
-        injected_keys: list[str] = []
         for key, value in bundle.env.items():
-            if key not in original_env:
-                os.environ[key] = value
-                injected_keys.append(key)
+            os.environ[key] = value
         try:
             return _build_settings_from_env(
                 layout=self.settings.layout,
@@ -728,8 +727,12 @@ class Context:
                 config_warnings=bundle.warnings,
             )
         finally:
-            for key in injected_keys:
-                os.environ.pop(key, None)
+            # Restore original env to avoid polluting daemon global state.
+            for key in bundle.env:
+                if key in original_env:
+                    os.environ[key] = original_env[key]
+                else:
+                    os.environ.pop(key, None)
 
     def _configure_mcp_manager(self, settings: Settings) -> None:
         """Rebuild MCP manager and global MCP tool registrations from layout config."""

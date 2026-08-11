@@ -322,6 +322,7 @@ class RuntimeLeapService:
                 if ctx.reload_runtime_config_if_changed():
                     self._settings = ctx.settings
                     self._monitor_coordinator.update_settings(ctx.settings)
+                    self._propagate_config_to_sessions(ctx)
                     chunk = StreamChunk(
                         request_id=request_id,
                         content="Configuration reloaded in leapd.",
@@ -543,6 +544,35 @@ class RuntimeLeapService:
 
     def _ensure_session_registry(self, base_engine: Any) -> Any:
         return self._session_coordinator.ensure_registry(base_engine, self._settings)
+
+    def _propagate_config_to_sessions(self, ctx: Any) -> None:
+        """Propagate updated LLM/config to all active session engines."""
+        registry = self._session_coordinator.registry
+        if registry is None:
+            return
+        settings = ctx.settings
+        llm = ctx.llm
+        vlm = getattr(ctx, "vlm", None)
+        classifier = getattr(ctx, "intent_classifier", None)
+        for sid in registry.session_ids():
+            session_ctx = registry.get(sid)
+            if session_ctx is None:
+                continue
+            engine = session_ctx.engine
+            if engine is None or engine is getattr(ctx, "engine", None):
+                # Base engine is already reconfigured by reload_runtime_config_if_changed.
+                continue
+            try:
+                engine.reconfigure_runtime(
+                    settings=settings,
+                    llm=llm,
+                    vlm=vlm,
+                    classifier=classifier,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to propagate config to session %s", sid, exc_info=True,
+                )
 
     # ── Delegate: watch (monitor subsystem) ──────────────────────────
 

@@ -29,6 +29,8 @@ _FINAL_RESPONSE_MARGIN_BOTTOM = 1
 _TOOL_INPUT_LIMIT = 96
 _TOOL_OUTPUT_LIMIT = 96
 _TOOL_PATH_LIMIT = 72
+_MIN_THINKING_LENGTH = 20
+_MAX_THINKING_DISPLAY = 2000
 _TOOL_CONTEXT_TAG_LIMIT = 3
 _SYNTHETIC_THINKING_ROUND_RE = re.compile(r"round\s*\d+", re.IGNORECASE)
 _FENCED_BLOCK_RE = re.compile(r"```(?P<lang>[\w+-]*)\s*\n(?P<body>.*?)\n```", re.DOTALL)
@@ -357,6 +359,7 @@ class StreamRenderer:
         self._tool_seq: int = 0
         self._tool_history: list[tuple[str, float]] = []
         self._permission_block_reason: str = ""
+        self._last_thinking: str = ""
 
     @property
     def text(self) -> str:
@@ -394,6 +397,7 @@ class StreamRenderer:
         self._tool_seq = 0
         self._tool_history = []
         self._permission_block_reason = ""
+        self._last_thinking = ""
         self._start_time = time.monotonic()
 
     def feed(self, chunk: str) -> None:
@@ -409,8 +413,13 @@ class StreamRenderer:
     def feed_thinking(self, chunk: str) -> None:
         """Append meaningful thinking/reasoning text."""
         text = _normalize_thinking_text(chunk)
-        if not text:
+        if not text or len(text) < _MIN_THINKING_LENGTH:
             return
+        if text == self._last_thinking:
+            return
+        self._last_thinking = text
+        if len(text) > _MAX_THINKING_DISPLAY:
+            text = text[:_MAX_THINKING_DISPLAY] + "\n\u2026[continued]"
         if self._thinking_buffer and not self._thinking_buffer.endswith("\n"):
             self._thinking_buffer += "\n"
         self._thinking_buffer += text
@@ -421,6 +430,10 @@ class StreamRenderer:
         Discards any pending content — it was preamble preceding the tool call
         and should not appear in the final answer.
         """
+        # Flush accumulated thinking before starting new tool display
+        if self._thinking_buffer.strip():
+            self._console.thinking(self._thinking_buffer)
+            self._thinking_buffer = ""
         self._pending = ""
         metadata = metadata or {}
         tool_name = _metadata_text(metadata, "normalized_tool_name") or name
