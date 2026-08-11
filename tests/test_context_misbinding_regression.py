@@ -152,7 +152,12 @@ async def test_focus_block_survives_provider_message_preparation(tmp_path) -> No
         lt.close()
 
 
-async def test_prompt_assembly_resolves_explicit_model_reference_to_control_plane(tmp_path) -> None:
+async def test_prompt_assembly_resolves_to_task_entity_even_with_control_events(tmp_path) -> None:
+    """When task entities exist, they always take priority over control events.
+
+    The resolver no longer parses user text for keywords — it relies on
+    structured focus state priority: task_semantic > control_plane.
+    """
     engine, lt = _engine(tmp_path)
     try:
         engine._focus_state.record_focus(FocusEntity(
@@ -178,7 +183,9 @@ async def test_prompt_assembly_resolves_explicit_model_reference_to_control_plan
         )
 
         resolution = engine._last_disclosure_metadata["reference_resolution"]
-        assert resolution["plane"] == ContextPlane.CONTROL_PLANE.value
-        assert resolution["target_name"] == "qwen3.8-max"
+        # Task entity takes priority; control events are surfaced in prompt
+        # context but not as the resolution target when task entities exist.
+        assert resolution["plane"] == ContextPlane.TASK_SEMANTIC.value
+        assert resolution["target_name"] == "MiniCPM-O 4.5 Technical Report"
     finally:
         lt.close()

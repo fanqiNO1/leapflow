@@ -46,7 +46,7 @@ def test_config_set_records_control_event_without_replacing_task_focus() -> None
     assert [event.value for event in state.recent_control_events] == ["qwen3.8-max", "qwen3.7-plus"]
 
 
-def test_reference_resolver_prefers_task_focus_for_above_paper() -> None:
+def test_reference_resolver_prefers_task_focus_over_control_events() -> None:
     state = SessionFocusState()
     state.record_focus(_minicpm_focus())
     state.record_tool_result(
@@ -56,17 +56,18 @@ def test_reference_resolver_prefers_task_focus_for_above_paper() -> None:
         turn_id=2,
     )
 
+    # Regardless of user text, the task entity takes priority
     resolution = ReferenceResolver().resolve("上面的 paper 需要更深层次解读", state)
 
     assert resolution.target_id == "paper:minicpm"
     assert resolution.target_name == "MiniCPM-O 4.5 Technical Report"
     assert resolution.plane == ContextPlane.TASK_SEMANTIC
-    assert resolution.confidence >= 0.8
+    assert resolution.confidence >= 0.9
 
 
-def test_reference_resolver_uses_control_plane_for_explicit_model_question() -> None:
+def test_reference_resolver_falls_back_to_control_event_when_no_task_entity() -> None:
     state = SessionFocusState()
-    state.record_focus(_minicpm_focus())
+    # Only control events, no task-semantic entities
     state.record_tool_result(
         "config_set",
         {"key": "llm.model", "value": "qwen3.8-max"},
@@ -76,9 +77,10 @@ def test_reference_resolver_uses_control_plane_for_explicit_model_question() -> 
 
     resolution = ReferenceResolver().resolve("刚才设置的默认模型是什么？", state)
 
-    assert resolution.target_kind == "model"
+    assert resolution.target_kind == "config"
     assert resolution.target_name == "qwen3.8-max"
     assert resolution.plane == ContextPlane.CONTROL_PLANE
+    assert resolution.confidence > 0.0
 
 
 def test_focus_entity_from_arxiv_fetch_is_paper_evidence() -> None:
@@ -132,6 +134,8 @@ def test_prompt_focus_block_separates_task_focus_from_control_events() -> None:
         turn_id=2,
     )
     resolution = ReferenceResolver().resolve("上面的 paper", state)
+
+    assert resolution.target_id == "paper:minicpm"  # task entity takes priority
 
     block = state.render_prompt_context(resolution)
 

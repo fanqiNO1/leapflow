@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Iterable, Mapping
+
+logger = logging.getLogger(__name__)
 
 
 class ContextPlane(str, Enum):
@@ -146,14 +149,69 @@ class ReferenceResolution:
         }
 
 
-_CONTROL_TOOL_NAMES = frozenset({"config_get", "config_set", "config_list"})
-_TASK_EVIDENCE_TOOLS = frozenset({
-    "file_read",
-    "web_fetch",
-    "code_search",
-    "text_search",
-    "memory_search",
-})
+# ── Deprecated legacy tool name lists ─────────────────────────────────
+# Prefer declaring x_leapflow.plane in tool schema metadata instead.
+
+_LEGACY_CONTROL_TOOLS: frozenset[str] = frozenset(
+    {"config_get", "config_set", "config_list"}
+)  # deprecated: declare x_leapflow.plane = "control" on the tool schema
+
+_LEGACY_TASK_TOOLS: frozenset[str] = frozenset(
+    {"file_read", "web_fetch", "code_search", "text_search", "memory_search"}
+)  # deprecated: declare x_leapflow.plane = "task" on the tool schema
+
+
+def _tool_plane(tool_name: str, tool_schema: dict[str, Any] | None = None) -> str:
+    """Determine semantic plane from tool metadata, falling back to legacy list."""
+    if tool_schema:
+        x_leapflow = tool_schema.get("x_leapflow", {})
+        if isinstance(x_leapflow, dict):
+            plane = x_leapflow.get("plane", "")
+            if plane:
+                return str(plane)
+    # Deprecated fallback
+    if tool_name in _LEGACY_CONTROL_TOOLS:
+        logger.debug(
+            "Tool %s has no x_leapflow.plane declaration, using legacy classification",
+            tool_name,
+        )
+        return "control"
+    if tool_name in _LEGACY_TASK_TOOLS:
+        logger.debug(
+            "Tool %s has no x_leapflow.plane declaration, using legacy classification",
+            tool_name,
+        )
+        return "task"
+    return "unknown"
+
+
+# ── Entity kind pattern registry ──────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class KindPattern:
+    """URL or name pattern to entity kind mapping."""
+
+    pattern: str
+    kind: str
+    match_type: str = "substring"  # "substring" | "suffix" | "glob"
+
+
+_KIND_PATTERNS: list[KindPattern] = [
+    KindPattern(pattern="arxiv.org/", kind="paper"),
+    KindPattern(pattern=".pdf", kind="document", match_type="suffix"),
+    KindPattern(pattern=".md", kind="document", match_type="suffix"),
+    KindPattern(pattern=".docx", kind="document", match_type="suffix"),
+]
+
+
+# ── Kind synonym groups ───────────────────────────────────────────────
+
+
+_KIND_GROUPS: dict[str, frozenset[str]] = {
+    "document": frozenset({"paper", "document", "file", "report"}),
+    "code": frozenset({"code", "script", "module", "package"}),
+}
 
 
 class SessionFocusState:
@@ -196,16 +254,18 @@ class SessionFocusState:
         result: Any,
         *,
         turn_id: int,
+        tool_schema: dict[str, Any] | None = None,
     ) -> None:
         """Update focus ledgers from a completed tool result."""
         name = _canonical_tool_name(tool_name)
         args = dict(arguments or {})
-        if name in _CONTROL_TOOL_NAMES:
+        plane = _tool_plane(name, tool_schema)
+        if plane == "control":
             event = control_event_from_tool(name, args, result, turn_id=turn_id)
             if event is not None:
                 self.record_control_event(event)
             return
-        if name in _TASK_EVIDENCE_TOOLS:
+        if plane == "task":
             entity = focus_entity_from_tool(name, args, result, turn_id=turn_id)
             if entity is not None:
                 self.record_focus(entity)
@@ -365,6 +425,7 @@ def _entity_name(tool_name: str, arguments: Mapping[str, Any], payload: Mapping[
 
 
 def _entity_kind(tool_name: str, arguments: Mapping[str, Any], payload: Mapping[str, Any]) -> str:
+    """Infer entity kind from URL/name using the pattern registry."""
     source = " ".join(
         _string_value(value)
         for value in (
@@ -372,8 +433,12 @@ def _entity_kind(tool_name: str, arguments: Mapping[str, Any], payload: Mapping[
         )
         if value
     ).lower()
-    if "arxiv.org/" in source or source.endswith(".pdf"):
-        return "paper"
+    for rule in _KIND_PATTERNS:
+        if rule.match_type == "substring" and rule.pattern in source:
+            return rule.kind
+        if rule.match_type == "suffix" and source.endswith(rule.pattern):
+            return rule.kind
+    # Fallback heuristics by tool name
     if tool_name == "file_read":
         return "file"
     if tool_name in {"code_search", "text_search"}:
@@ -406,14 +471,14 @@ def _aliases(name: str) -> list[str]:
 
 
 def _kind_matches(actual: str, requested: str) -> bool:
+    """Check if two kinds are in the same semantic group."""
     if not requested:
         return True
     if actual == requested:
         return True
-    if requested in {"paper", "document"} and actual in {"paper", "document", "file"}:
-        return True
-    if requested == "model" and actual == "model":
-        return True
+    for group in _KIND_GROUPS.values():
+        if actual in group and requested in group:
+            return True
     return False
 
 
@@ -421,6 +486,7 @@ __all__ = [
     "ContextPlane",
     "ControlEvent",
     "FocusEntity",
+    "KindPattern",
     "ReferenceResolution",
     "SessionFocusState",
     "control_event_from_tool",

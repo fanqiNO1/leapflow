@@ -3,11 +3,16 @@
 Provides a single classification entry point that produces FailureEnvelope instances
 from any error source. Wraps the existing ErrorClassifier for LLM errors and adds
 structured classification for tool results and system exceptions.
+
+Tool-result and system-error classification uses data-driven rule tables for
+timeout/connection/network detection, mirroring the registry pattern in
+error_classifier.py.
 """
 from __future__ import annotations
 
 import logging
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, FrozenSet, List
 
 from leapflow.engine.error_classifier import ErrorCategory, ErrorClassifier
 from leapflow.engine.failure_envelope import (
@@ -93,6 +98,36 @@ class RecoverabilityRegistry:
 # Permission failure classes that indicate non-recoverable tool permission errors
 _PERMISSION_FAILURE_CLASSES = frozenset({"authorization", "scope_denied"})
 _PERMISSION_FAILURE_CODES = frozenset({"access_denied", "missing_scope", "platform_degraded"})
+
+
+# ---------------------------------------------------------------------------
+# Data-driven tool/system error message classification rules
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ToolMessageRule:
+    """A keyword-based rule for classifying tool/system error messages."""
+    category: str
+    keywords: FrozenSet[str]
+    description: str = ""
+
+
+# Rules for classify_tool_result — timeout detection by substring
+_TOOL_TIMEOUT_KEYWORDS: FrozenSet[str] = frozenset({"timeout", "timed out"})
+
+# Rules for classify_system_error — ordered, first match wins
+_SYSTEM_ERROR_RULES: List[ToolMessageRule] = [
+    ToolMessageRule(
+        category="system_timeout",
+        keywords=frozenset({"timeout", "timed out"}),
+        description="Timeout in system call",
+    ),
+    ToolMessageRule(
+        category="system_network",
+        keywords=frozenset({"connection", "refused", "reset"}),
+        description="Network connectivity issues",
+    ),
+]
 
 
 class UnifiedErrorClassifier:
@@ -258,9 +293,9 @@ class UnifiedErrorClassifier:
                 context=FailureContext.from_dict_args(tool_name=tool_name),
             )
 
-        # 3. Timeout detection
+        # 3. Timeout detection (data-driven keyword set)
         error_lower = error_msg.lower()
-        if "timeout" in error_lower or "timed out" in error_lower:
+        if any(kw in error_lower for kw in _TOOL_TIMEOUT_KEYWORDS):
             timeout_recoverability = (
                 Recoverability.AUTO_RETRY
                 if execution_policy == "read_only"
@@ -293,12 +328,16 @@ class UnifiedErrorClassifier:
         )
 
     def classify_system_error(self, exc: Exception) -> FailureEnvelope:
-        """Classify a system-level exception (resource, timeout, etc.)."""
+        """Classify a system-level exception (resource, timeout, etc.).
+
+        Uses a combination of type-based dispatch (for Python exception types)
+        and data-driven keyword rules (for message-based classification).
+        """
         msg = str(exc).lower()
         exc_type = type(exc).__name__
 
-        # Timeout errors
-        if isinstance(exc, (TimeoutError,)) or "timeout" in msg or "timed out" in msg:
+        # Type-based dispatch (most specific first)
+        if isinstance(exc, TimeoutError):
             return FailureEnvelope.create(
                 source=FailureSource.SYSTEM,
                 category="system_timeout",
@@ -309,7 +348,6 @@ class UnifiedErrorClassifier:
                 side_effect_state=SideEffectState.NONE,
             )
 
-        # Memory errors
         if isinstance(exc, MemoryError):
             return FailureEnvelope.create(
                 source=FailureSource.SYSTEM,
@@ -321,7 +359,6 @@ class UnifiedErrorClassifier:
                 side_effect_state=SideEffectState.UNKNOWN,
             )
 
-        # OS/IO errors
         if isinstance(exc, OSError):
             return FailureEnvelope.create(
                 source=FailureSource.SYSTEM,
@@ -333,17 +370,29 @@ class UnifiedErrorClassifier:
                 side_effect_state=SideEffectState.UNKNOWN,
             )
 
-        # Connection errors (subclass of OSError but check explicitly)
-        if "connection" in msg or "refused" in msg or "reset" in msg:
-            return FailureEnvelope.create(
-                source=FailureSource.SYSTEM,
-                category="system_network",
-                failure_class="connection_error",
-                failure_code="connection_failed",
-                message=str(exc)[:500],
-                recoverability=Recoverability.AUTO_RETRY,
-                side_effect_state=SideEffectState.NONE,
-            )
+        # Data-driven message classification (keyword rule table)
+        for rule in _SYSTEM_ERROR_RULES:
+            if any(kw in msg for kw in rule.keywords):
+                if rule.category == "system_timeout":
+                    return FailureEnvelope.create(
+                        source=FailureSource.SYSTEM,
+                        category=rule.category,
+                        failure_class="timeout",
+                        failure_code="system_timeout",
+                        message=str(exc)[:500],
+                        recoverability=Recoverability.AUTO_RETRY,
+                        side_effect_state=SideEffectState.NONE,
+                    )
+                if rule.category == "system_network":
+                    return FailureEnvelope.create(
+                        source=FailureSource.SYSTEM,
+                        category=rule.category,
+                        failure_class="connection_error",
+                        failure_code="connection_failed",
+                        message=str(exc)[:500],
+                        recoverability=Recoverability.AUTO_RETRY,
+                        side_effect_state=SideEffectState.NONE,
+                    )
 
         # Generic system error
         return FailureEnvelope.create(

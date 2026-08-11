@@ -1,91 +1,98 @@
-"""Plane-aware reference resolution for session focus.
+"""Focus-state-driven reference resolution for session context assembly.
 
-This resolver does not choose tools and does not route intents. It only resolves
-an already-written deictic reference ("the above paper", "the model I just set")
-against structured session focus state. That keeps it within the context assembly
-layer instead of reintroducing natural-language tool fitting.
+This resolver does not parse user text for keywords, does not choose tools,
+and does not route intents. It resolves potential deictic references ("the
+above paper", "that thing I just set") purely from the structured
+SessionFocusState — which entities are active, how recently they were
+observed, and whether control-plane events are the only recent activity.
+
+Design rationale: keyword-driven intent routing (regex + if-else chains)
+violates the LLM-native principle. Instead, the LLM itself understands
+natural language; this module only provides structured context about what
+the session focus is, so the LLM can ground its reasoning.
 """
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from leapflow.engine.context_focus import ContextPlane, ReferenceResolution, SessionFocusState
 
-_DEICTIC_RE = re.compile(r"(above|previous|earlier|that|this|it|刚才|上面|上述|前面|这个|那个|该)", re.IGNORECASE)
-_TASK_DOCUMENT_RE = re.compile(r"(paper|论文|文章|文档|document|file)", re.IGNORECASE)
-_CONTROL_MODEL_RE = re.compile(r"(llm|model|模型|默认模型|设置|配置|config)", re.IGNORECASE)
+
+@dataclass(frozen=True)
+class ReferenceResolverConfig:
+    """Tunable confidence thresholds for focus-based resolution."""
+
+    single_entity_confidence: float = 0.92
+    recency_fallback_confidence: float = 0.75
+    no_entity_confidence: float = 0.0
 
 
 @dataclass(frozen=True)
 class ReferenceResolver:
-    """Resolve deictic references using the structured focus state."""
+    """Resolve deictic references using structured focus state only.
+
+    Resolution is based entirely on SessionFocusState — no regex, no keyword
+    parsing, no if-else routing by user-text content.  The strategy is:
+
+    1. If task-semantic entities exist in the focus stack, return the most
+       recent (highest confidence when only one exists).
+    2. If no task entities but control-plane events exist, return the most
+       recent control event as a fallback.
+    3. If nothing is in the focus state, return unresolved.
+    """
+
+    config: ReferenceResolverConfig = field(default_factory=ReferenceResolverConfig)
 
     def resolve(self, user_text: str, state: SessionFocusState) -> ReferenceResolution:
-        text = str(user_text or "")
-        if not text.strip():
-            return ReferenceResolution.unresolved("empty user text")
+        """Resolve a potential reference against the current focus state.
 
-        has_deictic = bool(_DEICTIC_RE.search(text))
-        wants_document = bool(_TASK_DOCUMENT_RE.search(text))
-        wants_control_model = bool(_CONTROL_MODEL_RE.search(text)) and (
-            "llm" in text.lower()
-            or "model" in text.lower()
-            or "模型" in text
-            or "默认" in text
-            or "设置" in text
-            or "配置" in text
-        )
+        Args:
+            user_text: The user's input (accepted for API compatibility but
+                not parsed for keywords).
+            state: The current session focus state containing structured
+                entity and control-event records.
 
-        if has_deictic and wants_control_model and not wants_document:
-            event = state.latest_control_event(key="llm.model") or state.latest_control_event()
-            if event is None:
-                return ReferenceResolution.unresolved("no matching control-plane event", target_kind="model")
-            return ReferenceResolution(
-                target_kind="model",
-                target_id=f"control:{event.key}:{event.turn_id}",
-                target_name=event.value or event.key,
-                plane=ContextPlane.CONTROL_PLANE,
-                confidence=0.92,
-                reason="deictic model/config reference resolved to latest control-plane event",
-            )
-
-        if has_deictic and wants_document:
-            candidates = state.task_focus_candidates(kind="paper")
-            if not candidates:
-                return ReferenceResolution.unresolved("no task document focus available", target_kind="paper")
-            if len(candidates) > 1 and _ambiguous(candidates):
-                return ReferenceResolution.ambiguous("multiple recent task documents are similarly salient", target_kind="paper")
+        Returns:
+            A ReferenceResolution indicating the resolved target, confidence,
+            and reasoning.
+        """
+        # Priority 1: task-semantic entities from the focus stack
+        candidates = state.task_focus_candidates()
+        if candidates:
             focus = candidates[0]
+            if len(candidates) == 1:
+                return ReferenceResolution(
+                    target_kind=focus.kind,
+                    target_id=focus.entity_id,
+                    target_name=focus.canonical_name,
+                    plane=focus.plane,
+                    confidence=self.config.single_entity_confidence,
+                    reason="single active entity in focus state",
+                )
             return ReferenceResolution(
                 target_kind=focus.kind,
                 target_id=focus.entity_id,
                 target_name=focus.canonical_name,
                 plane=focus.plane,
-                confidence=0.9,
-                reason="deictic document reference resolved to active task focus",
+                confidence=self.config.recency_fallback_confidence,
+                reason="most recent entity from multiple candidates",
             )
 
-        focus = state.active_focus
-        if has_deictic and focus is not None:
+        # Priority 2: control-plane events when no task entities exist
+        latest_control = state.latest_control_event()
+        if latest_control is not None:
             return ReferenceResolution(
-                target_kind=focus.kind,
-                target_id=focus.entity_id,
-                target_name=focus.canonical_name,
-                plane=focus.plane,
-                confidence=0.72,
-                reason="generic deictic reference resolved to active task focus",
+                target_kind="config",
+                target_id=f"control:{latest_control.key}:{latest_control.turn_id}",
+                target_name=latest_control.value or latest_control.key,
+                plane=ContextPlane.CONTROL_PLANE,
+                confidence=self.config.recency_fallback_confidence,
+                reason="fallback to most recent control-plane event",
             )
 
-        return ReferenceResolution.unresolved("no deictic reference requiring focus resolution")
+        # Nothing in focus state
+        return ReferenceResolution.unresolved("no active entities in focus state")
 
 
-def _ambiguous(candidates) -> bool:
-    if len(candidates) < 2:
-        return False
-    first, second = candidates[0], candidates[1]
-    return first.last_task_turn == second.last_task_turn and abs(first.salience - second.salience) < 0.05
-
-
-__all__ = ["ReferenceResolver"]
+__all__ = ["ReferenceResolver", "ReferenceResolverConfig"]
