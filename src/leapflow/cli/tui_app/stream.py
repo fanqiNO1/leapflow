@@ -430,10 +430,6 @@ class StreamRenderer:
         Discards any pending content — it was preamble preceding the tool call
         and should not appear in the final answer.
         """
-        # Flush accumulated thinking before starting new tool display
-        if self._thinking_buffer.strip():
-            self._console.thinking(self._thinking_buffer)
-            self._thinking_buffer = ""
         self._pending = ""
         metadata = metadata or {}
         tool_name = _metadata_text(metadata, "normalized_tool_name") or name
