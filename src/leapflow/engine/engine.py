@@ -5129,7 +5129,7 @@ class AgentEngine:
                     history_block = "## Recent Task History\n" + "\n".join(history_lines)
                     parts.insert(0, history_block)
         except Exception:
-            pass  # Graceful degradation
+            logger.debug("Layer 0 task history injection failed", exc_info=True)
 
         self._memory_context_snapshot = "\n\n".join(parts)
         return self._memory_context_snapshot

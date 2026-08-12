@@ -2514,7 +2514,9 @@ class Context:
         if not session_id:
             return None
         try:
-            messages = store.get_messages(session_id, limit=50)
+            # Fetch all messages (up to 200) to find both first user goal and final outcome.
+            # get_messages returns ASC order; we use a larger limit to capture session endpoints.
+            messages = store.get_messages(session_id, limit=200)
         except Exception:
             return None
         if not messages or len(messages) < 2:
@@ -2570,6 +2572,15 @@ class Context:
             )
             if hasattr(self, 'memory') and self.memory:
                 await self.memory.insert(entry, session_id=session_id)
+                # MemoryManager routes SESSION_SUMMARY to narrative (MEMORY.md) first,
+                # but query_recent_summaries() reads from DuckDB (semantic provider).
+                # Explicitly persist to semantic to enable cross-session querying.
+                semantic = self.memory.get_provider("semantic")
+                if semantic is not None:
+                    try:
+                        await semantic.insert(entry, session_id=session_id)
+                    except Exception:
+                        logger.debug("semantic insert for session summary failed", exc_info=True)
                 logger.debug("Session summary persisted for session=%s", session_id[:8])
 
             # Update session title with the goal line

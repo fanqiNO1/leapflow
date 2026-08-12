@@ -384,7 +384,16 @@ class SemanticMemoryProvider:
                 "ORDER BY created_at DESC LIMIT ?",
                 [limit],
             ).fetchall()
-            return [{"content": r[0], "created_at": r[1], "metadata": r[2]} for r in results]
+            entries = []
+            for r in results:
+                meta = {}
+                if r[2]:
+                    try:
+                        meta = json.loads(r[2])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                entries.append({"content": r[0], "created_at": r[1], "metadata": meta})
+            return entries
         except Exception:
             return []
 
