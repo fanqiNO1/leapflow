@@ -5102,7 +5102,7 @@ class AgentEngine:
                         if self._current_task_contract else ""
                     ),
                     scope_keywords=self._task_scope_keywords(user_text),
-                    session_scope=self._current_session_id or "",
+                    session_scope="",
                 ),
                 timeout=self._settings.memory_prefetch_timeout_s,
             )
@@ -5116,6 +5116,20 @@ class AgentEngine:
             )
         except Exception:
             logger.debug("memory.prefetch failed", exc_info=True)
+
+        # Layer 0: Recent task history (session summaries)
+        try:
+            semantic = self._memory_manager.get_provider("semantic")
+            if semantic is not None and hasattr(semantic, "query_recent_summaries"):
+                summaries = semantic.query_recent_summaries(limit=5)
+                if summaries:
+                    history_lines = []
+                    for s in summaries:
+                        history_lines.append(f"- {s['content'][:300]}")
+                    history_block = "## Recent Task History\n" + "\n".join(history_lines)
+                    parts.insert(0, history_block)
+        except Exception:
+            pass  # Graceful degradation
 
         self._memory_context_snapshot = "\n\n".join(parts)
         return self._memory_context_snapshot

@@ -2505,6 +2505,84 @@ class Context:
 
         return _on_insight
 
+    async def _generate_session_summary(self) -> str | None:
+        """Generate a structured task summary from the session's conversation."""
+        store = getattr(self, '_conversation_store', None)
+        if not store:
+            return None
+        session_id = getattr(self.engine, '_current_session_id', None) or ""
+        if not session_id:
+            return None
+        try:
+            messages = store.get_messages(session_id, limit=50)
+        except Exception:
+            return None
+        if not messages or len(messages) < 2:
+            return None
+
+        first_user = ""
+        for m in messages:
+            if getattr(m, 'role', '') == "user" and getattr(m, 'content', ''):
+                first_user = m.content[:150]
+                break
+
+        tool_names = sorted(set(
+            getattr(m, 'tool_name', '') or ''
+            for m in messages
+            if getattr(m, 'tool_name', '')
+        ))[:8]
+
+        last_assistant = ""
+        for m in reversed(messages):
+            content = getattr(m, 'content', '') or ''
+            if getattr(m, 'role', '') == "assistant" and len(content.strip()) > 20:
+                last_assistant = content[:200]
+                break
+
+        if not first_user:
+            return None
+
+        parts = [f"Goal: {first_user}"]
+        if tool_names:
+            parts.append(f"Tools: {', '.join(tool_names)}")
+        if last_assistant:
+            parts.append(f"Outcome: {last_assistant}")
+        return "\n".join(parts)
+
+    async def _persist_session_summary(self) -> None:
+        """Generate and persist session summary at end of session."""
+        try:
+            summary = await self._generate_session_summary()
+            if not summary:
+                return
+
+            # Persist to memory via SemanticMemoryProvider
+            from leapflow.memory.protocol import MemoryEntry, MemoryKind, SignalDomain
+            session_id = getattr(self.engine, '_current_session_id', None) or ""
+            entry = MemoryEntry(
+                kind=MemoryKind.SESSION_SUMMARY,
+                domain=SignalDomain.SYSTEM,
+                content=summary,
+                metadata={
+                    "_session_id": session_id,
+                    "workspace": str(self.settings.workspace_root),
+                },
+            )
+            if hasattr(self, 'memory') and self.memory:
+                await self.memory.insert(entry, session_id=session_id)
+                logger.debug("Session summary persisted for session=%s", session_id[:8])
+
+            # Update session title with the goal line
+            goal_line = summary.split("\n")[0].removeprefix("Goal: ").strip()
+            conv_store = getattr(self, '_conversation_store', None)
+            if conv_store and session_id and goal_line:
+                try:
+                    conv_store.end_session(session_id, title=goal_line)
+                except Exception:
+                    logger.debug("session title update failed", exc_info=True)
+        except Exception:
+            logger.debug("session summary persistence failed", exc_info=True)
+
     async def _on_session_end_learning(self) -> None:
         """End-of-session OPD learning pipeline (8 phases) with full observability.
 
@@ -2893,6 +2971,8 @@ class Context:
         # OPD end-of-session learning pipeline
         if self.settings.replay_on_session_end:
             await self._on_session_end_learning()
+        # Persist session summary before memory shutdown
+        await self._persist_session_summary()
         # Shutdown all memory providers (stops GC, closes DB)
         await self.memory.shutdown_all()
         if isinstance(self.rpc, CuaDriverClient):

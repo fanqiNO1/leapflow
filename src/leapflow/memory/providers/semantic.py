@@ -374,6 +374,20 @@ class SemanticMemoryProvider:
         )
         return mid
 
+    def query_recent_summaries(self, limit: int = 5) -> list[dict]:
+        """Query recent session summaries for task history injection."""
+        try:
+            con = self._ensure_connection()
+            results = con.execute(
+                "SELECT content, created_at, metadata FROM leap_memory "
+                "WHERE kind = 'session_summary' "
+                "ORDER BY created_at DESC LIMIT ?",
+                [limit],
+            ).fetchall()
+            return [{"content": r[0], "created_at": r[1], "metadata": r[2]} for r in results]
+        except Exception:
+            return []
+
     def search_keywords(
         self,
         keywords: Sequence[str],
