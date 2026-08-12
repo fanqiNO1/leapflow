@@ -525,12 +525,21 @@ class DuckDBConversationStore:
             [session_id, *message_ids],
         )
 
-    def end_session(self, session_id: str) -> None:
-        """Mark a session as inactive (completed/archived)."""
+    def end_session(self, session_id: str, *, title: str | None = None) -> None:
+        """Mark a session as inactive (completed/archived).
+
+        If *title* is provided, the session title is also updated (truncated to 80 chars).
+        """
+        now = time.time()
         self._execute_write(
             "UPDATE conversation_sessions SET is_active = FALSE, updated_at = ? WHERE session_id = ?",
-            [time.time(), session_id],
+            [now, session_id],
         )
+        if title:
+            self._execute_write(
+                "UPDATE conversation_sessions SET title = ?, updated_at = ? WHERE session_id = ?",
+                [title[:80], now, session_id],
+            )
 
     def fork_session(
         self,

@@ -90,6 +90,12 @@ TOOL_NAME_ALIASES: Dict[str, str] = {
     "run_command": "shell_run",
     "run_terminal": "shell_run",
     "exec": "shell_run",
+    # Terminal sessions
+    "shell_list": "terminal_list",
+    "shell_open": "terminal_open",
+    "shell_send": "terminal_send",
+    "shell_read": "terminal_read",
+    "shell_close": "terminal_close",
     # Search
     "grep": "text_search",
     "search": "text_search",

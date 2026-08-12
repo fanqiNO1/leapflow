@@ -756,6 +756,7 @@ class ContextGovernanceController:
     # exploration rounds; the ceiling prevents truly stuck tasks from running forever.
     convergence_round_ceiling: int = 40
     convergence_scale: float = 2.0
+    checkpoint_interval: int = 15
     posture_config: ContextPostureConfig = field(default_factory=ContextPostureConfig)
     difficulty_config: DifficultyConfig = field(default_factory=DifficultyConfig)
     evidence_tools: frozenset[str] = _EVIDENCE_TOOLS
@@ -784,6 +785,8 @@ class ContextGovernanceController:
         self._difficulty_ema_round = -1
         self._evidence_by_round: dict[int, int] = {}
         self._evidence_round_hwm = -1
+        self._last_tool_name: str = ""
+        self._last_tool_path: str = ""
 
     def reset_turn_scope(self) -> None:
         """Clear per-turn exploration state so posture never leaks across tasks."""
@@ -796,6 +799,8 @@ class ContextGovernanceController:
         self._difficulty_ema_round = -1
         self._evidence_by_round.clear()
         self._evidence_round_hwm = -1
+        self._last_tool_name = ""
+        self._last_tool_path = ""
 
     reset_task_scope = reset_turn_scope
 
@@ -811,28 +816,81 @@ class ContextGovernanceController:
         extension = round(self.convergence_round * max(0.0, min(1.0, difficulty)) * self.convergence_scale)
         return min(self.convergence_round_ceiling, self.convergence_round + extension)
 
+    _WRITE_TOOLS = frozenset({
+        "file_write", "gp_file_write",
+        "text_replace", "gp_text_replace",
+        "file_edit", "gp_file_edit",
+    })
+
     def compact_tool_result(self, tool_name: str, arguments: Dict[str, Any] | None, result: Any) -> Any:
-        """Return evidence and update the session exploration ledger."""
+        """Return evidence and update the session exploration ledger.
+
+        P0 convergence fixes:
+        - evidence_count only increments for genuinely new sources (not re-reads)
+        - Repeated reads beyond the limit are hard-gated: tool result is replaced
+          with an instruction to use research_note, unless the immediately preceding
+          tool call was a write/edit to the same path (post-edit verification is OK).
+        """
         self._tool_counts[tool_name] = self._tool_counts.get(tool_name, 0) + 1
         if isinstance(result, dict) and result.get("ok") is False:
             self._tool_failures += 1
-        if tool_name in self.evidence_tools:
-            self._evidence_count += 1
+
+        gated_result: Any = None
+
         if tool_name in {"file_read", "gp_file_read"}:
             path = str((arguments or {}).get("path") or (result.get("path") if isinstance(result, dict) else ""))
             if path:
                 key = str(Path(path).expanduser())
+                # Reset read count if the previous tool was a write/edit to this path
+                if self._last_tool_name in self._WRITE_TOOLS and self._last_tool_path == key:
+                    self._reads[key] = 0
+                is_new_source = key not in self._sources_seen
                 self._reads[key] = self._reads.get(key, 0) + 1
                 self._sources_seen.add(key)
+                # Only count genuinely new sources as progress
+                if is_new_source:
+                    self._evidence_count += 1
+                # Hard gate: block re-reads beyond the limit
+                if self._reads[key] > self.repeated_read_limit:
+                    gated_result = (
+                        f"[REPEATED READ \u2014 this file was already read {self._reads[key]} times in this turn. "
+                        f"Content was processed in earlier rounds but compressed. "
+                        f"Use research_note to record your findings instead of re-reading. "
+                        f"File: {path}]"
+                    )
         elif tool_name in {"file_list", "gp_file_list"}:
             path = str((arguments or {}).get("path") or (result.get("path") if isinstance(result, dict) else ""))
             if path:
                 key = str(Path(path).expanduser())
-                # Track repeated directory listings alongside repeated file reads:
-                # both are evidence of an agent struggling to make progress, and
-                # both should push the posture toward converging.
+                is_new_source = key not in self._sources_seen
                 self._reads[key] = self._reads.get(key, 0) + 1
                 self._sources_seen.add(key)
+                if is_new_source:
+                    self._evidence_count += 1
+                if self._reads[key] > self.repeated_read_limit:
+                    gated_result = (
+                        f"[REPEATED READ \u2014 this directory was already listed {self._reads[key]} times in this turn. "
+                        f"Content was processed in earlier rounds but compressed. "
+                        f"Use research_note to record your findings instead of re-reading. "
+                        f"Path: {path}]"
+                    )
+        elif tool_name in self.evidence_tools:
+            # shell_run and other non-path evidence tools: always new evidence
+            self._evidence_count += 1
+
+        # Track last tool for write-then-read exception
+        self._last_tool_name = tool_name
+        if tool_name in self._WRITE_TOOLS:
+            write_path = str((arguments or {}).get("path") or "")
+            self._last_tool_path = str(Path(write_path).expanduser()) if write_path else ""
+        elif tool_name in {"file_read", "gp_file_read", "file_list", "gp_file_list"}:
+            read_path = str((arguments or {}).get("path") or (result.get("path") if isinstance(result, dict) else ""))
+            self._last_tool_path = str(Path(read_path).expanduser()) if read_path else ""
+        else:
+            self._last_tool_path = ""
+
+        if gated_result is not None:
+            return gated_result
         return self.evidence_builder.build(tool_name, arguments, result)
 
     def tool_metadata(self, tool_name: str, arguments: Dict[str, Any] | None, result: Any) -> Dict[str, Any]:
@@ -1050,6 +1108,26 @@ class ContextGovernanceController:
             "SYSTEM: Adaptive context governance is converging "
             f"({reason}). Stop broad reading, deduplicate evidence already gathered, "
             "prefer targeted reads, and synthesize the final answer."
+        )
+
+    def checkpoint_notice(self, round_number: int) -> str | None:
+        """Emit checkpoint instruction at configurable intervals during research."""
+        interval = self.checkpoint_interval
+        if interval <= 0 or round_number < interval:
+            return None
+        if round_number % interval != 0:
+            return None
+        # Only checkpoint in research/expanding posture, not simple Q&A
+        snapshot = self.snapshot(round_number=round_number)
+        if snapshot.posture in (_POSTURE_BASELINE, _POSTURE_EXPANDED):
+            return None
+        return (
+            f"SYSTEM CHECKPOINT (round {round_number}): "
+            "Persist your current findings NOW. "
+            "(1) Call research_note to record key conclusions that should survive context compression. "
+            "(2) Write intermediate results to a file if the task requires a deliverable. "
+            "(3) If you can answer partially, provide it now. "
+            "Remaining work should be declared as open_questions via research_note."
         )
 
 

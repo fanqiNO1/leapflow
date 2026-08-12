@@ -234,7 +234,7 @@ class DisclosurePlanner:
             level=level,
             tool_definitions=tuple(expanded_defs),
             catalog_definitions=tuple(tool_definitions),
-            memory=MemoryDisclosure.QUERY_RETRIEVAL if expanded_categories else MemoryDisclosure.NONE,
+            memory=MemoryDisclosure.QUERY_RETRIEVAL if expanded_categories else MemoryDisclosure.SESSION_SUMMARY,
             history=HistoryDisclosure.RECENT if expanded_categories else HistoryDisclosure.SHORT,
             # At the CORE floor (no Tier 1 category opened) skip reasoning entirely: a
             # turn that only needs the static low-risk whitelist is, by construction, not
