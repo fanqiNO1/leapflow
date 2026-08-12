@@ -179,4 +179,4 @@ def test_semantic_requires_approval_split() -> None:
 
 
 def test_semantic_name_set_is_complete() -> None:
-    assert len(SEMANTIC_TOOL_NAMES) == 17
+    assert len(SEMANTIC_TOOL_NAMES) == 18

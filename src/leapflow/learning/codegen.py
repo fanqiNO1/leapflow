@@ -120,8 +120,10 @@ _VSI_INTERFACE_DOCS = textwrap.dedent("""\
     ### PerceptionPort (read-only system observation)
     - `await perception.subscribe_fs(paths: List[str]) -> str`
         Subscribe to filesystem changes at given paths. Returns subscription ID.
-    - `await perception.read_ui_tree(app_id: Optional[str] = None) -> UINode`
-        Read the accessibility tree of the focused app (or specified app).
+    - `await perception.read_window_state(pid: int, window_id: int, query: str = "") -> UISnapshot`
+        Snapshot one window's actionable elements (flat, element_index-addressed).
+    - `await perception.list_windows() -> Dict[str, Any]`
+        List top-level windows with pid/window_id/title records.
     - `await perception.get_clipboard() -> Dict[str, Any]`
         Read current clipboard content. Returns {"text": ..., "type": ...}.
     - `async for event in perception.stream_events() -> AsyncIterator[SystemEvent]`
@@ -752,7 +754,8 @@ def build_default_context(
     return CodeGenContext(
         available_ports=[
             "PerceptionPort.subscribe_fs(paths: List[str]) -> str",
-            "PerceptionPort.read_ui_tree(app_id: Optional[str]) -> UINode",
+            "PerceptionPort.read_window_state(pid: int, window_id: int, query: str = '') -> UISnapshot",
+            "PerceptionPort.list_windows() -> Dict[str, Any]",
             "PerceptionPort.get_clipboard() -> Dict[str, Any]",
             "PerceptionPort.stream_events() -> AsyncIterator[SystemEvent]",
             "ExecutionPort.perform_file_op(op: str, params: Dict) -> Dict",

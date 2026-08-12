@@ -62,6 +62,7 @@ class Methods:
     AX_TREE = "ax.tree"
     AX_PERFORM = "ax.perform"
     AX_SCROLL = "ax.scroll"
+    AX_LIST = "ax.list"
 
     APP_LAUNCH = "app.launch"
     APP_ACTIVATE = "app.activate"

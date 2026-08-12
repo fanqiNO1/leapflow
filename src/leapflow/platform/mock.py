@@ -113,16 +113,128 @@ class MockBridge(HostRpc):
                 await self._emit_event(EventTypes.FS_CHANGE, {"path": path, "flags": 0x00000200, "ts": time.time()})
             return {"ok": existed, "path": path}
         if method == Methods.APP_LAUNCH:
-            return {"ok": True, "bundle_id": p.get("bundle_id"), "mock": True}
+            return {
+                "ok": True,
+                "bundle_id": p.get("bundle_id") or p.get("name"),
+                "pid": 100,
+                "launch_state": "window_ready",
+                "windows": [
+                    {
+                        "window_id": 1,
+                        "pid": 100,
+                        "app_name": "Mock App",
+                        "title": "Mock UI",
+                        "z_index": 0,
+                        "is_on_screen": True,
+                        "minimized": False,
+                    }
+                ],
+                "mock": True,
+            }
         if method == Methods.APP_ACTIVATE:
-            return {"ok": True, "bundle_id": p.get("bundle_id"), "mock": True}
+            return {"ok": True, "pid": p.get("pid"), "window_id": p.get("window_id"), "mock": True}
+        if method == Methods.APP_LIST:
+            return {
+                "apps": [
+                    {
+                        "name": "Mock App",
+                        "bundle_id": "com.mock.app",
+                        "pid": 100,
+                        "running": True,
+                        "active": True,
+                        "kind": "desktop",
+                    }
+                ],
+                "mock": True,
+            }
         if method == Methods.AX_TREE:
             return {
-                "root": {"role": "mock_window", "title": "Mock UI", "children": []},
+                "pid": p.get("pid", 100),
+                "window_id": p.get("window_id", 1),
+                "snapshot_id": "s00000001",
+                "element_count": 4,
+                "returned_element_count": 4,
+                "total_element_count": 4,
+                "elements_complete": True,
+                "elements": [
+                    {
+                        "element_index": 0,
+                        "element_token": "s00000001:0",
+                        "role": "Button",
+                        "label": "Save",
+                        "enabled": True,
+                        "frame": {"x": 10, "y": 10, "w": 80, "h": 24},
+                        "depth": 1,
+                    },
+                    {
+                        "element_index": 1,
+                        "element_token": "s00000001:1",
+                        "role": "Button",
+                        "label": "Cancel",
+                        "enabled": True,
+                        "frame": {"x": 100, "y": 10, "w": 80, "h": 24},
+                        "depth": 1,
+                    },
+                    {
+                        # Unlabeled Edit without frame — a real driver variant.
+                        "element_index": 2,
+                        "element_token": "s00000001:2",
+                        "role": "Edit",
+                        "enabled": True,
+                        "value": "hello",
+                        "depth": 2,
+                    },
+                    {
+                        "element_index": 3,
+                        "element_token": "s00000001:3",
+                        "role": "TabItem",
+                        "label": "Home",
+                        "enabled": True,
+                        "selected": True,
+                        "parent_index": 2,
+                        "depth": 3,
+                    },
+                ],
+                "tree_markdown": (
+                    '- Window "Mock UI"\n'
+                    '  - [0] Button "Save"\n'
+                    '  - [1] Button "Cancel"\n'
+                    '    - [2] Edit\n'
+                    '      - [3] TabItem "Home"\n'
+                ),
+                "mock": True,
+            }
+        if method == Methods.SCREEN_CAPTURE_FRAME:
+            return {
+                "ok": True,
+                "screenshot_file_path": p.get("screenshot_out_file", ""),
+                "mock": True,
+            }
+        if method == Methods.AX_LIST:
+            return {
+                "windows": [
+                    {
+                        "window_id": 1,
+                        "pid": 100,
+                        "app_name": "Mock App",
+                        "title": "Mock UI",
+                        "bounds": {"x": 0, "y": 0, "width": 800, "height": 600},
+                        "z_index": 0,
+                        "is_on_screen": True,
+                        "minimized": False,
+                    }
+                ],
                 "mock": True,
             }
         if method == Methods.AX_PERFORM:
             return {"ok": True, "mock": True, "action": p}
+        if method == Methods.AX_SCROLL:
+            return {
+                "ok": True,
+                "mock": True,
+                "direction": p.get("direction", ""),
+                "amount": p.get("amount", 3),
+            }
         if method == Methods.FS_SUBSCRIBE:
             return {"subscription_id": str(uuid.uuid4()), "mock": True}
         if method == Methods.RECORDING_START:

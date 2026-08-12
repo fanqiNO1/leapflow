@@ -46,18 +46,29 @@ def build_tool_bridge(
     adapter = SemanticAdapter(perception=perception, execution=execution)
 
     bridge.register(
+        "list_windows",
+        "List all top-level windows with pid, window_id, title, and per-window state "
+        "(minimized, on-screen). Call this first to pick the pid and window_id that "
+        "observe_ui and other window tools require.",
+        {},
+        adapter.list_windows,
+    )
+    bridge.register(
         "observe_ui",
-        "Observe current app UI. Returns a list of interactive elements with selectors.",
+        "Snapshot one window's actionable UI elements, each tagged with an element_index "
+        "for click/right_click/read_text. Re-observe after actions — indices belong to one "
+        "snapshot. Requires the window's pid and window_id from list_windows.",
         {
-            "app_id": "string (optional) — target app bundle ID, empty = frontmost",
-            "focus_area": "string (optional) — focus hint (e.g. 'toolbar', 'sidebar')",
+            "pid": "int (required) — target process ID from list_windows",
+            "window_id": "int (required) — target window ID from list_windows",
+            "query": "string (optional) — case-insensitive filter over roles/labels to shrink large windows",
         },
         adapter.observe_ui,
     )
     bridge.register(
         "click",
-        "Click a UI element by its selector (from observe_ui results)",
-        {"selector": "string (required) — element selector, e.g. 'AXButton[label=Send]'"},
+        "Click a UI element by its element_index (from the latest observe_ui snapshot)",
+        {"element_index": "int (required) — element_index from observe_ui"},
         adapter.click,
         mutates_state=True,
     )
@@ -66,7 +77,6 @@ def build_tool_bridge(
         "Type text into the currently focused element",
         {
             "text": "string (required) — text to type",
-            "method": "string (optional) — 'paste' (default, best for CJK) or 'keystroke'",
         },
         adapter.type_text,
         mutates_state=True,
@@ -119,8 +129,8 @@ def build_tool_bridge(
     )
     bridge.register(
         "read_text",
-        "Read the text content of a specific UI element",
-        {"selector": "string (required) — element selector"},
+        "Read the text content of a specific UI element from the latest snapshot",
+        {"element_index": "int (required) — element_index from observe_ui"},
         adapter.read_text,
     )
     bridge.register(
@@ -136,7 +146,8 @@ def build_tool_bridge(
         "Wait until a UI condition is met (polls UI tree). Returns elements when found or on timeout.",
         {
             "condition": "string (required) — what to wait for (e.g. 'Send button', '发送')",
-            "app_id": "string (optional) — app to observe",
+            "pid": "int (optional) — window's process ID, default = last observed window",
+            "window_id": "int (optional) — window ID, default = last observed window",
             "timeout": "number (optional, default=30) — max seconds to wait",
             "poll_interval": "number (optional, default=2) — seconds between polls",
         },
@@ -150,7 +161,8 @@ def build_tool_bridge(
         {
             "timeout": "number (optional, default=30) — max seconds to wait",
             "poll_interval": "number (optional, default=2) — seconds between polls",
-            "app_id": "string (optional) — app to observe",
+            "pid": "int (optional) — window's process ID, default = last observed window",
+            "window_id": "int (optional) — window ID, default = last observed window",
         },
         adapter.wait_until_stable,
         mutates_state=True,
@@ -158,9 +170,10 @@ def build_tool_bridge(
     )
     bridge.register(
         "scroll",
-        "Scroll a scrollable area. Use after observe_ui if target content is not visible.",
+        "Scroll a scrollable area. Omit element_index to scroll the focused/page scroller; "
+        "pass one to scroll an exact element from the latest snapshot.",
         {
-            "selector": "string (optional) — scroll area selector, empty = first scrollable",
+            "element_index": "int (optional) — scroll target from observe_ui, omit for focused scroller",
             "direction": "string (optional, default='down') — up/down/left/right",
             "amount": "number (optional, default=3) — scroll units (1-20)",
         },
@@ -169,10 +182,9 @@ def build_tool_bridge(
     )
     bridge.register(
         "select_text",
-        "Select text in a UI element (for subsequent cmd+c copy)",
+        "Select all text in a UI element (focus + select-all, for subsequent copy)",
         {
-            "selector": "string (required) — element containing text to select",
-            "method": "string (optional, default='all') — 'all' (select all) or 'word' (double-click)",
+            "element_index": "int (required) — element containing text, from observe_ui",
         },
         adapter.select_text,
         mutates_state=True,
@@ -181,18 +193,19 @@ def build_tool_bridge(
         "right_click",
         "Right-click a UI element to open its context menu. Returns visible menu items.",
         {
-            "selector": "string (required) — element to right-click",
+            "element_index": "int (required) — element to right-click, from observe_ui",
         },
         adapter.right_click,
         mutates_state=True,
     )
     bridge.register(
         "screenshot",
-        "Capture a screenshot for visual verification. "
-        "When app_id is provided, captures only that app's window (works across all displays).",
+        "Capture a screenshot for visual verification. With pid + window_id captures that "
+        "window (works across all displays); defaults to the last observed window, or the "
+        "full desktop when no window has been observed.",
         {
-            "app_id": "string (optional) — target app bundle ID for window-level capture",
-            "region": "string (optional) — empty for full screen",
+            "pid": "int (optional) — window's process ID from list_windows",
+            "window_id": "int (optional) — window ID from list_windows",
         },
         adapter.screenshot,
     )

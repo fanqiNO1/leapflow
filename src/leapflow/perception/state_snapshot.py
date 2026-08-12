@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, Dict, Optional, Tuple
 
-from leapflow.domain.events import UINode
 from leapflow.memory.providers.episodic import EpisodicMemoryProvider
 from leapflow.platform.protocol import HostRpc
 
@@ -166,11 +165,13 @@ class StateSnapshotService:
 
     async def _get_ax_info(self, app_id: str) -> tuple[str, str]:
         try:
+            # NOTE: ax.tree now requires pid/window_id targets; without them
+            # the call returns a structured error and this snapshot facet
+            # degrades to empty digests. App→pid resolution is a follow-up.
             tree = await self._rpc.call("ax.tree", {"app_id": app_id} if app_id else None)
             if isinstance(tree, dict):
-                node = _dict_to_ui_node(tree)
-                digest = _compute_ax_digest(node)
-                summary = _compute_ax_summary(node)
+                digest = _compute_ax_digest(tree)
+                summary = _compute_ax_summary(tree)
                 return digest, summary
         except Exception:
             logger.debug("ax.tree failed for snapshot", exc_info=True)
@@ -186,48 +187,37 @@ class StateSnapshotService:
         return ""
 
 
-def _compute_ax_digest(node: UINode, max_depth: int = 3, max_width: int = 5) -> str:
-    """Compress AX tree into a structural fingerprint."""
+def _compute_ax_digest(payload: dict, max_items: int = 40) -> str:
+    """Compress a window-state payload into a structural fingerprint."""
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return ""
     parts: list[str] = []
-
-    def _walk(n: UINode, depth: int = 0) -> None:
-        if depth > max_depth:
-            return
-        label_part = n.label[:20] if n.label else ""
-        parts.append(f"{n.role}:{label_part}")
-        for child in (n.children or [])[:max_width]:
-            _walk(child, depth + 1)
-
-    _walk(node)
+    for record in elements[:max_items]:
+        if not isinstance(record, dict):
+            continue
+        label = str(record.get("label", "") or "")[:20]
+        parts.append(f"{record.get('role', '')}:{label}")
+    if not parts:
+        return ""
     return hashlib.md5("|".join(parts).encode()).hexdigest()[:16]
 
 
-def _compute_ax_summary(node: UINode, max_items: int = 8) -> str:
-    """Generate a brief natural-language summary of the AX tree."""
+def _compute_ax_summary(payload: dict, max_items: int = 8) -> str:
+    """Generate a brief natural-language summary of a window-state payload."""
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return ""
     items: list[str] = []
-
-    def _walk(n: UINode, depth: int = 0) -> None:
-        if len(items) >= max_items or depth > 2:
-            return
-        if n.label:
-            items.append(f"{n.role}({n.label})")
-        for child in (n.children or [])[:4]:
-            _walk(child, depth + 1)
-
-    _walk(node)
+    for record in elements:
+        if len(items) >= max_items:
+            break
+        if not isinstance(record, dict):
+            continue
+        label = str(record.get("label", "") or "")
+        if label:
+            items.append(f"{record.get('role', '')}({label})")
     return ", ".join(items)
-
-
-def _dict_to_ui_node(d: Any) -> UINode:
-    """Recursively convert a dict to UINode."""
-    children = [_dict_to_ui_node(c) for c in (d.get("children") or [])]
-    return UINode(
-        node_id=d.get("node_id", ""),
-        role=d.get("role", ""),
-        label=d.get("label", ""),
-        value=d.get("value", ""),
-        children=children,
-    )
 
 
 def _hamming_distance(a: str, b: str) -> int:

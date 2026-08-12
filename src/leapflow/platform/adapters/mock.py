@@ -8,7 +8,7 @@ import subprocess
 import time
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from leapflow.domain.events import SystemEvent, UINode
+from leapflow.domain.events import SystemEvent, UIElement, UISnapshot
 
 _URL_OPEN_RE = re.compile(
     r"^\s*(?:open|xdg-open|start)\s+['\"]?https?://", re.IGNORECASE
@@ -29,31 +29,72 @@ class MockPerceptionAdapter:
     async def subscribe_fs(self, paths: List[str]) -> str:
         return "mock-sub-001"
 
-    async def read_ui_tree(self, app_id: Optional[str] = None) -> UINode:
-        return UINode(
-            node_id="mock-root",
-            role="AXWindow",
-            label="Mock Window",
-            children=[
-                UINode(node_id="mock-btn-save", role="AXButton", label="Save", actions=["AXPress"]),
-                UINode(node_id="mock-btn-cancel", role="AXButton", label="Cancel", actions=["AXPress"]),
-                UINode(
-                    node_id="mock-scroll-area",
-                    role="AXScrollArea",
-                    label="",
-                    children=[
-                        UINode(node_id="mock-text-field", role="AXTextField", label="Input", value="hello"),
-                    ],
-                ),
-            ],
-            actions=["AXPress", "AXRaise"],
+    async def read_window_state(
+        self, pid: int, window_id: int, query: str = ""
+    ) -> UISnapshot:
+        elements = (
+            UIElement(
+                element_index=0, role="Button", label="Save",
+                element_token="s00000001:0", depth=1,
+                frame={"x": 10.0, "y": 10.0, "w": 80.0, "h": 24.0},
+            ),
+            UIElement(
+                element_index=1, role="Button", label="Cancel",
+                element_token="s00000001:1", depth=1,
+                frame={"x": 100.0, "y": 10.0, "w": 80.0, "h": 24.0},
+            ),
+            UIElement(
+                element_index=2, role="Edit", label="Input", value="hello",
+                element_token="s00000001:2", depth=2,
+            ),
+            UIElement(
+                element_index=3, role="TabItem", label="Home",
+                element_token="s00000001:3", depth=2, selected=True,
+            ),
         )
+        if query:
+            needle = query.lower()
+            elements = tuple(
+                el for el in elements
+                if needle in el.label.lower() or needle in el.role.lower()
+            )
+        return UISnapshot(
+            pid=pid,
+            window_id=window_id,
+            snapshot_id="s00000001",
+            elements=elements,
+            elements_complete=True,
+            total_element_count=4,
+        )
+
+    async def list_windows(self) -> Dict[str, Any]:
+        return {
+            "windows": [
+                {
+                    "window_id": 1,
+                    "pid": 100,
+                    "app_name": "Mock App",
+                    "title": "Mock Window",
+                    "bounds": {"x": 0, "y": 0, "width": 800, "height": 600},
+                    "z_index": 0,
+                    "is_on_screen": True,
+                    "minimized": False,
+                }
+            ]
+        }
 
     async def get_clipboard(self) -> Dict[str, Any]:
         return {"text": "", "change_count": 0, "change_ts": time.time()}
 
-    async def capture_screenshot(self, region: str = "") -> Dict[str, Any]:
-        return {"ok": True, "path": "/tmp/mock_screenshot.png", "region": region}
+    async def capture_screenshot(
+        self, pid: Optional[int] = None, window_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        return {
+            "ok": True,
+            "path": "/tmp/mock_screenshot.png",
+            "pid": pid,
+            "window_id": window_id,
+        }
 
     async def stream_events(self) -> AsyncIterator[SystemEvent]:
         while True:
@@ -118,23 +159,54 @@ class MockExecutionAdapter:
     async def launch_app(self, app_id: str) -> Dict[str, Any]:
         record = {"type": "launch_app", "app_id": app_id}
         self.history.append(record)
-        return {"ok": True, "mock": True}
+        return {
+            "ok": True,
+            "mock": True,
+            "pid": 100,
+            "bundle_id": app_id,
+            "launch_state": "window_ready",
+            "windows": [
+                {
+                    "window_id": 1,
+                    "pid": 100,
+                    "app_name": "Mock App",
+                    "title": "Mock Window",
+                    "z_index": 0,
+                    "is_on_screen": True,
+                    "minimized": False,
+                }
+            ],
+        }
 
     async def run_intent(self, intent_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
         record = {"type": "intent", "intent": intent_name, "params": params}
         self.history.append(record)
         return {"ok": True, "mock": True, "stub": True}
 
-    async def activate_app(self, app_id: str) -> Dict[str, Any]:
-        record = {"type": "activate_app", "app_id": app_id}
+    async def activate_app(
+        self, pid: int, window_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        record = {"type": "activate_app", "pid": pid, "window_id": window_id}
         self.history.append(record)
         return {"ok": True, "mock": True}
 
-    async def list_apps(self, filter: str = "", running_only: bool = False) -> Dict[str, Any]:
-        """Return empty app list in mock mode."""
-        record = {"type": "list_apps", "filter": filter, "running_only": running_only}
+    async def list_apps(self) -> Dict[str, Any]:
+        """Return a deterministic app list mirroring the driver's record shape."""
+        record = {"type": "list_apps"}
         self.history.append(record)
-        return {"ok": True, "apps": []}
+        return {
+            "ok": True,
+            "apps": [
+                {
+                    "name": "Mock App",
+                    "bundle_id": "com.mock.app",
+                    "pid": 100,
+                    "running": True,
+                    "active": True,
+                    "kind": "desktop",
+                }
+            ],
+        }
 
     async def exec_shell(self, command: str) -> Dict[str, Any]:
         record = {"type": "shell", "command": command}
@@ -167,8 +239,8 @@ class MockExecutionAdapter:
         self.history.append(record)
         return {"ok": True, "mock": True}
 
-    async def type_text(self, text: str, method: str = "paste") -> Dict[str, Any]:
-        record = {"type": "type_text", "text": text, "method": method}
+    async def type_text(self, text: str) -> Dict[str, Any]:
+        record = {"type": "type_text", "text": text}
         self.history.append(record)
         return {"ok": True, "mock": True}
 
@@ -177,8 +249,10 @@ class MockExecutionAdapter:
         self.history.append(record)
         return {"ok": True, "mock": True}
 
-    async def scroll(self, node_id: str, delta_x: int, delta_y: int) -> Dict[str, Any]:
-        record = {"type": "scroll", "node_id": node_id, "delta_x": delta_x, "delta_y": delta_y}
+    async def scroll(
+        self, node_id: str, direction: str, amount: int = 3
+    ) -> Dict[str, Any]:
+        record = {"type": "scroll", "node_id": node_id, "direction": direction, "amount": amount}
         self.history.append(record)
         return {"ok": True, "mock": True}
 
