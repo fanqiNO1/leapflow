@@ -539,6 +539,10 @@ async def cmd_interactive(ctx: "Context", *, resume_id: Optional[str] = None) ->
                         renderer.feed(event.content)
                     elif event.type == "thinking":
                         renderer.feed_thinking(event.content)
+                        # Phase 2: route thinking to spinner for in-place display
+                        _preview = (event.content or "").strip().replace("\n", " ")[:80]
+                        if _preview:
+                            app.spinner_text = f"💭 {_preview}"
                     elif event.type == "tool_start":
                         app.spinner_text = renderer.tool_started(
                             event.content,
@@ -1213,6 +1217,10 @@ async def cmd_interactive_daemon(
                     renderer.feed(event.content)
                 elif event.type == "thinking":
                     renderer.feed_thinking(event.content)
+                    # Phase 2: route thinking to spinner for in-place display
+                    _preview = (event.content or "").strip().replace("\n", " ")[:80]
+                    if _preview:
+                        app.spinner_text = f"💭 {_preview}"
                 elif event.type == "tool_start":
                     app.spinner_text = renderer.tool_started(
                         event.content,

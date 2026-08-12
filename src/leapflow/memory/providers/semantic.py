@@ -176,12 +176,13 @@ class SemanticMemoryProvider:
             conditions.append("session_id = ?")
             params.append(query.session_scope)
 
-        # Keyword filter (AND semantics)
-        keywords = [k.strip() for k in query.keywords if k.strip()] if query.keywords else []
+        # Keyword filter (OR semantics — broadens recall for CJK bigrams)
+        keywords = [k.strip() for k in query.keywords if k.strip()][:8] if query.keywords else []
         if keywords:
-            for _ in keywords:
-                conditions.append("content ILIKE ?")
-                params.append(f"%{_}%")
+            or_clause = " OR ".join(["content ILIKE ?"] * len(keywords))
+            conditions.append(f"({or_clause})")
+            for kw in keywords:
+                params.append(f"%{kw}%")
 
         # Kind filter
         if query.kinds:
@@ -373,6 +374,29 @@ class SemanticMemoryProvider:
             [mid, kind, domain, content, path, meta_json, now, now, 1],
         )
         return mid
+
+    def query_recent_summaries(self, limit: int = 5) -> list[dict]:
+        """Query recent session summaries for task history injection."""
+        try:
+            con = self._ensure_connection()
+            results = con.execute(
+                "SELECT content, created_at, metadata FROM leap_memory "
+                "WHERE kind = 'session_summary' "
+                "ORDER BY created_at DESC LIMIT ?",
+                [limit],
+            ).fetchall()
+            entries = []
+            for r in results:
+                meta = {}
+                if r[2]:
+                    try:
+                        meta = json.loads(r[2])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                entries.append({"content": r[0], "created_at": r[1], "metadata": meta})
+            return entries
+        except Exception:
+            return []
 
     def search_keywords(
         self,

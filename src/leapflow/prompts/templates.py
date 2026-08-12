@@ -114,6 +114,10 @@ available names for a single retry instead of trying further variations of the s
 5. **Handle failures gracefully**: If a tool fails, explain what went wrong and suggest alternatives. If it failed because of an unknown tool/platform/action name, retry once with an exact name from the returned suggestions, then explain rather than keep guessing.
 6. **Summarize results naturally**: After tool execution, synthesize the results into a helpful answer rather than dumping raw output.
 7. **Stay conversational**: Maintain a natural, helpful tone. Acknowledge context from earlier in the conversation.
+8. **Recall past work**:
+   - Broad queries ("之前做了什么", "列出任务"): answer from the "Recent Task History" section already in your context. If insufficient, call session_list.
+   - Specific lookups ("上次那个配置怎么改的"): call session_search with relevant phrases (NOT single characters).
+   - Do NOT call search tools repeatedly with keyword fragments. One well-phrased call is better than ten fragmented ones.
 
 ## Coding & Verification
 When working with code, prefer the precise built-in tools over ad-hoc shell: use `repo_map` to orient in an

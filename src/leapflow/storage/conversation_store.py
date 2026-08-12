@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -44,6 +45,7 @@ class ConversationSession:
     total_tokens: int = 0
     is_active: bool = True
     metadata: Dict[str, Any] = field(default_factory=dict)
+    summary: str = ""
 
 
 @dataclass(frozen=True)
@@ -128,9 +130,15 @@ class DuckDBConversationStore:
                 message_count INTEGER DEFAULT 0,
                 total_tokens INTEGER DEFAULT 0,
                 is_active BOOLEAN DEFAULT TRUE,
-                metadata_json VARCHAR DEFAULT '{}'
+                metadata_json VARCHAR DEFAULT '{}',
+                summary VARCHAR DEFAULT ''
             )
         """)
+        # Migration: add summary column for existing databases
+        try:
+            self._conn.execute("ALTER TABLE conversation_sessions ADD COLUMN summary VARCHAR DEFAULT ''")
+        except Exception:
+            pass  # Column already exists
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS conversation_messages (
                 message_id VARCHAR PRIMARY KEY,
@@ -184,25 +192,34 @@ class DuckDBConversationStore:
         self._ensure_fts()
 
     def _ensure_fts(self) -> None:
-        """Create FTS index on messages. Gracefully skip if extension unavailable."""
+        """Create FTS index on messages with CJK-friendly config.
+
+        Uses ``ignore := '(\\.|[^\\w])+'`` to preserve CJK characters,
+        ``stemmer := 'none'`` and ``stopwords := 'none'`` so Chinese tokens
+        are indexed rather than discarded by the default English pipeline.
+        """
         try:
             self._conn.execute("INSTALL fts; LOAD fts;")
+            # Drop existing index to re-create with correct parameters
             try:
-                self._conn.execute(
-                    "SELECT * FROM fts_main_conversation_messages.match_bm25('test', fields := 'content') LIMIT 0"
-                )
+                self._conn.execute("PRAGMA drop_fts_index('conversation_messages')")
             except Exception:
-                try:
-                    self._conn.execute("""
-                        PRAGMA create_fts_index(
-                            'conversation_messages', 'message_id',
-                            'content', 'role', 'tool_name',
-                            overwrite := 1
-                        )
-                    """)
-                    logger.debug("conversation_store: FTS index created")
-                except Exception as e:
-                    logger.debug("conversation_store: FTS index creation skipped: %s", e)
+                pass  # No existing index to drop
+            try:
+                self._conn.execute("""
+                    PRAGMA create_fts_index(
+                        'conversation_messages', 'message_id',
+                        'content', 'role', 'tool_name',
+                        stemmer := 'none',
+                        stopwords := 'none',
+                        ignore := '(\\.|[^\\w])+',
+                        lower := 1,
+                        overwrite := 1
+                    )
+                """)
+                logger.debug("conversation_store: FTS index created (CJK-friendly)")
+            except Exception as e:
+                logger.debug("conversation_store: FTS index creation skipped: %s", e)
         except Exception as e:
             logger.debug("conversation_store: FTS extension unavailable: %s", e)
 
@@ -394,6 +411,16 @@ class DuckDBConversationStore:
         rows = self._conn.execute(sql, [session_id, limit]).fetchall()
         return [self._row_to_message(r) for r in rows]
 
+    def _prepare_fts_query(self, query: str) -> str:
+        """Prepare query for DuckDB FTS. CJK chars become individual tokens."""
+        parts = []
+        for segment in re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z0-9]+', query):
+            if re.match(r'[\u4e00-\u9fff]', segment):
+                parts.extend(list(segment))
+            else:
+                parts.append(segment)
+        return ' '.join(parts) if parts else query
+
     def search_messages(
         self,
         query: str,
@@ -406,6 +433,7 @@ class DuckDBConversationStore:
             return []
 
         query_safe = query[:2048]
+        fts_query = self._prepare_fts_query(query_safe)
 
         try:
             fts_sql = """
@@ -422,7 +450,7 @@ class DuckDBConversationStore:
                 JOIN conversation_sessions s ON m.session_id = s.session_id
                 WHERE m.active = TRUE
             """
-            params: list[Any] = [query_safe]
+            params: list[Any] = [fts_query]
             if role_filter:
                 fts_sql += " AND m.role = ?"
                 params.append(role_filter)
@@ -448,15 +476,21 @@ class DuckDBConversationStore:
         limit: int = 10,
         role_filter: Optional[str] = None,
     ) -> List[ConversationSearchResult]:
-        """LIKE-based fallback when FTS is unavailable."""
-        sql = """
+        """LIKE-based fallback when FTS is unavailable. Uses OR-based keyword matching."""
+        # Tokenize into meaningful keywords for OR-based search
+        keywords = re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z0-9]{2,}', query)[:6]
+        if not keywords:
+            keywords = [query.strip()]
+
+        or_conds = " OR ".join(["m.content ILIKE ?"] * len(keywords))
+        sql = f"""
             SELECT m.message_id, m.session_id, m.role, m.content, m.created_at,
                    s.title as session_title
             FROM conversation_messages m
             JOIN conversation_sessions s ON m.session_id = s.session_id
-            WHERE m.active = TRUE AND m.content LIKE ?
+            WHERE m.active = TRUE AND ({or_conds})
         """
-        params: list[Any] = [f"%{query}%"]
+        params: list[Any] = [f"%{kw}%" for kw in keywords]
         if role_filter:
             sql += " AND m.role = ?"
             params.append(role_filter)
@@ -525,12 +559,30 @@ class DuckDBConversationStore:
             [session_id, *message_ids],
         )
 
-    def end_session(self, session_id: str) -> None:
-        """Mark a session as inactive (completed/archived)."""
+    def end_session(self, session_id: str, *, title: str | None = None, summary: str | None = None) -> None:
+        """Mark a session as inactive (completed/archived).
+
+        If *title* is provided, the session title is also updated (truncated to 80 chars).
+        If *summary* is provided, the session summary is persisted (truncated to 500 chars).
+        """
+        now = time.time()
         self._execute_write(
             "UPDATE conversation_sessions SET is_active = FALSE, updated_at = ? WHERE session_id = ?",
-            [time.time(), session_id],
+            [now, session_id],
         )
+        if title:
+            self._execute_write(
+                "UPDATE conversation_sessions SET title = ?, updated_at = ? WHERE session_id = ?",
+                [title[:80], now, session_id],
+            )
+        if summary:
+            try:
+                self._execute_write(
+                    "UPDATE conversation_sessions SET summary = ?, updated_at = ? WHERE session_id = ?",
+                    [summary[:500], now, session_id],
+                )
+            except Exception:
+                logger.debug("conversation_store: summary update failed", exc_info=True)
 
     def fork_session(
         self,
@@ -648,13 +700,18 @@ class DuckDBConversationStore:
             meta = json.loads(row[11]) if row[11] else {}
         except (json.JSONDecodeError, IndexError):
             pass
+        summary = ""
+        try:
+            summary = row[12] or "" if len(row) > 12 else ""
+        except (IndexError, TypeError):
+            pass
         return ConversationSession(
             session_id=row[0], title=row[1] or "", created_at=row[2] or 0.0,
             updated_at=row[3] or 0.0, parent_session_id=row[4],
             model=row[5] or "", source=row[6] or "cli", cwd=row[7] or "",
             message_count=row[8] or 0, total_tokens=row[9] or 0,
             is_active=bool(row[10]) if row[10] is not None else True,
-            metadata=meta,
+            metadata=meta, summary=summary,
         )
 
     def _row_to_tool_execution(self, row: tuple) -> "ToolExecutionRecord":

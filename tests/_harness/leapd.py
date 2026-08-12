@@ -112,6 +112,9 @@ def hermetic_env(
             # The mock host reports perception online; keep desktop tools out of
             # the prompt so cassette fingerprints stay stable.
             "LEAPFLOW_DESKTOP_TOOLS_ENABLED": "0",
+            # Copilot can schedule background LLM predictions from ambient desktop
+            # signals; journeys only cassette the foreground product contract.
+            "LEAPFLOW_COPILOT_ENABLED": "0",
             "LEAPFLOW_LLM_API_KEY": llm_api_key,
             "LEAPFLOW_LLM_BASE_URL": llm_base_url,
             "LEAPFLOW_LLM_MODEL": llm_model,

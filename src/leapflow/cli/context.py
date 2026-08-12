@@ -1806,6 +1806,56 @@ class Context:
                 TOOL_HANDLERS["session_search"] = _session_search_handler
                 TOOL_HANDLERS["gp_session_search"] = _session_search_handler
                 logger.debug("session_search tool registered")
+
+                # ── Register session_list tool ──
+                def _format_ts(ts: float) -> str:
+                    if not ts:
+                        return ""
+                    import datetime
+                    try:
+                        return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+                    except (TypeError, ValueError, OSError):
+                        return str(ts)[:16]
+
+                TOOL_DEFINITIONS.append({
+                    "type": "function",
+                    "function": {
+                        "name": "session_list",
+                        "description": (
+                            "List recent conversation sessions with titles, dates, and summaries. "
+                            "Use for browsing past tasks or when user asks to see history without specific search terms. "
+                            "No keywords needed — returns chronological list."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "limit": {"type": "integer", "description": "Max sessions to return (default: 10, max: 30)"},
+                            },
+                            "required": [],
+                        },
+                    },
+                })
+
+                async def _session_list_handler(params: dict) -> dict:
+                    limit = min(int(params.get("limit", 10)), 30)
+                    sessions = conv_store.list_sessions(limit=limit, active_only=False)
+                    items = []
+                    for s in sessions:
+                        item = {
+                            "title": getattr(s, 'title', '') or getattr(s, 'session_id', '')[:8],
+                            "date": _format_ts(getattr(s, 'updated_at', 0) or getattr(s, 'created_at', 0)),
+                            "messages": getattr(s, 'message_count', 0),
+                        }
+                        summary = getattr(s, 'summary', '')
+                        if summary:
+                            item["summary"] = summary[:200]
+                        items.append(item)
+                    import json as _json_sl
+                    return {"ok": True, "result": _json_sl.dumps(items, ensure_ascii=False)}
+
+                TOOL_HANDLERS["session_list"] = _session_list_handler
+                TOOL_HANDLERS["gp_session_list"] = _session_list_handler
+                logger.debug("session_list tool registered")
             except Exception:
                 logger.debug("session_search tool registration failed", exc_info=True)
 
@@ -2505,6 +2555,95 @@ class Context:
 
         return _on_insight
 
+    async def _generate_session_summary(self) -> str | None:
+        """Generate a structured task summary from the session's conversation."""
+        store = getattr(self, '_conversation_store', None)
+        if not store:
+            return None
+        session_id = getattr(self.engine, '_current_session_id', None) or ""
+        if not session_id:
+            return None
+        try:
+            # Fetch all messages (up to 200) to find both first user goal and final outcome.
+            # get_messages returns ASC order; we use a larger limit to capture session endpoints.
+            messages = store.get_messages(session_id, limit=200)
+        except Exception:
+            return None
+        if not messages or len(messages) < 2:
+            return None
+
+        first_user = ""
+        for m in messages:
+            if getattr(m, 'role', '') == "user" and getattr(m, 'content', ''):
+                first_user = m.content[:150]
+                break
+
+        tool_names = sorted(set(
+            getattr(m, 'tool_name', '') or ''
+            for m in messages
+            if getattr(m, 'tool_name', '')
+        ))[:8]
+
+        last_assistant = ""
+        for m in reversed(messages):
+            content = getattr(m, 'content', '') or ''
+            if getattr(m, 'role', '') == "assistant" and len(content.strip()) > 20:
+                last_assistant = content[:200]
+                break
+
+        if not first_user:
+            return None
+
+        parts = [f"Goal: {first_user}"]
+        if tool_names:
+            parts.append(f"Tools: {', '.join(tool_names)}")
+        if last_assistant:
+            parts.append(f"Outcome: {last_assistant}")
+        return "\n".join(parts)
+
+    async def _persist_session_summary(self) -> None:
+        """Generate and persist session summary at end of session."""
+        try:
+            summary = await self._generate_session_summary()
+            if not summary:
+                return
+
+            # Persist to memory via SemanticMemoryProvider
+            from leapflow.memory.protocol import MemoryEntry, MemoryKind, SignalDomain
+            session_id = getattr(self.engine, '_current_session_id', None) or ""
+            entry = MemoryEntry(
+                kind=MemoryKind.SESSION_SUMMARY,
+                domain=SignalDomain.SYSTEM,
+                content=summary,
+                metadata={
+                    "_session_id": session_id,
+                    "workspace": str(self.settings.workspace_root),
+                },
+            )
+            if hasattr(self, 'memory') and self.memory:
+                await self.memory.insert(entry, session_id=session_id)
+                # MemoryManager routes SESSION_SUMMARY to narrative (MEMORY.md) first,
+                # but query_recent_summaries() reads from DuckDB (semantic provider).
+                # Explicitly persist to semantic to enable cross-session querying.
+                semantic = self.memory.get_provider("semantic")
+                if semantic is not None:
+                    try:
+                        await semantic.insert(entry, session_id=session_id)
+                    except Exception:
+                        logger.debug("semantic insert for session summary failed", exc_info=True)
+                logger.debug("Session summary persisted for session=%s", session_id[:8])
+
+            # Update session title with the goal line
+            goal_line = summary.split("\n")[0].removeprefix("Goal: ").strip()
+            conv_store = getattr(self, '_conversation_store', None)
+            if conv_store and session_id and goal_line:
+                try:
+                    conv_store.end_session(session_id, title=goal_line, summary=summary[:500])
+                except Exception:
+                    logger.debug("session title update failed", exc_info=True)
+        except Exception:
+            logger.debug("session summary persistence failed", exc_info=True)
+
     async def _on_session_end_learning(self) -> None:
         """End-of-session OPD learning pipeline (8 phases) with full observability.
 
@@ -2893,6 +3032,8 @@ class Context:
         # OPD end-of-session learning pipeline
         if self.settings.replay_on_session_end:
             await self._on_session_end_learning()
+        # Persist session summary before memory shutdown
+        await self._persist_session_summary()
         # Shutdown all memory providers (stops GC, closes DB)
         await self.memory.shutdown_all()
         if isinstance(self.rpc, CuaDriverClient):
