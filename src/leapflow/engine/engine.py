@@ -806,7 +806,9 @@ def _last_tool_failures_recovery_message(messages: List[Dict[str, Any]]) -> str:
         platforms: List[str] = list(last.get("available_platforms") or [])
         if platforms:
             lines.append(f"Available platforms: {', '.join(platforms)}.")
-    elif "Missing required fields" in error:
+    elif failure_code == "missing_required_fields" or "Missing required fields" in error:
+        # TODO: migrate to failure_code-only once all producers emit
+        # failure_code="missing_required_fields" instead of bare error text.
         lines.append(f"Action parameter incomplete: {error}. Please provide the missing field(s) and retry.")
     elif error:
         lines.append(f"Action failed: {error}")
@@ -1849,7 +1851,7 @@ class AgentEngine:
             .expanduser()
             .resolve()
         )
-        protocol = self._research_protocol_for(user_text)
+        protocol = self._research_protocol_for(user_text, self._settings)
         return TaskContract(
             task_id=f"turn-{self._session_turn_count}",
             original_request=user_text.strip(),
@@ -1867,26 +1869,18 @@ class AgentEngine:
     )
 
     @staticmethod
-    def _research_protocol_for(user_text: str) -> tuple[str, ...]:
-        normalized = user_text.lower()
-        architecture_tokens = (
-            "architecture", "diagram", "design", "架构", "架构图", "系统设计", "框图",
+    def _research_protocol_for(user_text: str, settings: Any = None) -> tuple[str, ...]:
+        """Inject research protocol based on structural signals (input complexity).
+
+        Selection is driven by input length (a numeric structural signal),
+        NOT by keyword scanning. Post-first-round, the governance posture
+        and difficulty score handle escalation.
+        """
+        threshold = (
+            getattr(settings, 'research_protocol_length_threshold', 120)
+            if settings else 120
         )
-        if any(token in normalized for token in architecture_tokens):
-            return (
-                "Identify the active project root before reading files.",
-                "Start from README, AGENTS, docs index, and top-level source layout.",
-                "Use outlines, symbols, and bounded ranges before raw full-file reads.",
-                "Cross-check entrypoints, core orchestration, representative modules, and tests.",
-                "Produce a concise subsystem map and Mermaid architecture diagram grounded in evidence.",
-            )
-        # General large-task protocol: fires for long or complex requests
-        _large_task_keywords = (
-            "codebase", "代码库", "implement", "实现", "investigate", "调查",
-            "refactor", "重构", "analyze", "分析", "review", "审查",
-            "所有", "全部", "across", "整个",
-        )
-        if len(user_text) > 200 or any(kw in normalized for kw in _large_task_keywords):
+        if len(user_text.strip()) > threshold:
             return AgentEngine._LARGE_TASK_PROTOCOL
         return ()
 
@@ -1992,6 +1986,12 @@ class AgentEngine:
         except (TypeError, ValueError, RuntimeError):
             logger.debug("semantic focus update failed for tool %s", tool_name, exc_info=True)
 
+    # Deprecated fallback: name-based context_plane inference.
+    # Tools should declare context_plane via x_leapflow metadata in their spec.
+    _EVIDENCE_TOOL_NAMES: frozenset[str] = frozenset(
+        {"file_read", "web_fetch", "code_search", "text_search", "memory_search"}
+    )
+
     def _tool_focus_metadata(
         self,
         tool_name: str,
@@ -2000,14 +2000,31 @@ class AgentEngine:
     ) -> Dict[str, Any]:
         """Return compact metadata describing a tool result's context plane."""
         name = str(tool_name or "").removeprefix("gp_")
+
+        # Primary path: check tool manifest metadata (declarative)
+        spec = _default_tool_registry().specs.get(name)
+        if spec is not None:
+            declared_plane = getattr(spec, 'context_plane', None)
+            if declared_plane:
+                return {"context_plane": declared_plane}
+
+        # Deprecated fallback: name-based inference (to be removed once all tools declare metadata)
         if name.startswith("config_"):
+            logger.debug(
+                "context_plane inferred from prefix for %s "
+                "(deprecated; declare x_leapflow.context_plane)", name,
+            )
             metadata: Dict[str, Any] = {"context_plane": ContextPlane.CONTROL_PLANE.value}
             if isinstance(result, dict):
                 key = str(result.get("key") or (arguments or {}).get("key") or "")
                 if key:
                     metadata["control_event_key"] = key
             return metadata
-        if name in {"file_read", "web_fetch", "code_search", "text_search", "memory_search"}:
+        if name in self._EVIDENCE_TOOL_NAMES:
+            logger.debug(
+                "context_plane inferred from name set for %s "
+                "(deprecated; declare x_leapflow.context_plane)", name,
+            )
             return {"context_plane": ContextPlane.TOOL_EVIDENCE.value}
         return {}
 
@@ -2253,7 +2270,16 @@ class AgentEngine:
                 continue
             if len(content) < 300:
                 continue
-            if '"ok": false' in content[:100].lower() or '"ok":false' in content[:100].lower():
+            # Prefer structured JSON check over substring sniffing
+            _skip = False
+            if content.lstrip().startswith('{'):
+                try:
+                    parsed = json.loads(content)
+                    if isinstance(parsed, dict) and parsed.get("ok") is False:
+                        _skip = True
+                except (ValueError, TypeError):
+                    pass
+            if _skip:
                 continue
             finding = AgentEngine._extract_compact_finding(content)
             if finding:
