@@ -71,6 +71,7 @@ def build_tool_bridge(
         {"element_index": "int (required) — element_index from observe_ui"},
         adapter.click,
         mutates_state=True,
+        describer=adapter.describe_element,
     )
     bridge.register(
         "type_text",
@@ -197,6 +198,7 @@ def build_tool_bridge(
         },
         adapter.right_click,
         mutates_state=True,
+        describer=adapter.describe_element,
     )
     bridge.register(
         "screenshot",

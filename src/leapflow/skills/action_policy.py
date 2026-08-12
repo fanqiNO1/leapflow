@@ -45,6 +45,10 @@ class PolicyContext:
     skill_name: str = ""
     iteration: int = 0
     history: List[str] = field(default_factory=list)
+    # Human-readable description of the call's resolved target (e.g. the
+    # clicked element's role + label), filled by ToolBridge before rule
+    # evaluation. Element-index params carry no semantics by themselves.
+    target_description: str = ""
 
 
 @runtime_checkable
@@ -94,13 +98,13 @@ class SendActionRule:
 
     def check(self, call: ToolCall, context: PolicyContext) -> Optional[PolicyDecision]:
         if call.name == "click":
-            selector = call.params.get("selector", "")
-            if _SEND_LABELS.search(selector):
+            target = context.target_description
+            if target and _SEND_LABELS.search(target):
                 return PolicyDecision(
                     verdict=Verdict.ASK,
                     reason="send_action",
                     tool_name=call.name,
-                    summary=f"Click: {selector}",
+                    summary=f"Click: {target}",
                 )
 
         if call.name == "shortcut":

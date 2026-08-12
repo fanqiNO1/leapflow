@@ -496,6 +496,29 @@ class SemanticAdapter:
             return None
         return self._last_snapshot.pid, self._last_snapshot.window_id
 
+    def describe_element(self, params: Dict[str, Any]) -> str:
+        """Human-readable description of the element a call targets.
+
+        Consumed by the policy gate: element_index params carry no
+        semantics, so safety rules (e.g. send-button detection) need the
+        resolved role + label.
+        """
+        if self._last_snapshot is None:
+            return ""
+        try:
+            index = int(params.get("element_index"))
+        except (TypeError, ValueError):
+            return ""
+        element = self._last_snapshot.find(index)
+        if element is None:
+            return ""
+        parts = [element.role]
+        if element.label:
+            parts.append(element.label)
+        if element.value:
+            parts.append(f"value={element.value[:40]}")
+        return " ".join(parts)
+
     def _resolve_element(
         self, params: Dict[str, Any]
     ) -> Tuple[Optional[UIElement], Dict[str, Any]]:

@@ -143,6 +143,17 @@ async def test_type_text_has_no_method_knob() -> None:
 
 
 @pytest.mark.asyncio
+async def test_describe_element_resolves_semantics_for_policy() -> None:
+    adapter = _adapter()
+    assert adapter.describe_element({"element_index": 0}) == ""  # no snapshot yet
+
+    await adapter.observe_ui({"pid": 100, "window_id": 1})
+    assert adapter.describe_element({"element_index": 0}) == "Button Save"
+    assert adapter.describe_element({"element_index": 99}) == ""
+    assert adapter.describe_element({}) == ""
+
+
+@pytest.mark.asyncio
 async def test_read_text_reads_from_snapshot() -> None:
     adapter = _adapter()
     await adapter.observe_ui({"pid": 100, "window_id": 1})

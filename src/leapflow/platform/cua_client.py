@@ -16,6 +16,7 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import base64
 import concurrent.futures
 import json
 import logging
@@ -468,12 +469,28 @@ def _is_closed_session_error(exc: Exception) -> bool:
 
 def _clipboard_get() -> str:
     """Read clipboard via platform-native command."""
-    if sys.platform == "darwin":
-        cmd = ["pbpaste"]
-    elif sys.platform == "win32":
-        cmd = ["powershell", "-command", "Get-Clipboard"]
-    else:
-        cmd = ["xclip", "-selection", "clipboard", "-o"]
+    if sys.platform == "win32":
+        # -Raw preserves the clipboard text verbatim (the default mode
+        # returns a line array and reflows newlines). Force UTF-8 output —
+        # the default console codepage mangles CJK.
+        cmd = [
+            "powershell", "-NoProfile", "-Command",
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard -Raw",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=5.0)
+            text = result.stdout.decode("utf-8", errors="replace")
+            # PowerShell appends exactly one trailing newline to stdout;
+            # strip only that one so genuine trailing newlines survive.
+            if text.endswith("\r\n"):
+                return text[:-2]
+            if text.endswith("\n"):
+                return text[:-1]
+            return text
+        except Exception as e:
+            raise RpcError("clipboard_error", f"Failed to read clipboard: {e}", {})
+
+    cmd = ["pbpaste"] if sys.platform == "darwin" else ["xclip", "-selection", "clipboard", "-o"]
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True,
@@ -486,20 +503,29 @@ def _clipboard_get() -> str:
 
 def _clipboard_set(text: str) -> None:
     """Write clipboard via platform-native command."""
-    if sys.platform == "darwin":
-        cmd = ["pbcopy"]
-    elif sys.platform == "win32":
-        cmd = ["powershell", "-command", "Set-Clipboard", "-Value", text]
-    else:
-        cmd = ["xclip", "-selection", "clipboard"]
-
-    try:
-        if sys.platform == "win32":
+    if sys.platform == "win32":
+        # PowerShell -Command re-parses the joined argv, stripping the
+        # quoting subprocess added — any text with spaces breaks parameter
+        # binding. Base64 transport is immune to spaces/quotes/CJK/$.
+        encoded = base64.b64encode(text.encode("utf-16-le")).decode("ascii")
+        script = (
+            "$t=[Text.Encoding]::Unicode.GetString("
+            f"[Convert]::FromBase64String('{encoded}'));"
+            "if ($t.Length -gt 0) { Set-Clipboard -Value $t }"
+            " else { Set-Clipboard -Value $null }"
+        )
+        cmd = ["powershell", "-NoProfile", "-Command", script]
+        try:
             subprocess.run(cmd, capture_output=True, timeout=5.0, check=True)
-        else:
-            subprocess.run(
-                cmd, input=text, capture_output=True, text=True, timeout=5.0, check=True
-            )
+        except Exception as e:
+            raise RpcError("clipboard_error", f"Failed to set clipboard: {e}", {})
+        return
+
+    cmd = ["pbcopy"] if sys.platform == "darwin" else ["xclip", "-selection", "clipboard"]
+    try:
+        subprocess.run(
+            cmd, input=text, capture_output=True, text=True, timeout=5.0, check=True
+        )
     except Exception as e:
         raise RpcError("clipboard_error", f"Failed to set clipboard: {e}", {})
 
@@ -520,14 +546,14 @@ def _file_list(params: Dict[str, Any]) -> List[Dict[str, Any]]:
     return entries
 
 
-def _file_move(params: Dict[str, Any]) -> Dict[str, str]:
+def _file_move(params: Dict[str, Any]) -> Dict[str, Any]:
     src = Path(params["source"])
     dst = Path(params["destination"])
     src.rename(dst)
-    return {"moved": str(dst)}
+    return {"ok": True, "moved": str(dst)}
 
 
-def _file_copy(params: Dict[str, Any]) -> Dict[str, str]:
+def _file_copy(params: Dict[str, Any]) -> Dict[str, Any]:
     import shutil as _shutil
     src = Path(params["source"])
     dst = Path(params["destination"])
@@ -535,17 +561,17 @@ def _file_copy(params: Dict[str, Any]) -> Dict[str, str]:
         _shutil.copytree(str(src), str(dst))
     else:
         _shutil.copy2(str(src), str(dst))
-    return {"copied": str(dst)}
+    return {"ok": True, "copied": str(dst)}
 
 
-def _file_delete(params: Dict[str, Any]) -> Dict[str, str]:
+def _file_delete(params: Dict[str, Any]) -> Dict[str, Any]:
     import shutil as _shutil
     target = Path(params["path"])
     if target.is_dir():
         _shutil.rmtree(str(target))
     else:
         target.unlink()
-    return {"deleted": str(target)}
+    return {"ok": True, "deleted": str(target)}
 
 
 # ── Dispatch helpers ─────────────────────────────────────────────────────────
@@ -1110,16 +1136,27 @@ def _local_clipboard_get(params: Dict[str, Any]) -> Dict[str, Any]:
     The platform command cannot observe change counts, so change_count is 0
     and change_ts is the read time.
     """
-    return {"text": _clipboard_get(), "change_count": 0, "change_ts": time.time()}
+    return {
+        "ok": True,
+        "text": _clipboard_get(),
+        "change_count": 0,
+        "change_ts": time.time(),
+    }
 
 
-def _local_clipboard_set(params: Dict[str, Any]) -> None:
+def _local_clipboard_set(params: Dict[str, Any]) -> Dict[str, Any]:
     _clipboard_set(params.get("text", params.get("content", "")))
+    return {"ok": True}
 
 
 def _local_clipboard_last_change(params: Dict[str, Any]) -> Dict[str, Any]:
     # Best-effort: the platform command exposes no change counter.
-    return {"text": _clipboard_get(), "change_count": 0, "change_ts": time.time()}
+    return {
+        "ok": True,
+        "text": _clipboard_get(),
+        "change_count": 0,
+        "change_ts": time.time(),
+    }
 
 
 def _local_fs_subscribe(params: Dict[str, Any]) -> Dict[str, Any]:

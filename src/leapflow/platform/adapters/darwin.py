@@ -251,7 +251,9 @@ class DarwinExecutionAdapter:
     async def _backup_for_undo(self, path: str) -> str:
         """Copy file to temp before deletion for potential recovery."""
         filename = Path(path).name if path else "file"
-        backup = f"/tmp/leap_undo_{uuid.uuid4().hex[:8]}_{filename}"
+        backup = str(
+            Path(tempfile.gettempdir()) / f"leap_undo_{uuid.uuid4().hex[:8]}_{filename}"
+        )
         try:
             await self._rpc.call(Methods.FILE_COPY, {"source": path, "destination": backup})
         except Exception as exc:

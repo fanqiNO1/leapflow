@@ -78,11 +78,20 @@ async def test_policy_safe_action_allowed():
 @pytest.mark.asyncio
 async def test_policy_send_action_requires_ask():
     engine = PolicyEngine(default_rules())
-    ctx = PolicyContext(skill_name="test", iteration=0)
-    call = ToolCall(name="click", params={"selector": "AXButton[label=Send]"})
+    # element_index params carry no semantics — the resolved element
+    # description (filled by ToolBridge's describer) drives the rule.
+    ctx = PolicyContext(
+        skill_name="test", iteration=0, target_description="Button 发送"
+    )
+    call = ToolCall(name="click", params={"element_index": 5})
     decision = await engine.evaluate(call, ctx)
     assert decision.verdict == Verdict.ASK
     assert decision.reason == "send_action"
+
+    # Without a resolved description the click is not classified as send.
+    plain_ctx = PolicyContext(skill_name="test", iteration=0)
+    decision = await engine.evaluate(call, plain_ctx)
+    assert decision.verdict == Verdict.ALLOW
 
 
 class _DenyAllRule:

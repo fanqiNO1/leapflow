@@ -129,15 +129,19 @@ class ExecutionPort(Protocol):
 class _ToolHandler:
     """A single tool's definition + dispatch logic."""
 
-    __slots__ = ("definition", "handler")
+    __slots__ = ("definition", "handler", "describer")
 
     def __init__(
         self,
         definition: ToolDefinition,
         handler: Any,
+        describer: Any = None,
     ) -> None:
         self.definition = definition
         self.handler = handler
+        # Optional callable(params) -> str: human-readable description of
+        # the call's resolved target, consumed by the policy gate.
+        self.describer = describer
 
 
 class ToolBridge:
@@ -230,21 +234,31 @@ class ToolBridge:
         *,
         mutates_state: bool = False,
         counts_as_progress: bool | None = None,
+        describer: Any = None,
     ) -> None:
         defn = ToolDefinition(
             name=name, description=description, parameters=parameters,
             mutates_state=mutates_state, counts_as_progress=counts_as_progress,
         )
-        self._handlers[name] = _ToolHandler(definition=defn, handler=handler)
+        self._handlers[name] = _ToolHandler(
+            definition=defn, handler=handler, describer=describer
+        )
 
     def register(
         self, name: str, description: str, parameters: Dict[str, str], handler: Any,
         *, mutates_state: bool = False, counts_as_progress: bool | None = None,
+        describer: Any = None,
     ) -> None:
-        """Register a custom tool (extensibility point)."""
+        """Register a custom tool (extensibility point).
+
+        ``describer`` optionally maps call params to a human-readable
+        description of the resolved target for the policy gate — required
+        for tools whose params are opaque handles (e.g. element_index).
+        """
         self._register(
             name, description, parameters, handler,
             mutates_state=mutates_state, counts_as_progress=counts_as_progress,
+            describer=describer,
         )
 
     @property
@@ -282,6 +296,13 @@ class ToolBridge:
             return await self.dispatch(call)
 
         from leapflow.skills.action_policy import Verdict
+
+        entry = self._handlers.get(call.name)
+        if entry is not None and entry.describer is not None:
+            try:
+                context.target_description = str(entry.describer(call.params) or "")
+            except Exception:
+                context.target_description = ""
 
         decision = await self.policy.evaluate(call, context)
 
