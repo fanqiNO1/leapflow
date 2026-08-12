@@ -9,6 +9,7 @@ import inspect
 import json
 import logging
 import math
+import re as _re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -22,6 +23,26 @@ from leapflow.memory.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# CJK-aware tokenization for search
+# ──────────────────────────────────────────────────────────────────────
+
+def _tokenize_for_search(text: str) -> list[str]:
+    """Split text into search tokens. CJK runs become overlapping bigrams."""
+    tokens: list[str] = []
+    for segment in _re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z0-9_\-./]+', text):
+        if _re.match(r'[\u4e00-\u9fff]', segment):
+            # CJK: overlapping bigrams (or single char if length 1)
+            if len(segment) == 1:
+                tokens.append(segment)
+            else:
+                for i in range(len(segment) - 1):
+                    tokens.append(segment[i:i+2])
+        else:
+            tokens.append(segment.lower())
+    return tokens[:8]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -296,7 +317,7 @@ class MemoryManager:
         session_scope: str = "",
     ) -> List[MemoryEntry]:
         """Quick search for LLM context injection with optional project/task/session scope."""
-        keywords = query_text.split()[:5]
+        keywords = _tokenize_for_search(query_text)
         scope_terms = [term for term in (scope_keywords or []) if term]
         query = MemoryQuery(
             keywords=[*keywords, *scope_terms[:5]],
@@ -628,7 +649,7 @@ class MemoryManager:
 
         domains = [SignalDomain(domain_str)] if domain_str else None
         mq = MemoryQuery(
-            keywords=query_text.split()[:8],
+            keywords=_tokenize_for_search(query_text),
             domains=domains,
             limit=limit,
             workspace_root=workspace_root,

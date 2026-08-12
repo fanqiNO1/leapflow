@@ -1806,6 +1806,56 @@ class Context:
                 TOOL_HANDLERS["session_search"] = _session_search_handler
                 TOOL_HANDLERS["gp_session_search"] = _session_search_handler
                 logger.debug("session_search tool registered")
+
+                # ── Register session_list tool ──
+                def _format_ts(ts: float) -> str:
+                    if not ts:
+                        return ""
+                    import datetime
+                    try:
+                        return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+                    except (TypeError, ValueError, OSError):
+                        return str(ts)[:16]
+
+                TOOL_DEFINITIONS.append({
+                    "type": "function",
+                    "function": {
+                        "name": "session_list",
+                        "description": (
+                            "List recent conversation sessions with titles, dates, and summaries. "
+                            "Use for browsing past tasks or when user asks to see history without specific search terms. "
+                            "No keywords needed — returns chronological list."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "limit": {"type": "integer", "description": "Max sessions to return (default: 10, max: 30)"},
+                            },
+                            "required": [],
+                        },
+                    },
+                })
+
+                async def _session_list_handler(params: dict) -> dict:
+                    limit = min(int(params.get("limit", 10)), 30)
+                    sessions = conv_store.list_sessions(limit=limit, active_only=False)
+                    items = []
+                    for s in sessions:
+                        item = {
+                            "title": getattr(s, 'title', '') or getattr(s, 'session_id', '')[:8],
+                            "date": _format_ts(getattr(s, 'updated_at', 0) or getattr(s, 'created_at', 0)),
+                            "messages": getattr(s, 'message_count', 0),
+                        }
+                        summary = getattr(s, 'summary', '')
+                        if summary:
+                            item["summary"] = summary[:200]
+                        items.append(item)
+                    import json as _json_sl
+                    return {"ok": True, "result": _json_sl.dumps(items, ensure_ascii=False)}
+
+                TOOL_HANDLERS["session_list"] = _session_list_handler
+                TOOL_HANDLERS["gp_session_list"] = _session_list_handler
+                logger.debug("session_list tool registered")
             except Exception:
                 logger.debug("session_search tool registration failed", exc_info=True)
 
@@ -2588,7 +2638,7 @@ class Context:
             conv_store = getattr(self, '_conversation_store', None)
             if conv_store and session_id and goal_line:
                 try:
-                    conv_store.end_session(session_id, title=goal_line)
+                    conv_store.end_session(session_id, title=goal_line, summary=summary[:500])
                 except Exception:
                     logger.debug("session title update failed", exc_info=True)
         except Exception:

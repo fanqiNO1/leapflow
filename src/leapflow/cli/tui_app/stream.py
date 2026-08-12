@@ -430,8 +430,10 @@ class StreamRenderer:
         Discards any pending content — it was preamble preceding the tool call
         and should not appear in the final answer.
         """
-        # Flush accumulated thinking before starting new tool display
-        if self._thinking_buffer.strip():
+        # Flush thinking ONCE per LLM round: only when this is the first tool
+        # in a new batch (no other tools currently active). This shows one
+        # thinking panel per round during execution, not per individual tool.
+        if not self._active_tools and self._thinking_buffer.strip():
             self._console.thinking(self._thinking_buffer)
             self._thinking_buffer = ""
         self._pending = ""

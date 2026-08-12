@@ -176,12 +176,13 @@ class SemanticMemoryProvider:
             conditions.append("session_id = ?")
             params.append(query.session_scope)
 
-        # Keyword filter (AND semantics)
-        keywords = [k.strip() for k in query.keywords if k.strip()] if query.keywords else []
+        # Keyword filter (OR semantics — broadens recall for CJK bigrams)
+        keywords = [k.strip() for k in query.keywords if k.strip()][:8] if query.keywords else []
         if keywords:
-            for _ in keywords:
-                conditions.append("content ILIKE ?")
-                params.append(f"%{_}%")
+            or_clause = " OR ".join(["content ILIKE ?"] * len(keywords))
+            conditions.append(f"({or_clause})")
+            for kw in keywords:
+                params.append(f"%{kw}%")
 
         # Kind filter
         if query.kinds:

@@ -980,8 +980,17 @@ def _extract_json_object(text: str) -> Dict[str, Any]:
 
 
 def _keywords_from_query(q: str) -> list[str]:
-    toks = re.findall(r"[\w\-./]+|[\u4e00-\u9fff]+", q)
-    return [t for t in toks if len(t) >= 2][:12]
+    tokens: list[str] = []
+    for segment in re.findall(r'[\u4e00-\u9fff]+|[\w\-./]+', q):
+        if re.match(r'[\u4e00-\u9fff]', segment):
+            if len(segment) == 1:
+                tokens.append(segment)
+            else:
+                for i in range(len(segment) - 1):
+                    tokens.append(segment[i:i+2])
+        elif len(segment) >= 2:
+            tokens.append(segment)
+    return tokens[:12]
 
 
 @dataclass(frozen=True, slots=True)
