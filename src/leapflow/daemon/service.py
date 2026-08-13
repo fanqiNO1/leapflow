@@ -539,6 +539,24 @@ class RuntimeLeapService:
             self._ctx, self._settings, limit=limit, session_id=session_id,
         )
 
+    async def session_detail(
+        self,
+        session_id: str,
+        limit: int = 200,
+        offset: int = 0,
+        include_inactive: bool = True,
+        workspace_root: str = "",
+    ) -> dict[str, Any]:
+        return await self._session_coordinator.get_detail(
+            self._ctx,
+            self._settings,
+            session_id,
+            limit=limit,
+            offset=offset,
+            include_inactive=include_inactive,
+            workspace_root=workspace_root,
+        )
+
     async def session_analyze(self) -> dict[str, Any]:
         return await self._session_coordinator.analyze(self._monitors, self._ctx, self._settings)
 

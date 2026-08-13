@@ -509,6 +509,31 @@ def test_tool_execution_store_roundtrip_and_unique_key(tmp_path: Path) -> None:
         store.close()
 
 
+def test_conversation_store_workspace_filter_and_message_pagination(tmp_path: Path) -> None:
+    from leapflow.storage.conversation_store import DuckDBConversationStore
+
+    work_a = str((tmp_path / "work-a").resolve())
+    work_b = str((tmp_path / "work-b").resolve())
+    store = DuckDBConversationStore(tmp_path / "conversation-filter.duckdb")
+    try:
+        store.create_session("session-a", title="A", cwd=work_a)
+        store.create_session("session-b", title="B", cwd=work_b)
+        store.append_message("session-a", "user", "first qwen note")
+        store.append_message("session-a", "assistant", "second qwen note")
+        store.append_message("session-b", "user", "other qwen note")
+
+        listed = store.list_sessions(limit=10, active_only=False, cwd=work_a)
+        page = store.get_messages("session-a", limit=1, offset=1, active_only=True)
+        found = store.search_messages("qwen", limit=10, cwd=work_a)
+
+        assert [s.session_id for s in listed] == ["session-a"]
+        assert [m.content for m in page] == ["second qwen note"]
+        assert {r.session_id for r in found} <= {"session-a"}
+        assert any(r.session_id == "session-a" for r in found)
+    finally:
+        store.close()
+
+
 # ── Cross-tier integration ─────────────────────────────────────────
 
 

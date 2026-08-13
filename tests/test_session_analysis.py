@@ -14,7 +14,7 @@ from leapflow.daemon.service import RuntimeLeapService
 from leapflow.monitor import MonitorManager, ProducerRegistry, SessionAnalysisProducer, WatchSpec
 from leapflow.monitor.types import ProducerContext
 from leapflow.storage.connection import LocalConnectionHolder
-from leapflow.storage.conversation_store import ConversationMessage
+from leapflow.storage.conversation_store import ConversationMessage, ConversationSession
 
 
 class _FakeServices:
@@ -190,6 +190,100 @@ async def test_session_history_empty_without_context() -> None:
     service = RuntimeLeapService(SimpleNamespace())
     history = await service.session_history()
     assert history["turn_count"] == 0 and history["messages"] == []
+
+
+async def test_session_detail_reads_persisted_transcript_with_pagination(tmp_path: Path) -> None:
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+
+    class _Store:
+        def __init__(self) -> None:
+            self.session = ConversationSession(
+                session_id="sid",
+                title="Historical task",
+                created_at=1.0,
+                updated_at=2.0,
+                cwd=str(workspace.resolve()),
+                message_count=3,
+                total_tokens=9,
+                summary="done",
+            )
+            self.messages = [
+                ConversationMessage("m1", "sid", "user", "first", created_at=1.0, token_count=3),
+                ConversationMessage("m2", "sid", "assistant", "second", created_at=2.0, token_count=3),
+                ConversationMessage("m3", "sid", "tool", "third", created_at=3.0, token_count=3, tool_name="file_read"),
+            ]
+
+        def get_session(self, session_id: str):
+            return self.session if session_id == "sid" else None
+
+        def get_messages(self, session_id: str, *, limit: int = 100, active_only: bool = True, offset: int = 0):
+            assert session_id == "sid"
+            assert active_only is False
+            return self.messages[offset:offset + limit]
+
+    settings = SimpleNamespace(workspace_root=str(workspace))
+    service = RuntimeLeapService(settings)
+    service._ctx = SimpleNamespace(_conversation_store=_Store(), settings=settings)
+
+    detail = await service.session_detail("sid", limit=2, offset=1)
+
+    assert detail["ok"] is True
+    assert detail["session"]["session_id"] == "sid"
+    assert detail["session"]["message_count"] == 3
+    assert detail["messages"][0]["message_id"] == "m2"
+    assert [m["content"] for m in detail["messages"]] == ["second", "third"]
+    assert detail["has_more"] is False
+
+
+async def test_session_detail_rejects_different_workspace(tmp_path: Path) -> None:
+    work_a = tmp_path / "a"
+    work_b = tmp_path / "b"
+    work_a.mkdir()
+    work_b.mkdir()
+
+    class _Store:
+        def get_session(self, session_id: str):
+            return ConversationSession(session_id="sid", cwd=str(work_a.resolve()))
+
+        def get_messages(self, session_id: str, *, limit: int = 100, active_only: bool = True, offset: int = 0):
+            raise AssertionError("messages must not be read across workspace boundaries")
+
+    settings = SimpleNamespace(workspace_root=str(work_b))
+    service = RuntimeLeapService(settings)
+    service._ctx = SimpleNamespace(_conversation_store=_Store(), settings=settings)
+
+    detail = await service.session_detail("sid", workspace_root=str(work_b))
+
+    assert detail["ok"] is False
+    assert detail["code"] == "workspace_mismatch"
+    assert detail["workspace_mismatch"] is True
+    assert detail["expected_workspace_root"] == str(work_a.resolve())
+    assert detail["requested_workspace_root"] == str(work_b.resolve())
+
+
+def test_session_detail_rpc_method_is_registered() -> None:
+    from leapflow.daemon.protocol import METHOD_REGISTRY
+
+    assert METHOD_REGISTRY["session.detail"] == "session_detail"
+
+
+def test_session_tool_workspace_prefers_current_tool_context(tmp_path: Path) -> None:
+    from leapflow.cli.context import _active_tool_workspace_root
+    from leapflow.tools.execution_context import ToolExecutionContext, reset_tool_context, set_tool_context
+
+    fallback = tmp_path / "daemon-start-workspace"
+    active = tmp_path / "active-tui-workspace"
+    fallback.mkdir()
+    active.mkdir()
+    token = set_tool_context(ToolExecutionContext.from_strings(workspace_root=str(active)))
+    try:
+        resolved = _active_tool_workspace_root(str(fallback))
+    finally:
+        reset_tool_context(token)
+
+    assert resolved == str(active.resolve())
+    assert _active_tool_workspace_root(str(fallback)) == str(fallback)
 
 
 # ── session template render ──────────────────────────────────────────────────

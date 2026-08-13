@@ -83,13 +83,24 @@ class ConversationStore(Protocol):
 
     def create_session(self, session_id: str, *, title: str = "", **kwargs: Any) -> ConversationSession: ...
     def get_session(self, session_id: str) -> Optional[ConversationSession]: ...
-    def list_sessions(self, *, limit: int = 20, active_only: bool = True) -> List[ConversationSession]: ...
+    def list_sessions(
+        self, *, limit: int = 20, active_only: bool = True, cwd: Optional[str] = None
+    ) -> List[ConversationSession]: ...
     def append_message(self, session_id: str, role: str, content: str, **kwargs: Any) -> ConversationMessage: ...
     def reserve_tool_execution(self, record: "ToolExecutionRecord") -> None: ...
     def complete_tool_execution(self, record: "ToolExecutionRecord") -> None: ...
     def get_tool_execution_by_key(self, session_id: str, idempotency_key: str) -> Optional["ToolExecutionRecord"]: ...
-    def get_messages(self, session_id: str, *, limit: int = 100, active_only: bool = True) -> List[ConversationMessage]: ...
-    def search_messages(self, query: str, *, limit: int = 10) -> List[ConversationSearchResult]: ...
+    def get_messages(
+        self, session_id: str, *, limit: int = 100, active_only: bool = True, offset: int = 0
+    ) -> List[ConversationMessage]: ...
+    def search_messages(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        role_filter: Optional[str] = None,
+        cwd: Optional[str] = None,
+    ) -> List[ConversationSearchResult]: ...
     def close(self) -> None: ...
 
 
@@ -271,13 +282,21 @@ class DuckDBConversationStore:
         return self._row_to_session(rows[0])
 
     def list_sessions(
-        self, *, limit: int = 20, active_only: bool = True
+        self, *, limit: int = 20, active_only: bool = True, cwd: Optional[str] = None
     ) -> List[ConversationSession]:
+        conditions: list[str] = []
+        params: list[Any] = []
         sql = "SELECT * FROM conversation_sessions"
         if active_only:
-            sql += " WHERE is_active = TRUE"
+            conditions.append("is_active = TRUE")
+        if cwd:
+            conditions.append("cwd = ?")
+            params.append(cwd)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY updated_at DESC LIMIT ?"
-        rows = self._conn.execute(sql, [limit]).fetchall()
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_session(r) for r in rows]
 
     def append_message(
@@ -403,12 +422,17 @@ class DuckDBConversationStore:
         *,
         limit: int = 100,
         active_only: bool = True,
+        offset: int = 0,
     ) -> List[ConversationMessage]:
+        limit = max(0, int(limit))
+        offset = max(0, int(offset))
+        if limit <= 0:
+            return []
         sql = "SELECT * FROM conversation_messages WHERE session_id = ?"
         if active_only:
             sql += " AND active = TRUE"
-        sql += " ORDER BY created_at ASC LIMIT ?"
-        rows = self._conn.execute(sql, [session_id, limit]).fetchall()
+        sql += " ORDER BY created_at ASC LIMIT ? OFFSET ?"
+        rows = self._conn.execute(sql, [session_id, limit, offset]).fetchall()
         return [self._row_to_message(r) for r in rows]
 
     def _prepare_fts_query(self, query: str) -> str:
@@ -427,8 +451,9 @@ class DuckDBConversationStore:
         *,
         limit: int = 10,
         role_filter: Optional[str] = None,
+        cwd: Optional[str] = None,
     ) -> List[ConversationSearchResult]:
-        """Full-text search across all sessions' messages."""
+        """Full-text search across messages, optionally scoped to one workspace."""
         if not query or len(query.strip()) < 2:
             return []
 
@@ -451,6 +476,9 @@ class DuckDBConversationStore:
                 WHERE m.active = TRUE
             """
             params: list[Any] = [fts_query]
+            if cwd:
+                fts_sql += " AND s.cwd = ?"
+                params.append(cwd)
             if role_filter:
                 fts_sql += " AND m.role = ?"
                 params.append(role_filter)
@@ -467,7 +495,7 @@ class DuckDBConversationStore:
                 for r in rows
             ]
         except Exception:
-            return self._fallback_search(query_safe, limit=limit, role_filter=role_filter)
+            return self._fallback_search(query_safe, limit=limit, role_filter=role_filter, cwd=cwd)
 
     def _fallback_search(
         self,
@@ -475,6 +503,7 @@ class DuckDBConversationStore:
         *,
         limit: int = 10,
         role_filter: Optional[str] = None,
+        cwd: Optional[str] = None,
     ) -> List[ConversationSearchResult]:
         """LIKE-based fallback when FTS is unavailable. Uses OR-based keyword matching."""
         # Tokenize into meaningful keywords for OR-based search
@@ -491,6 +520,9 @@ class DuckDBConversationStore:
             WHERE m.active = TRUE AND ({or_conds})
         """
         params: list[Any] = [f"%{kw}%" for kw in keywords]
+        if cwd:
+            sql += " AND s.cwd = ?"
+            params.append(cwd)
         if role_filter:
             sql += " AND m.role = ?"
             params.append(role_filter)
