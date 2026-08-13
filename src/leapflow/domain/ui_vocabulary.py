@@ -30,7 +30,7 @@ ACTION_TO_TOOL: Dict[str, str] = {
     "ui.shortcut": "shortcut",
     "clipboard.copy": "get_clipboard",
     "app.switch": "switch_app",
-    "ui.scroll": "shortcut",
+    "ui.scroll": "scroll",
 }
 
 TOOL_TO_ACTION: Dict[str, str] = {
@@ -42,6 +42,7 @@ TOOL_TO_ACTION: Dict[str, str] = {
     "switch_app": "app.switch",
     "open_url": "app.switch",
     "observe_ui": "ui.click",
+    "scroll": "ui.scroll",
 }
 
 

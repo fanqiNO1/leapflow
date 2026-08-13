@@ -941,6 +941,10 @@ class CuaDriverClient(HostRpc):
             args: Dict[str, Any] = {}
             if app:
                 args[_launch_app_key(app)] = app
+            urls = params.get("urls")
+            if isinstance(urls, list) and urls:
+                # Driver-native: file paths/URLs handed to the app as open targets.
+                args["urls"] = [str(u) for u in urls]
             return "launch_app", args
 
         elif method == Methods.APP_ACTIVATE:

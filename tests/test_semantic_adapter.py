@@ -82,15 +82,24 @@ async def test_actions_without_snapshot_return_guidance() -> None:
 
 
 @pytest.mark.asyncio
-async def test_scroll_without_target_uses_focused_scroller() -> None:
+async def test_scroll_requires_window_target() -> None:
     adapter = _adapter()
+    result = await adapter.scroll({"direction": "down"})
+    assert result["ok"] is False and result["error"] == "missing_window_target"
+
+
+@pytest.mark.asyncio
+async def test_scroll_carries_window_pid_for_keystroke_path() -> None:
+    adapter = _adapter()
+    await adapter.observe_ui({"pid": 100, "window_id": 1})
     result = await adapter.scroll({"direction": "up", "amount": 5})
     assert result["ok"] is True
 
     execution: MockExecutionAdapter = adapter._execution  # type: ignore[assignment]
     record = next(r for r in execution.history if r["type"] == "scroll")
-    assert record["node_id"] == ""  # no target — driver keystroke path
+    assert record["node_id"] == ""  # no element target — keystroke path
     assert record["direction"] == "up" and record["amount"] == 5
+    assert (record["pid"], record["window_id"]) == (100, 1)  # driver requires pid
 
 
 @pytest.mark.asyncio

@@ -49,6 +49,11 @@ def test_app_launch_maps_to_schema_fields() -> None:
     assert args == {"bundle_id": "com.apple.calculator"}
     assert "path" not in args and "app_name" not in args
 
+    tool, args = client._map_to_cua_tool(
+        Methods.APP_LAUNCH, {"name": "notepad", "urls": ["C:/tmp/a.txt"]}
+    )
+    assert args == {"name": "notepad", "urls": ["C:/tmp/a.txt"]}
+
 
 # ── window state / discovery / activation ────────────────────────────────────
 

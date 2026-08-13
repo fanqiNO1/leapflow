@@ -115,7 +115,9 @@ class ExecutionPort(Protocol):
 
     async def perform_file_op(self, op: str, params: Dict[str, Any]) -> Dict[str, Any]: ...
     async def exec_shell(self, command: str) -> Dict[str, Any]: ...
-    async def launch_app(self, app_id: str) -> Dict[str, Any]: ...
+    async def launch_app(
+        self, app_id: str, urls: Optional[List[str]] = None
+    ) -> Dict[str, Any]: ...
     async def perform_ui_action(
         self, node_id: str, action: str, params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]: ...
@@ -204,9 +206,10 @@ class ToolBridge:
             lambda p: ex.exec_shell(p.get("command", "")),
         )
         self._register(
-            "launch_app", "Launch an application by bundle ID",
-            {"app_id": "string (required) — application bundle ID"},
-            lambda p: ex.launch_app(p.get("app_id", "")),
+            "launch_app", "Launch an application by bundle ID (backgrounded)",
+            {"app_id": "string (required) — application bundle ID",
+             "urls": "array (optional) — file paths/URLs the app opens on launch"},
+            lambda p: ex.launch_app(p.get("app_id", ""), p.get("urls") or None),
             mutates_state=True,
         )
         self._register(

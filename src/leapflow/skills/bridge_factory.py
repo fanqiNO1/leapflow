@@ -171,12 +171,14 @@ def build_tool_bridge(
     )
     bridge.register(
         "scroll",
-        "Scroll a scrollable area. Omit element_index to scroll the focused/page scroller; "
-        "pass one to scroll an exact element from the latest snapshot.",
+        "Scroll a scrollable area of a window. Omit element_index to scroll the window's "
+        "focused/page scroller; pass one to scroll an exact element from the latest snapshot.",
         {
             "element_index": "int (optional) — scroll target from observe_ui, omit for focused scroller",
             "direction": "string (optional, default='down') — up/down/left/right",
             "amount": "number (optional, default=3) — scroll units (1-20)",
+            "pid": "int (optional) — window's process ID, default = last observed window",
+            "window_id": "int (optional) — window ID, default = last observed window",
         },
         adapter.scroll,
         mutates_state=True,

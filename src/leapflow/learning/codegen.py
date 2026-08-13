@@ -134,9 +134,10 @@ _VSI_INTERFACE_DOCS = textwrap.dedent("""\
         File operations. op: "copy"|"move"|"create"|"delete"|"rename"
         params: {"source": path, "destination": path} or {"path": path, "content": str}
     - `await execution.perform_ui_action(node_id: str, action: str, params: Optional[Dict] = None) -> Dict`
-        Interact with UI elements. action: "click"|"type"|"select"|"scroll"
-    - `await execution.launch_app(app_id: str) -> Dict[str, Any]`
-        Launch an application by bundle ID.
+        Interact with UI elements. action: "press"|"type_text"|"set_value"|"show_menu"|"double_click"
+    - `await execution.launch_app(app_id: str, urls: Optional[List[str]] = None) -> Dict[str, Any]`
+        Launch an application (backgrounded). Optional urls are file paths/URLs
+        the app opens on launch. Returns the launched pid and windows records.
     - `await execution.run_intent(intent_name: str, params: Dict[str, Any]) -> Dict[str, Any]`
         Execute a system intent (share, open-with, etc.).
     - `await execution.exec_shell(command: str) -> Dict[str, Any]`
@@ -760,7 +761,7 @@ def build_default_context(
             "PerceptionPort.stream_events() -> AsyncIterator[SystemEvent]",
             "ExecutionPort.perform_file_op(op: str, params: Dict) -> Dict",
             "ExecutionPort.perform_ui_action(node_id: str, action: str, params: Optional[Dict]) -> Dict",
-            "ExecutionPort.launch_app(app_id: str) -> Dict",
+            "ExecutionPort.launch_app(app_id: str, urls: Optional[List[str]] = None) -> Dict",
             "ExecutionPort.run_intent(intent_name: str, params: Dict) -> Dict",
             "ExecutionPort.exec_shell(command: str) -> Dict",
         ],

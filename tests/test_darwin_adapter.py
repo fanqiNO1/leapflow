@@ -264,14 +264,19 @@ async def test_execution_perform_ui_action_rejects_stale_token(adapters: Adapter
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="notepad round-trip is Windows-only")
-@pytest.mark.skipif(
-    os.environ.get("LEAPFLOW_TEST_INTERACTIVE") != "1",
-    reason="steals focus and opens windows; set LEAPFLOW_TEST_INTERACTIVE=1 to run",
-)
 async def test_execution_notepad_input_roundtrip(adapters: Adapters) -> None:
     """launch/activate/type_text/shortcut/scroll round-trip, verified via clipboard."""
     text = "leapflow input roundtrip input test"
-    launch = await adapters.darwin_execution.launch_app("notepad")
+
+    # Modern Windows Notepad restores the previous session; open a fresh
+    # empty file so the focused tab is clean and select-all captures only
+    # what this test types. Close the handle so notepad can open the file.
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
+    temp_file.close()
+
+    launch = await adapters.darwin_execution.launch_app(
+        "notepad", urls=[temp_file.name]
+    )
     assert launch.get("ok") is True, launch
     pid = launch.get("pid")
     assert isinstance(pid, int) and pid > 0, launch
@@ -311,12 +316,19 @@ async def test_execution_notepad_input_roundtrip(adapters: Adapters) -> None:
         clipboard = await adapters.darwin_perception.get_clipboard()
         assert clipboard.get("text") == text, clipboard
 
-        # Targetless scroll drives the focused scroller (keystroke path).
-        scrolled = await adapters.darwin_execution.scroll("", "down", 2)
+        # Targetless scroll drives the window's focused scroller (keystroke
+        # path); the driver requires pid/window_id even without an element.
+        scrolled = await adapters.darwin_execution.scroll(
+            "", "down", 2, pid=pid, window_id=window_id
+        )
         assert scrolled.get("ok") is True, scrolled
     finally:
         subprocess.run(
             ["taskkill", "/PID", str(pid), "/F", "/T"],
             capture_output=True, timeout=10,
         )
+        try:
+            os.unlink(temp_file.name)
+        except OSError:
+            pass
 

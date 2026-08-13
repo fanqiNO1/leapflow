@@ -102,7 +102,9 @@ class ExecutionPort(Protocol):
     async def perform_ui_action(
         self, node_id: str, action: str, params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]: ...
-    async def launch_app(self, app_id: str) -> Dict[str, Any]: ...
+    async def launch_app(
+        self, app_id: str, urls: Optional[List[str]] = None
+    ) -> Dict[str, Any]: ...
     async def exec_shell(self, command: str) -> Dict[str, Any]: ...
     async def set_clipboard(self, text: str) -> Dict[str, Any]: ...
     async def type_text(self, text: str) -> Dict[str, Any]: ...
@@ -111,7 +113,14 @@ class ExecutionPort(Protocol):
         self, pid: int, window_id: Optional[int] = None
     ) -> Dict[str, Any]: ...
     async def list_apps(self) -> Dict[str, Any]: ...
-    async def scroll(self, node_id: str, direction: str, amount: int = 3) -> Dict[str, Any]: ...
+    async def scroll(
+        self,
+        node_id: str,
+        direction: str,
+        amount: int = 3,
+        pid: Optional[int] = None,
+        window_id: Optional[int] = None,
+    ) -> Dict[str, Any]: ...
 
 
 class SemanticAdapter:
@@ -385,12 +394,22 @@ class SemanticAdapter:
     _SCROLL_DIRECTIONS = ("up", "down", "left", "right")
 
     async def scroll(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Scroll an element (by index) or the focused scroller."""
+        """Scroll an element (by index) or the target window's focused scroller."""
         direction = params.get("direction", "down")
         amount = min(max(int(params.get("amount", 3)), 1), 20)
 
         if direction not in self._SCROLL_DIRECTIONS:
             return {"ok": False, "error": f"invalid_direction: {direction} (use up/down/left/right)"}
+
+        # The driver requires pid even on the targetless keystroke path.
+        window = _window_target(params) or self._current_target()
+        if window is None:
+            return {
+                "ok": False,
+                "error": "missing_window_target",
+                "suggestion": "call observe_ui(pid, window_id) first",
+            }
+        pid, window_id = window
 
         target = ""
         if params.get("element_index") is not None:
@@ -398,10 +417,10 @@ class SemanticAdapter:
             if element is None:
                 return error
             target = element.target
-        # Without a target the driver's keystroke path drives the focused
-        # scroller — no scrollable-role guessing needed.
 
-        await self._execution.scroll(target, direction, amount)
+        await self._execution.scroll(
+            target, direction, amount, pid=pid, window_id=window_id
+        )
         state = await self._refresh_after_action()
         return {"ok": True, "direction": direction, "amount": amount, **state}
 

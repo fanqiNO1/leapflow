@@ -156,8 +156,10 @@ class MockExecutionAdapter:
         self.history.append(record)
         return {"ok": True, "mock": True}
 
-    async def launch_app(self, app_id: str) -> Dict[str, Any]:
-        record = {"type": "launch_app", "app_id": app_id}
+    async def launch_app(
+        self, app_id: str, urls: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        record = {"type": "launch_app", "app_id": app_id, "urls": list(urls or [])}
         self.history.append(record)
         return {
             "ok": True,
@@ -250,9 +252,17 @@ class MockExecutionAdapter:
         return {"ok": True, "mock": True}
 
     async def scroll(
-        self, node_id: str, direction: str, amount: int = 3
+        self,
+        node_id: str,
+        direction: str,
+        amount: int = 3,
+        pid: Optional[int] = None,
+        window_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        record = {"type": "scroll", "node_id": node_id, "direction": direction, "amount": amount}
+        record = {
+            "type": "scroll", "node_id": node_id, "direction": direction,
+            "amount": amount, "pid": pid, "window_id": window_id,
+        }
         self.history.append(record)
         return {"ok": True, "mock": True}
 

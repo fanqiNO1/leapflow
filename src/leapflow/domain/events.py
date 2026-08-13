@@ -120,7 +120,9 @@ class ExecutionPort(Protocol):
         self, node_id: str, action: str, params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]: ...
 
-    async def launch_app(self, app_id: str) -> Dict[str, Any]: ...
+    async def launch_app(
+        self, app_id: str, urls: Optional[List[str]] = None
+    ) -> Dict[str, Any]: ...
 
     async def activate_app(
         self, pid: int, window_id: Optional[int] = None

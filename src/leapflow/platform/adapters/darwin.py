@@ -151,8 +151,13 @@ class DarwinExecutionAdapter:
             {"node_id": node_id, "action": action, **(params or {})},
         )
 
-    async def launch_app(self, app_id: str) -> Dict[str, Any]:
-        result = await self._rpc.call(Methods.APP_LAUNCH, {"bundle_id": app_id})
+    async def launch_app(
+        self, app_id: str, urls: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"bundle_id": app_id}
+        if urls:
+            params["urls"] = list(urls)
+        result = await self._rpc.call(Methods.APP_LAUNCH, params)
         return result if isinstance(result, dict) else {"ok": True, "result": result}
 
     async def run_intent(self, intent_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -219,11 +224,23 @@ class DarwinExecutionAdapter:
         return await self._rpc.call(Methods.INPUT_SHORTCUT, {"keys": keys})
 
     async def scroll(
-        self, node_id: str, direction: str, amount: int = 3
+        self,
+        node_id: str,
+        direction: str,
+        amount: int = 3,
+        pid: Optional[int] = None,
+        window_id: Optional[int] = None,
     ) -> Dict[str, Any]:
+        # The driver's keystroke scroll path requires pid even without an
+        # element target (verified on 0.19.3 despite the doc marking it
+        # optional) — it must know which process receives the keystrokes.
         params: Dict[str, Any] = {"direction": direction, "amount": amount}
         if node_id:
             params["node_id"] = node_id
+        if pid is not None:
+            params["pid"] = pid
+        if window_id is not None:
+            params["window_id"] = window_id
         return await self._rpc.call(Methods.AX_SCROLL, params)
 
     async def capture_screenshot(
