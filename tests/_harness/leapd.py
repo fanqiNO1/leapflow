@@ -109,9 +109,6 @@ def hermetic_env(
             "LEAPFLOW_DATA_DIR": str(data_dir),
             "LEAPFLOW_PROFILE": profile,
             "LEAPFLOW_MOCK_HOST": "1",
-            # The mock host reports perception online; keep desktop tools out of
-            # the prompt so cassette fingerprints stay stable.
-            "LEAPFLOW_DESKTOP_TOOLS_ENABLED": "0",
             # Copilot can schedule background LLM predictions from ambient desktop
             # signals; journeys only cassette the foreground product contract.
             "LEAPFLOW_COPILOT_ENABLED": "0",
