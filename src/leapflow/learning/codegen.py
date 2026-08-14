@@ -120,8 +120,10 @@ _VSI_INTERFACE_DOCS = textwrap.dedent("""\
     ### PerceptionPort (read-only system observation)
     - `await perception.subscribe_fs(paths: List[str]) -> str`
         Subscribe to filesystem changes at given paths. Returns subscription ID.
-    - `await perception.read_ui_tree(app_id: Optional[str] = None) -> UINode`
-        Read the accessibility tree of the focused app (or specified app).
+    - `await perception.read_window_state(pid: int, window_id: int, query: str = "") -> UISnapshot`
+        Snapshot one window's actionable elements (flat, element_index-addressed).
+    - `await perception.list_windows() -> Dict[str, Any]`
+        List top-level windows with pid/window_id/title records.
     - `await perception.get_clipboard() -> Dict[str, Any]`
         Read current clipboard content. Returns {"text": ..., "type": ...}.
     - `async for event in perception.stream_events() -> AsyncIterator[SystemEvent]`
@@ -132,9 +134,10 @@ _VSI_INTERFACE_DOCS = textwrap.dedent("""\
         File operations. op: "copy"|"move"|"create"|"delete"|"rename"
         params: {"source": path, "destination": path} or {"path": path, "content": str}
     - `await execution.perform_ui_action(node_id: str, action: str, params: Optional[Dict] = None) -> Dict`
-        Interact with UI elements. action: "click"|"type"|"select"|"scroll"
-    - `await execution.launch_app(app_id: str) -> Dict[str, Any]`
-        Launch an application by bundle ID.
+        Interact with UI elements. action: "press"|"type_text"|"set_value"|"show_menu"|"double_click"
+    - `await execution.launch_app(app_id: str, urls: Optional[List[str]] = None) -> Dict[str, Any]`
+        Launch an application (backgrounded). Optional urls are file paths/URLs
+        the app opens on launch. Returns the launched pid and windows records.
     - `await execution.run_intent(intent_name: str, params: Dict[str, Any]) -> Dict[str, Any]`
         Execute a system intent (share, open-with, etc.).
     - `await execution.exec_shell(command: str) -> Dict[str, Any]`
@@ -752,12 +755,13 @@ def build_default_context(
     return CodeGenContext(
         available_ports=[
             "PerceptionPort.subscribe_fs(paths: List[str]) -> str",
-            "PerceptionPort.read_ui_tree(app_id: Optional[str]) -> UINode",
+            "PerceptionPort.read_window_state(pid: int, window_id: int, query: str = '') -> UISnapshot",
+            "PerceptionPort.list_windows() -> Dict[str, Any]",
             "PerceptionPort.get_clipboard() -> Dict[str, Any]",
             "PerceptionPort.stream_events() -> AsyncIterator[SystemEvent]",
             "ExecutionPort.perform_file_op(op: str, params: Dict) -> Dict",
             "ExecutionPort.perform_ui_action(node_id: str, action: str, params: Optional[Dict]) -> Dict",
-            "ExecutionPort.launch_app(app_id: str) -> Dict",
+            "ExecutionPort.launch_app(app_id: str, urls: Optional[List[str]] = None) -> Dict",
             "ExecutionPort.run_intent(intent_name: str, params: Dict) -> Dict",
             "ExecutionPort.exec_shell(command: str) -> Dict",
         ],

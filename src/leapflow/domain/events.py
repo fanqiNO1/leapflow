@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, AsyncIterator, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 # ── Event priority levels ──
 # Higher value = higher urgency. Used by downstream consumers (queues,
@@ -37,18 +37,58 @@ class SystemEvent:
     priority: int = PRIORITY_NORMAL
 
 
-@dataclass
-class UINode:
-    """Normalized UI element tree node."""
+@dataclass(frozen=True)
+class UIElement:
+    """One actionable UI element row from a window snapshot.
 
-    node_id: str
+    Mirrors the driver's get_window_state element record. ``element_index``
+    and ``element_token`` are the action addressing handles; the token is
+    preferred because the driver validates its staleness on every action.
+    """
+
+    element_index: int
     role: str
-    label: str
+    label: str = ""
     value: str = ""
-    children: List["UINode"] = field(default_factory=list)
-    actions: List[str] = field(default_factory=list)
+    element_token: str = ""
+    enabled: bool = True
+    selected: Optional[bool] = None
+    depth: int = 0
+    parent_index: Optional[int] = None
     frame: Optional[Dict[str, float]] = None
-    ax_props: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def target(self) -> str:
+        """Preferred action target: element_token, else the index."""
+        return self.element_token or str(self.element_index)
+
+
+@dataclass(frozen=True)
+class UISnapshot:
+    """Immutable snapshot of one window's actionable elements.
+
+    A snapshot is scoped to (pid, window_id) and superseded by the next
+    read of the same window; ``elements_complete`` and ``coverage`` carry
+    the driver's own statements about what this snapshot cannot see
+    (e.g. browser page content in window scope).
+    """
+
+    pid: int
+    window_id: int
+    snapshot_id: str = ""
+    elements: Tuple[UIElement, ...] = ()
+    elements_complete: bool = True
+    total_element_count: int = 0
+    degraded: bool = False
+    degraded_reason: str = ""
+    coverage: Dict[str, Any] = field(default_factory=dict)
+
+    def find(self, element_index: int) -> Optional[UIElement]:
+        """Look up an element by its index."""
+        for element in self.elements:
+            if element.element_index == element_index:
+                return element
+        return None
 
 
 @runtime_checkable
@@ -57,7 +97,11 @@ class PerceptionPort(Protocol):
 
     async def subscribe_fs(self, paths: List[str]) -> str: ...
 
-    async def read_ui_tree(self, app_id: Optional[str] = None) -> UINode: ...
+    async def read_window_state(
+        self, pid: int, window_id: int, query: str = ""
+    ) -> UISnapshot: ...
+
+    async def list_windows(self) -> Dict[str, Any]: ...
 
     async def get_clipboard(self) -> Dict[str, Any]: ...
 
@@ -76,9 +120,13 @@ class ExecutionPort(Protocol):
         self, node_id: str, action: str, params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]: ...
 
-    async def launch_app(self, app_id: str) -> Dict[str, Any]: ...
+    async def launch_app(
+        self, app_id: str, urls: Optional[List[str]] = None
+    ) -> Dict[str, Any]: ...
 
-    async def activate_app(self, app_id: str) -> Dict[str, Any]: ...
+    async def activate_app(
+        self, pid: int, window_id: Optional[int] = None
+    ) -> Dict[str, Any]: ...
 
     async def run_intent(
         self, intent_name: str, params: Dict[str, Any]
@@ -88,7 +136,7 @@ class ExecutionPort(Protocol):
 
     async def set_clipboard(self, text: str) -> Dict[str, Any]: ...
 
-    async def type_text(self, text: str, method: str = "paste") -> Dict[str, Any]: ...
+    async def type_text(self, text: str) -> Dict[str, Any]: ...
 
     async def send_shortcut(self, keys: str) -> Dict[str, Any]: ...
 

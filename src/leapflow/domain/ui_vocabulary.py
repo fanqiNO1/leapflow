@@ -1,43 +1,17 @@
-"""Shared UI vocabulary — role classifications and action type mappings.
+"""Shared UI vocabulary — ActionType ↔ tool name mappings.
 
-This module is the single source of truth for UI element semantics used by
-both the Recording pipeline (EventNormalizer → ActionAbstractor) and the
-Execution pipeline (SemanticAdapter → UITreeSummarizer). Keeping these
-constants in one place ensures learn→run semantic coherence.
+This module connects the Recording vocabulary (ActionType enum values)
+with the Execution vocabulary (tool names registered in bridge_factory),
+keeping learn→run semantic coherence.
 
-Architecture:
-    Recording (forward):  raw AX role → classify → filter/weight in analysis
-    Execution (reverse):  AX role → classify → filter/prioritize in summarizer
-    Both share the same classification, preventing vocabulary drift.
+Role classification tables were retired with the tree summarizer: the
+driver's get_window_state already returns the filtered, actionable-only
+element list, so no execution-side role filtering remains.
 """
 
 from __future__ import annotations
 
-from typing import Dict, FrozenSet
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Role classifications — what kind of UI element is this?
-# ═══════════════════════════════════════════════════════════════════════════
-
-INTERACTIVE_ROLES: FrozenSet[str] = frozenset({
-    "AXButton", "AXTextField", "AXTextArea", "AXLink",
-    "AXMenuItem", "AXCheckBox", "AXRadioButton", "AXPopUpButton",
-    "AXTab", "AXSlider", "AXComboBox", "AXDisclosureTriangle",
-    "AXIncrementor", "AXColorWell", "AXMenuButton",
-})
-
-LAYOUT_ROLES: FrozenSet[str] = frozenset({
-    "AXGroup", "AXScrollArea", "AXSplitGroup", "AXLayoutArea",
-    "AXList", "AXOutline", "AXTable", "AXRow", "AXColumn",
-    "AXBrowser", "AXScrollBar", "AXRuler", "AXGrowArea",
-    "AXMatte", "AXSplitter",
-})
-
-STRUCTURAL_ROLES: FrozenSet[str] = frozenset({
-    "AXWindow", "AXSheet", "AXDialog", "AXToolbar",
-    "AXMenuBar", "AXMenu",
-})
+from typing import Dict
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -56,7 +30,7 @@ ACTION_TO_TOOL: Dict[str, str] = {
     "ui.shortcut": "shortcut",
     "clipboard.copy": "get_clipboard",
     "app.switch": "switch_app",
-    "ui.scroll": "shortcut",
+    "ui.scroll": "scroll",
 }
 
 TOOL_TO_ACTION: Dict[str, str] = {
@@ -68,6 +42,7 @@ TOOL_TO_ACTION: Dict[str, str] = {
     "switch_app": "app.switch",
     "open_url": "app.switch",
     "observe_ui": "ui.click",
+    "scroll": "ui.scroll",
 }
 
 

@@ -66,6 +66,7 @@ SEMANTIC_TOOL_NAMES: FrozenSet[str] = frozenset({
     "shortcut",
     "switch_app",
     "list_apps",
+    "list_windows",
     "open_url",
     "get_clipboard",
     "set_clipboard",
@@ -80,7 +81,7 @@ SEMANTIC_TOOL_NAMES: FrozenSet[str] = frozenset({
 })
 
 _OBSERVATION_TOOLS: FrozenSet[str] = frozenset({
-    "observe_ui", "list_apps", "read_text", "get_clipboard", "screenshot",
+    "observe_ui", "list_apps", "list_windows", "read_text", "get_clipboard", "screenshot",
 })
 _WAIT_TOOLS: FrozenSet[str] = frozenset({
     "wait", "wait_until", "wait_until_stable",

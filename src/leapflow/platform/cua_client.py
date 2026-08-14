@@ -16,11 +16,13 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import base64
 import concurrent.futures
 import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -467,12 +469,28 @@ def _is_closed_session_error(exc: Exception) -> bool:
 
 def _clipboard_get() -> str:
     """Read clipboard via platform-native command."""
-    if sys.platform == "darwin":
-        cmd = ["pbpaste"]
-    elif sys.platform == "win32":
-        cmd = ["powershell", "-command", "Get-Clipboard"]
-    else:
-        cmd = ["xclip", "-selection", "clipboard", "-o"]
+    if sys.platform == "win32":
+        # -Raw preserves the clipboard text verbatim (the default mode
+        # returns a line array and reflows newlines). Force UTF-8 output —
+        # the default console codepage mangles CJK.
+        cmd = [
+            "powershell", "-NoProfile", "-Command",
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard -Raw",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=5.0)
+            text = result.stdout.decode("utf-8", errors="replace")
+            # PowerShell appends exactly one trailing newline to stdout;
+            # strip only that one so genuine trailing newlines survive.
+            if text.endswith("\r\n"):
+                return text[:-2]
+            if text.endswith("\n"):
+                return text[:-1]
+            return text
+        except Exception as e:
+            raise RpcError("clipboard_error", f"Failed to read clipboard: {e}", {})
+
+    cmd = ["pbpaste"] if sys.platform == "darwin" else ["xclip", "-selection", "clipboard", "-o"]
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True,
@@ -485,20 +503,29 @@ def _clipboard_get() -> str:
 
 def _clipboard_set(text: str) -> None:
     """Write clipboard via platform-native command."""
-    if sys.platform == "darwin":
-        cmd = ["pbcopy"]
-    elif sys.platform == "win32":
-        cmd = ["powershell", "-command", "Set-Clipboard", "-Value", text]
-    else:
-        cmd = ["xclip", "-selection", "clipboard"]
-
-    try:
-        if sys.platform == "win32":
+    if sys.platform == "win32":
+        # PowerShell -Command re-parses the joined argv, stripping the
+        # quoting subprocess added — any text with spaces breaks parameter
+        # binding. Base64 transport is immune to spaces/quotes/CJK/$.
+        encoded = base64.b64encode(text.encode("utf-16-le")).decode("ascii")
+        script = (
+            "$t=[Text.Encoding]::Unicode.GetString("
+            f"[Convert]::FromBase64String('{encoded}'));"
+            "if ($t.Length -gt 0) { Set-Clipboard -Value $t }"
+            " else { Set-Clipboard -Value $null }"
+        )
+        cmd = ["powershell", "-NoProfile", "-Command", script]
+        try:
             subprocess.run(cmd, capture_output=True, timeout=5.0, check=True)
-        else:
-            subprocess.run(
-                cmd, input=text, capture_output=True, text=True, timeout=5.0, check=True
-            )
+        except Exception as e:
+            raise RpcError("clipboard_error", f"Failed to set clipboard: {e}", {})
+        return
+
+    cmd = ["pbcopy"] if sys.platform == "darwin" else ["xclip", "-selection", "clipboard"]
+    try:
+        subprocess.run(
+            cmd, input=text, capture_output=True, text=True, timeout=5.0, check=True
+        )
     except Exception as e:
         raise RpcError("clipboard_error", f"Failed to set clipboard: {e}", {})
 
@@ -519,14 +546,14 @@ def _file_list(params: Dict[str, Any]) -> List[Dict[str, Any]]:
     return entries
 
 
-def _file_move(params: Dict[str, Any]) -> Dict[str, str]:
+def _file_move(params: Dict[str, Any]) -> Dict[str, Any]:
     src = Path(params["source"])
     dst = Path(params["destination"])
     src.rename(dst)
-    return {"moved": str(dst)}
+    return {"ok": True, "moved": str(dst)}
 
 
-def _file_copy(params: Dict[str, Any]) -> Dict[str, str]:
+def _file_copy(params: Dict[str, Any]) -> Dict[str, Any]:
     import shutil as _shutil
     src = Path(params["source"])
     dst = Path(params["destination"])
@@ -534,17 +561,17 @@ def _file_copy(params: Dict[str, Any]) -> Dict[str, str]:
         _shutil.copytree(str(src), str(dst))
     else:
         _shutil.copy2(str(src), str(dst))
-    return {"copied": str(dst)}
+    return {"ok": True, "copied": str(dst)}
 
 
-def _file_delete(params: Dict[str, Any]) -> Dict[str, str]:
+def _file_delete(params: Dict[str, Any]) -> Dict[str, Any]:
     import shutil as _shutil
     target = Path(params["path"])
     if target.is_dir():
         _shutil.rmtree(str(target))
     else:
         target.unlink()
-    return {"deleted": str(target)}
+    return {"ok": True, "deleted": str(target)}
 
 
 # ── Dispatch helpers ─────────────────────────────────────────────────────────
@@ -552,65 +579,115 @@ def _file_delete(params: Dict[str, Any]) -> Dict[str, str]:
 def _launch_app_key(app: str) -> str:
     """Pick the launch_app schema field for an app identifier.
 
-    cua-driver 0.17 distinguishes AUMIDs (``bundle_id``), executable paths
-    (``path``), and plain aliases (``name``); sending the wrong one makes
-    resolution fail.
+    cua-driver 0.19.3 launch_app accepts ``bundle_id`` (preferred) or
+    ``name`` only. AUMIDs (``!``) and reverse-DNS identifiers (at least
+    two dots, no path separators or spaces) are bundle ids; everything
+    else — display names and executable paths — goes through ``name``.
     """
     if "!" in app:
         return "bundle_id"
-    if "/" in app or "\\" in app:
-        return "path"
+    if (
+        app.count(".") >= 2
+        and "/" not in app
+        and "\\" not in app
+        and " " not in app
+    ):
+        return "bundle_id"
     return "name"
 
 
-def _resolve_ax_perform_tool(params: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    """Map ax.perform params to the appropriate cua-driver tool + args.
+# ax.perform action → (cua tool, forced args). Covers the click tool's action
+# vocabulary (press/show_menu/pick/confirm/cancel/open), the discrete
+# double_click/right_click/type_text/set_value tools, and the legacy AX action
+# names emitted by SemanticAdapter. Unknown actions fall back to a plain click.
+_AX_ACTION_TABLE: Dict[str, Tuple[str, Dict[str, Any]]] = {
+    "click": ("click", {}),
+    "press": ("click", {}),
+    "AXPress": ("click", {}),
+    "AXShowDefaultUI": ("click", {}),
+    "open": ("click", {"action": "open"}),
+    "pick": ("click", {"action": "pick"}),
+    "select": ("click", {"action": "pick"}),
+    "confirm": ("click", {"action": "confirm"}),
+    "cancel": ("click", {"action": "cancel"}),
+    "double_click": ("double_click", {}),
+    "AXOpen": ("double_click", {}),
+    "right_click": ("right_click", {}),
+    "show_menu": ("right_click", {}),
+    "AXShowMenu": ("right_click", {}),
+    "type": ("type_text", {}),
+    "type_text": ("type_text", {}),
+    "set_value": ("set_value", {}),
+}
 
-    cua-driver splits AX actions into discrete tools: click, type_text,
-    set_value. We infer the target from the `action` param.
+
+def _element_target_args(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract cua-driver element/pixel target args from neutral params.
+
+    ``element_token`` is preferred (it carries pid/window/snapshot); an
+    int-like ``node_id`` is treated as an ``element_index``, anything else
+    as a token. Pixel coordinates land as separate ``x``/``y`` fields —
+    0.19.3 has no ``coordinates`` parameter.
     """
-    action = params.get("action", "")
-    element_index = params.get("element_index")
-    element_token = params.get("element_token")
+    args: Dict[str, Any] = {}
 
-    # Common args shared across tools
-    base_args: Dict[str, Any] = {}
-    if element_index is not None:
-        base_args["element_index"] = element_index
-    if element_token is not None:
-        base_args["element_token"] = element_token
+    if params.get("element_token"):
+        args["element_token"] = params["element_token"]
+    elif params.get("element_index") is not None:
+        args["element_index"] = params["element_index"]
+    else:
+        node_id = str(params.get("node_id", "") or "")
+        if node_id.isdigit():
+            args["element_index"] = int(node_id)
+        elif node_id:
+            args["element_token"] = node_id
 
-    # Delivery mode for Verify-Then-Escalate
+    for key in ("snapshot_id", "pid", "window_id"):
+        if key in params:
+            args[key] = params[key]
+
+    coords = params.get("coordinates")
+    if isinstance(coords, dict) and "x" in coords and "y" in coords:
+        args["x"], args["y"] = coords["x"], coords["y"]
+    elif isinstance(coords, (list, tuple)) and len(coords) == 2:
+        args["x"], args["y"] = coords[0], coords[1]
+    for key in ("x", "y"):
+        if key in params:
+            args[key] = params[key]
+    return args
+
+
+def _resolve_ax_perform_tool(params: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """Map ax.perform params to the appropriate cua-driver tool + args."""
+    action = str(params.get("action", "") or "click")
+    tool, forced = _AX_ACTION_TABLE.get(action, ("click", {}))
+
+    args = _element_target_args(params)
+
     delivery_mode = params.get("delivery_mode", "background")
     if delivery_mode != "background":
-        base_args["delivery_mode"] = delivery_mode
+        args["delivery_mode"] = delivery_mode
 
-    if action in ("click", "double_click", "right_click"):
-        args = {**base_args, "action": action}
-        if "coordinates" in params:
-            args["coordinates"] = params["coordinates"]
-        return "click", args
+    if tool == "type_text" and "text" in params:
+        args["text"] = params["text"]
+    if tool == "set_value" and "value" in params:
+        args["value"] = params["value"]
 
-    elif action in ("type", "type_text"):
-        args = {**base_args}
-        if "text" in params:
-            args["text"] = params["text"]
-        return "type_text", args
+    args.update(forced)
+    return tool, args
 
-    elif action == "set_value":
-        args = {**base_args}
-        if "value" in params:
-            args["value"] = params["value"]
-        return "set_value", args
 
-    elif action == "select":
-        args = {**base_args}
-        return "click", args
+_SHORTCUT_SPLIT_RE = re.compile(r"[+\s]+")
 
-    else:
-        # Fallback: pass action directly as a click variant
-        args = {**base_args, "action": action}
-        return "click", args
+
+def _normalize_shortcut_keys(keys: Any) -> List[str]:
+    """Normalize a shortcut spec ('cmd+c', 'cmd c', or a list) to a key list."""
+    if isinstance(keys, (list, tuple)):
+        return [str(k).strip() for k in keys if str(k).strip()]
+    text = str(keys or "").strip()
+    if not text:
+        return []
+    return [part for part in _SHORTCUT_SPLIT_RE.split(text) if part]
 
 
 # ── CuaDriverClient ──────────────────────────────────────────────────────────
@@ -824,22 +901,39 @@ class CuaDriverClient(HostRpc):
     def _map_to_cua_tool(self, method: str, params: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         """Translate a LeapFlow Methods constant to (cua_tool_name, args)."""
         if method == Methods.AX_TREE:
-            args: Dict[str, Any] = {}
-            app = params.get("app") or params.get("bundle_id")
-            if app:
-                args["app"] = app
-            if "window_id" in params:
-                args["window_id"] = params["window_id"]
+            if "pid" not in params or "window_id" not in params:
+                raise RpcError(
+                    "invalid_params",
+                    "ax.tree requires pid and window_id (discover them via ax.list)",
+                    {"provided": sorted(params.keys())},
+                )
+            args: Dict[str, Any] = {
+                "pid": params["pid"],
+                "window_id": params["window_id"],
+            }
+            for key in ("query", "include_screenshot", "max_elements", "max_depth"):
+                if key in params:
+                    args[key] = params[key]
             return "get_window_state", args
+
+        elif method == Methods.AX_LIST:
+            return "list_windows", {}
 
         elif method == Methods.AX_PERFORM:
             return _resolve_ax_perform_tool(params)
 
         elif method == Methods.AX_SCROLL:
-            args = {}
-            for key in ("x", "y", "direction", "amount", "coordinates", "element_index"):
-                if key in params:
-                    args[key] = params[key]
+            direction = str(params.get("direction", "") or "")
+            if direction not in ("up", "down", "left", "right"):
+                raise RpcError(
+                    "invalid_params",
+                    f"scroll requires direction up/down/left/right, got '{direction}'",
+                    {},
+                )
+            args = _element_target_args(params)
+            args["direction"] = direction
+            if "amount" in params:
+                args["amount"] = int(params["amount"])
             return "scroll", args
 
         elif method == Methods.APP_LAUNCH:
@@ -847,40 +941,68 @@ class CuaDriverClient(HostRpc):
             args: Dict[str, Any] = {}
             if app:
                 args[_launch_app_key(app)] = app
+            urls = params.get("urls")
+            if isinstance(urls, list) and urls:
+                # Driver-native: file paths/URLs handed to the app as open targets.
+                args["urls"] = [str(u) for u in urls]
             return "launch_app", args
 
         elif method == Methods.APP_ACTIVATE:
-            app = params.get("app_name") or params.get("name") or params.get("bundle_id", "")
-            args = {}
-            if app:
-                args[_launch_app_key(app)] = app
-            return "launch_app", args
+            # launch_app is explicitly backgrounded; foreground activation
+            # is bring_to_front, addressed by pid.
+            if "pid" not in params:
+                raise RpcError(
+                    "invalid_params",
+                    "app.activate requires pid (from ax.list or launch_app's response)",
+                    {"provided": sorted(params.keys())},
+                )
+            args = {"pid": params["pid"]}
+            if "window_id" in params:
+                args["window_id"] = params["window_id"]
+            return "bring_to_front", args
 
         elif method == Methods.APP_LIST:
             return "list_apps", {}
 
         elif method == Methods.INPUT_TYPE_TEXT:
             args = {"text": params.get("text", "")}
+            args.update(_element_target_args(params))
+            if "pid" not in args:
+                # Without a pid/window target, desktop scope is the documented
+                # way to type into the frontmost application.
+                args["scope"] = "desktop"
             return "type_text", args
 
         elif method == Methods.INPUT_SHORTCUT:
-            # Parse key combo into cua-driver hotkey format
             keys = params.get("keys", params.get("shortcut", ""))
-            args = {"keys": keys} if isinstance(keys, list) else {"key": keys}
-            return "hotkey", args
+            parts = _normalize_shortcut_keys(keys)
+            if not parts:
+                raise RpcError("invalid_params", "shortcut requires at least one key", {})
+            if len(parts) == 1:
+                # hotkey requires modifiers + one key (>=2 items); a bare key
+                # (enter, escape, tab) is a press_key.
+                args = {"key": parts[0]}
+                tool = "press_key"
+            else:
+                args = {"keys": parts}
+                tool = "hotkey"
+            if "pid" in params:
+                args["pid"] = params["pid"]
+            else:
+                args["scope"] = "desktop"
+            return tool, args
 
         elif method == Methods.SCREEN_CAPTURE_FRAME:
-            app = params.get("app") or params.get("bundle_id")
-            if self._session.has_tool("screenshot"):
-                args = {}
-                if app:
-                    args["app"] = app
-                return "screenshot", args
-            else:
-                args = {}
-                if app:
-                    args["app"] = app
+            # 0.19.3 has no standalone screenshot tool: full-display capture
+            # is get_desktop_state; window capture rides on get_window_state.
+            args = {}
+            if "screenshot_out_file" in params:
+                args["screenshot_out_file"] = params["screenshot_out_file"]
+            if "pid" in params and "window_id" in params:
+                args["pid"] = params["pid"]
+                args["window_id"] = params["window_id"]
                 return "get_window_state", args
+            return "get_desktop_state", args
 
         elif method == Methods.RECORDING_START:
             args: Dict[str, Any] = {}
@@ -969,20 +1091,37 @@ class CuaDriverClient(HostRpc):
 
     @staticmethod
     def _unwrap_result(result: Dict[str, Any]) -> Any:
-        """Unwrap the flattened tool result into caller-friendly form."""
+        """Unwrap the flattened tool result into caller-friendly form.
+
+        Dict payloads gain ``ok: True`` (errors already raised) so callers'
+        envelope checks hold, and MCP image blocks ride along as ``images``
+        instead of being dropped when structured content is present.
+        """
         if result.get("isError"):
             data = result.get("data", "unknown error")
             raise RpcError("cua_tool_error", str(data), result)
-        # Prefer structuredContent, then data, then images
+
+        images = result.get("images") or []
+
+        def _finalize(payload: Dict[str, Any]) -> Dict[str, Any]:
+            out = dict(payload)
+            if images and "images" not in out:
+                out["images"] = images
+            out.setdefault("ok", True)
+            return out
+
         structured = result.get("structuredContent")
+        if isinstance(structured, dict):
+            return _finalize(structured)
         if structured is not None:
             return structured
         data = result.get("data")
+        if isinstance(data, dict):
+            return _finalize(data)
         if data is not None:
             return data
-        images = result.get("images")
         if images:
-            return {"images": images}
+            return {"ok": True, "images": images}
         return None
 
 
@@ -995,17 +1134,33 @@ class _LocalResult(Exception):
         self.data = data
 
 
-def _local_clipboard_get(params: Dict[str, Any]) -> str:
-    return _clipboard_get()
+def _local_clipboard_get(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the PerceptionPort clipboard contract shape.
+
+    The platform command cannot observe change counts, so change_count is 0
+    and change_ts is the read time.
+    """
+    return {
+        "ok": True,
+        "text": _clipboard_get(),
+        "change_count": 0,
+        "change_ts": time.time(),
+    }
 
 
-def _local_clipboard_set(params: Dict[str, Any]) -> None:
+def _local_clipboard_set(params: Dict[str, Any]) -> Dict[str, Any]:
     _clipboard_set(params.get("text", params.get("content", "")))
+    return {"ok": True}
 
 
 def _local_clipboard_last_change(params: Dict[str, Any]) -> Dict[str, Any]:
-    # Best-effort: return current content with no timestamp
-    return {"content": _clipboard_get(), "timestamp": None}
+    # Best-effort: the platform command exposes no change counter.
+    return {
+        "ok": True,
+        "text": _clipboard_get(),
+        "change_count": 0,
+        "change_ts": time.time(),
+    }
 
 
 def _local_fs_subscribe(params: Dict[str, Any]) -> Dict[str, Any]:

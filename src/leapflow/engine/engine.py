@@ -4320,11 +4320,8 @@ class AgentEngine:
         Empty when the bridge is absent or carries no semantic tools
         (perception offline) — the bridge itself is the dynamic on/off switch.
         Cached by bridge object identity so a hot-swapped bridge rebuilds on
-        first access. ``desktop_tools_enabled`` is the process-level master
-        switch (off in the journey harness to keep replayed prompts stable).
+        first access.
         """
-        if not getattr(self._settings, "desktop_tools_enabled", True):
-            return []
         if self._tool_bridge is None:
             return []
         if self._semantic_schema_bridge is not self._tool_bridge:
@@ -4359,8 +4356,7 @@ class AgentEngine:
         from leapflow.skills.semantic_schema import build_semantic_handlers
 
         handlers: Dict[str, Any] = dict(TOOL_HANDLERS)
-        if getattr(self._settings, "desktop_tools_enabled", True):
-            handlers.update(build_semantic_handlers(self._tool_bridge))
+        handlers.update(build_semantic_handlers(self._tool_bridge))
         return handlers
 
     async def _approve_desktop_action(self, name: str, args: Any) -> tuple[bool, str]:

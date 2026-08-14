@@ -123,13 +123,16 @@ def _parse_manifest(raw: dict) -> PlatformManifest:
 # matched nothing here and silently produced an empty capability set.
 _CUA_TOOL_TO_CAPABILITIES: dict[str, list[Capability]] = {
     "get_window_state": [Capability.AX_TREE_READ],
+    "list_windows": [Capability.AX_TREE_READ],
     "click": [Capability.AX_PERFORM_ACTION],
     "type_text": [Capability.AX_PERFORM_ACTION],
     "set_value": [Capability.AX_PERFORM_ACTION],
     "scroll": [Capability.AX_PERFORM_ACTION],
     "hotkey": [Capability.AX_PERFORM_ACTION],
     "screenshot": [Capability.SCREEN_CAPTURE],
+    "get_desktop_state": [Capability.SCREEN_CAPTURE],
     "launch_app": [Capability.APP_LAUNCH],
+    "bring_to_front": [Capability.APP_ACTIVATE],
     "list_apps": [Capability.APP_ACTIVATE],
     # No Capability member exists for recording yet; re-enable by adding e.g.
     # SCREEN_RECORD to the enum and uncommenting:

@@ -2239,25 +2239,6 @@ async def test_unified_catalog_merges_semantic_tools_when_bridge_online() -> Non
 
 
 @pytest.mark.asyncio
-async def test_desktop_tools_flag_disables_semantic_disclosure() -> None:
-    """desktop_tools_enabled=False hides semantic tools even with an online bridge."""
-    bridge, _ = _desktop_bridge()
-    with tempfile.TemporaryDirectory() as td:
-        engine, lt = _build_desktop_engine(td, bridge, desktop_tools_enabled=False)
-        try:
-            catalog_names = {
-                item.get("function", {}).get("name")
-                for item in engine._unified_tool_catalog()
-            }
-            assert "observe_ui" not in catalog_names
-            assert "click" not in catalog_names
-            handlers = engine._unified_tool_handlers()
-            assert "observe_ui" not in handlers and "click" not in handlers
-        finally:
-            lt.close()
-
-
-@pytest.mark.asyncio
 async def test_unified_catalog_rebuilds_when_static_registry_grows() -> None:
     """Tools appended after engine construction (session_search pattern) are picked up."""
     from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS

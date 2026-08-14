@@ -8,7 +8,7 @@ from leapflow.domain.event_types import (
     UIActionSubType,
     UNDO_SHORTCUTS,
 )
-from leapflow.domain.events import SystemEvent, UINode
+from leapflow.domain.events import SystemEvent, UIElement, UISnapshot
 from leapflow.domain.platform import (
     Capability,
     DEFAULT_DARWIN_CAPABILITIES,
@@ -56,7 +56,8 @@ __all__ = [
     "SystemEvent",
     "Trajectory",
     "TrajectoryStep",
-    "UINode",
+    "UIElement",
+    "UISnapshot",
     "action_type_from_event",
     "capability_from_str",
 ]
