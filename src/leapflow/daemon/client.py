@@ -278,6 +278,27 @@ class DaemonClient:
             "session.history", {"limit": limit, "session_id": session_id},
         ) or {})
 
+    async def session_detail(
+        self,
+        session_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+        include_inactive: bool = True,
+        workspace_root: str = "",
+    ) -> dict[str, Any]:
+        """Return a persisted historical session transcript by id."""
+        return dict(await self.request(
+            "session.detail",
+            {
+                "session_id": session_id,
+                "limit": limit,
+                "offset": offset,
+                "include_inactive": include_inactive,
+                "workspace_root": workspace_root,
+            },
+        ) or {})
+
     async def session_analyze(self) -> dict[str, Any]:
         """Ensure a session-analysis watch and run one analysis cycle now."""
         return dict(await self.request("session.analyze") or {})

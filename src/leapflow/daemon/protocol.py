@@ -231,6 +231,17 @@ class LeapService(Protocol):
         """Return a session's transcript and counts (empty id = current session)."""
         ...
 
+    async def session_detail(
+        self,
+        session_id: str,
+        limit: int = 200,
+        offset: int = 0,
+        include_inactive: bool = True,
+        workspace_root: str = "",
+    ) -> Dict[str, Any]:
+        """Return a persisted historical session transcript by id."""
+        ...
+
     async def session_analyze(self) -> Dict[str, Any]:
         """Ensure a session-analysis watch and run one analysis cycle now."""
         ...
@@ -351,6 +362,7 @@ METHOD_REGISTRY: Dict[str, str] = {
     "watch.refresh": "watch_refresh",
     "watch.findings": "watch_findings",
     "session.history": "session_history",
+    "session.detail": "session_detail",
     "session.analyze": "session_analyze",
     "daemon.status": "status",
     "daemon.shutdown": "shutdown",

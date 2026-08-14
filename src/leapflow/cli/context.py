@@ -68,6 +68,21 @@ from leapflow.platform.normalizer import EventNormalizer
 
 logger = logging.getLogger(__name__)
 
+
+def _active_tool_workspace_root(fallback_workspace: str) -> str:
+    """Return the current tool context workspace, or a stable fallback."""
+    try:
+        from leapflow.tools.execution_context import current_tool_context
+
+        tool_ctx = current_tool_context()
+        root = getattr(tool_ctx, "workspace_root", None) if tool_ctx is not None else None
+    except Exception:
+        root = None
+    if root:
+        return str(Path(str(root)).expanduser().resolve())
+    return fallback_workspace
+
+
 if TYPE_CHECKING:
     from leapflow.platform.observers import RecordingProfile
     from leapflow.security.approval import ApprovalDecision, ApprovalRequest
@@ -1761,17 +1776,32 @@ class Context:
 
             self.engine.set_event_bus(self.event_bus)
 
-        # ── Register session_search tool ──
+        # ── Register persisted session tools ──
         if self._conversation_store:
             try:
+                from leapflow.daemon.session_coordinator import SessionCoordinator
                 from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS, TOOL_HANDLERS
                 conv_store = self._conversation_store
+                session_reader = SessionCoordinator()
+                fallback_workspace_cwd = str(Path(str(getattr(self.settings, "workspace_root", "") or os.getcwd())).expanduser().resolve())
 
+                def _json_result(payload: Any) -> str:
+                    import json as _json_sessions
+                    return _json_sessions.dumps(payload, ensure_ascii=False)
+
+                def _bounded_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
+                    try:
+                        parsed = int(value)
+                    except (TypeError, ValueError):
+                        parsed = default
+                    return min(max(parsed, minimum), maximum)
+
+                # ── Register session_search tool ──
                 TOOL_DEFINITIONS.append({
                     "type": "function",
                     "function": {
                         "name": "session_search",
-                        "description": "Search past conversation sessions for relevant context.",
+                        "description": "Search past conversation sessions in the current workspace for relevant context.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -1784,24 +1814,29 @@ class Context:
                 })
 
                 async def _session_search_handler(params: dict) -> dict:
-                    query = params.get("query", "")
-                    limit = int(params.get("limit", 5))
+                    query = str(params.get("query", "") or "")
+                    limit = _bounded_int(params.get("limit", 5), 5, minimum=1, maximum=50)
                     if not query:
                         return {"ok": False, "error": "Missing query parameter"}
-                    results = conv_store.search_messages(query, limit=limit)
+                    workspace_cwd = _active_tool_workspace_root(fallback_workspace_cwd)
+                    results = conv_store.search_messages(query, limit=limit, cwd=workspace_cwd)
                     if not results:
                         return {"ok": True, "result": "No matching sessions found."}
                     items = [
                         {
+                            "session_id": r.session_id,
                             "session": r.session_title or r.session_id[:8],
+                            "session_title": r.session_title,
+                            "message_id": r.message_id,
                             "role": r.role,
                             "content": r.content[:300],
                             "score": round(r.score, 3),
+                            "created_at": r.created_at,
+                            "date": _format_ts(r.created_at),
                         }
                         for r in results
                     ]
-                    import json as _json_ss
-                    return {"ok": True, "result": _json_ss.dumps(items, ensure_ascii=False)}
+                    return {"ok": True, "result": _json_result(items)}
 
                 TOOL_HANDLERS["session_search"] = _session_search_handler
                 TOOL_HANDLERS["gp_session_search"] = _session_search_handler
@@ -1822,7 +1857,7 @@ class Context:
                     "function": {
                         "name": "session_list",
                         "description": (
-                            "List recent conversation sessions with titles, dates, and summaries. "
+                            "List recent conversation sessions in the current workspace with stable ids, titles, dates, and summaries. "
                             "Use for browsing past tasks or when user asks to see history without specific search terms. "
                             "No keywords needed — returns chronological list."
                         ),
@@ -1837,27 +1872,79 @@ class Context:
                 })
 
                 async def _session_list_handler(params: dict) -> dict:
-                    limit = min(int(params.get("limit", 10)), 30)
-                    sessions = conv_store.list_sessions(limit=limit, active_only=False)
+                    limit = _bounded_int(params.get("limit", 10), 10, minimum=1, maximum=30)
+                    workspace_cwd = _active_tool_workspace_root(fallback_workspace_cwd)
+                    sessions = conv_store.list_sessions(limit=limit, active_only=False, cwd=workspace_cwd)
                     items = []
                     for s in sessions:
+                        session_id = str(getattr(s, "session_id", "") or "")
                         item = {
-                            "title": getattr(s, 'title', '') or getattr(s, 'session_id', '')[:8],
-                            "date": _format_ts(getattr(s, 'updated_at', 0) or getattr(s, 'created_at', 0)),
-                            "messages": getattr(s, 'message_count', 0),
+                            "session_id": session_id,
+                            "title": getattr(s, "title", "") or session_id[:8],
+                            "date": _format_ts(getattr(s, "updated_at", 0) or getattr(s, "created_at", 0)),
+                            "created_at": getattr(s, "created_at", 0),
+                            "updated_at": getattr(s, "updated_at", 0),
+                            "messages": getattr(s, "message_count", 0),
+                            "cwd": getattr(s, "cwd", "") or "",
                         }
-                        summary = getattr(s, 'summary', '')
+                        summary = getattr(s, "summary", "")
                         if summary:
                             item["summary"] = summary[:200]
                         items.append(item)
-                    import json as _json_sl
-                    return {"ok": True, "result": _json_sl.dumps(items, ensure_ascii=False)}
+                    return {"ok": True, "result": _json_result(items)}
 
                 TOOL_HANDLERS["session_list"] = _session_list_handler
                 TOOL_HANDLERS["gp_session_list"] = _session_list_handler
                 logger.debug("session_list tool registered")
+
+                # ── Register session_detail tool ──
+                TOOL_DEFINITIONS.append({
+                    "type": "function",
+                    "function": {
+                        "name": "session_detail",
+                        "description": (
+                            "Read a paginated persisted transcript for one past conversation session in the current workspace. "
+                            "Use after session_list or session_search returns a session_id."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "session_id": {"type": "string", "description": "Exact session_id from session_list or session_search"},
+                                "limit": {"type": "integer", "description": "Max messages to return (default: 200, max: 1000)"},
+                                "offset": {"type": "integer", "description": "Message offset for pagination (default: 0)"},
+                                "include_inactive": {"type": "boolean", "description": "Include inactive or compacted messages (default: true)"},
+                            },
+                            "required": ["session_id"],
+                        },
+                    },
+                })
+
+                async def _session_detail_handler(params: dict) -> dict:
+                    session_id = str(params.get("session_id", "") or "").strip()
+                    limit = _bounded_int(params.get("limit", 200), 200, minimum=1, maximum=1000)
+                    offset = _bounded_int(params.get("offset", 0), 0, minimum=0, maximum=1_000_000)
+                    include_inactive = bool(params.get("include_inactive", True))
+                    workspace_cwd = _active_tool_workspace_root(fallback_workspace_cwd)
+                    detail = await session_reader.get_detail(
+                        self,
+                        self.settings,
+                        session_id,
+                        limit=limit,
+                        offset=offset,
+                        include_inactive=include_inactive,
+                        workspace_root=workspace_cwd,
+                    )
+                    ok = bool(detail.get("ok", False))
+                    response = {"ok": ok, "result": _json_result(detail)}
+                    if not ok:
+                        response["error"] = str(detail.get("error", "session detail unavailable"))
+                    return response
+
+                TOOL_HANDLERS["session_detail"] = _session_detail_handler
+                TOOL_HANDLERS["gp_session_detail"] = _session_detail_handler
+                logger.debug("session_detail tool registered")
             except Exception:
-                logger.debug("session_search tool registration failed", exc_info=True)
+                logger.debug("persisted session tool registration failed", exc_info=True)
 
         # NOTE: PipelineObserver, ObservationDaemon, ColdStart, PatternMiner,
         # ImplicitFeedback are assembled in initialize_deferred()

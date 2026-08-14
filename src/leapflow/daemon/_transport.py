@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Any, Tuple
 
 
+RPC_STREAM_LIMIT = 4 * 1024 * 1024
+
+
 class DaemonTransport(abc.ABC):
     """Abstract base for daemon IPC transport."""
 
@@ -57,11 +60,12 @@ class UnixSocketTransport(DaemonTransport):
         return await asyncio.start_unix_server(
             client_connected_cb,
             path=str(sock_path),
+            limit=RPC_STREAM_LIMIT,
         )
 
     async def connect(self, runtime_dir: Path) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         sock_path = self._sock_path(runtime_dir)
-        return await asyncio.open_unix_connection(str(sock_path))
+        return await asyncio.open_unix_connection(str(sock_path), limit=RPC_STREAM_LIMIT)
 
     def probe_healthy(self, runtime_dir: Path) -> bool:
         sock_path = self._sock_path(runtime_dir)
@@ -106,6 +110,7 @@ class TcpLoopbackTransport(DaemonTransport):
             client_connected_cb,
             host="127.0.0.1",
             port=0,
+            limit=RPC_STREAM_LIMIT,
         )
         # Extract the assigned port from the server socket and persist it.
         addr = server.sockets[0].getsockname()
@@ -116,7 +121,7 @@ class TcpLoopbackTransport(DaemonTransport):
 
     async def connect(self, runtime_dir: Path) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         port = self._read_port(runtime_dir)
-        return await asyncio.open_connection("127.0.0.1", port)
+        return await asyncio.open_connection("127.0.0.1", port, limit=RPC_STREAM_LIMIT)
 
     def probe_healthy(self, runtime_dir: Path) -> bool:
         try:

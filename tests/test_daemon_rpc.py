@@ -126,6 +126,26 @@ class _RequestIdCaptureService(_FakeService):
         yield StreamChunk(request_id=request_id, content="done", event_type="final")
 
 
+class _LargeCommandPayloadService(_FakeService):
+    async def command_execute(self, name: str, args: str = "", session_id: str = "") -> dict[str, Any]:
+        return {
+            "ok": True,
+            "view": "config",
+            "mode": "list",
+            "fields": [
+                {
+                    "key": f"large.config.{index}",
+                    "value": "x" * 2048,
+                    "type": "str",
+                    "scopes": ["profile", "workspace"],
+                    "hot_reload": "yes",
+                    "description": "large field used to verify daemon RPC framing",
+                }
+                for index in range(80)
+            ],
+        }
+
+
 async def _start_server(runtime_dir: Path, service=None, *, stream_heartbeat_s: float | None = None):
     server = UnixRpcServer(
         service or _FakeService(),
@@ -188,6 +208,31 @@ async def test_daemon_server_injects_rpc_request_id_into_engine_chat() -> None:
     assert len(service.request_ids) == 1
     assert service.request_ids[0]
     assert events[0].metadata == {"request_id": service.request_ids[0]}
+
+
+@pytest.mark.asyncio
+async def test_daemon_client_receives_large_command_payload() -> None:
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
+        server, task, runtime_dir = await _start_server(
+            Path(root) / "runtime", service=_LargeCommandPayloadService()
+        )
+        socket_path = get_transport().readiness_path(runtime_dir)
+        client = DaemonClient(socket_path)
+
+        try:
+            payload = await client.command_execute("config", "list")
+        finally:
+            task.cancel()
+            await server.stop()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    assert payload["ok"] is True
+    assert payload["mode"] == "list"
+    assert len(payload["fields"]) == 80
+    assert len(payload["fields"][0]["value"]) == 2048
 
 
 @pytest.mark.asyncio

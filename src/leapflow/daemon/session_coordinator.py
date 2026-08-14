@@ -175,6 +175,70 @@ class SessionCoordinator:
             "artifacts": artifacts,
         }
 
+    async def get_detail(
+        self,
+        ctx: Any,
+        settings: Any,
+        session_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+        include_inactive: bool = True,
+        workspace_root: str = "",
+    ) -> dict[str, Any]:
+        """Return a persisted session transcript without consulting live engines."""
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            return {"ok": False, "code": "missing_session_id", "error": "session_id is required"}
+        if ctx is None:
+            return {"ok": False, "code": "context_unavailable", "error": "runtime context unavailable"}
+        store = getattr(ctx, "_conversation_store", None)
+        if store is None:
+            return {"ok": False, "code": "store_unavailable", "error": "conversation store unavailable"}
+        try:
+            session = store.get_session(session_id)
+        except Exception as exc:
+            logger.debug("daemon: session detail metadata unavailable", exc_info=True)
+            return {"ok": False, "code": "store_error", "error": str(exc)}
+        if session is None:
+            return {"ok": False, "code": "not_found", "error": "session not found", "session_id": session_id}
+
+        workspace = self._workspace_root(ctx, settings, workspace_root=workspace_root)
+        mismatch = self._session_workspace_mismatch(session, workspace)
+        if mismatch:
+            return {
+                "ok": False,
+                "code": "workspace_mismatch",
+                "error": "session belongs to a different workspace",
+                "workspace_mismatch": True,
+                **mismatch,
+            }
+
+        limit = min(max(1, int(limit or 200)), 1000)
+        offset = max(0, int(offset or 0))
+        query_limit = limit + 1
+        messages = self._session_detail_messages(
+            ctx,
+            session_id,
+            limit=query_limit,
+            offset=offset,
+            include_inactive=include_inactive,
+        )
+        has_more = len(messages) > limit
+        if has_more:
+            messages = messages[:limit]
+        total_messages = max(0, int(getattr(session, "message_count", 0) or 0))
+        if not has_more and total_messages:
+            has_more = offset + len(messages) < total_messages
+        return {
+            "ok": True,
+            "session": self._conversation_session_to_dict(session),
+            "messages": messages,
+            "limit": limit,
+            "offset": offset,
+            "has_more": bool(has_more),
+        }
+
     # ── Analysis ──────────────────────────────────────────────────────────
 
     async def analyze(self, monitors: Any, ctx: Any, settings: Any) -> dict[str, Any]:
@@ -260,15 +324,85 @@ class SessionCoordinator:
             return []
         return [self._conversation_message_to_dict(row) for row in rows]
 
+    def _session_detail_messages(
+        self,
+        ctx: Any,
+        session_id: str,
+        *,
+        limit: int,
+        offset: int,
+        include_inactive: bool,
+    ) -> list[dict[str, Any]]:
+        """Query a paginated persisted transcript for a specific session."""
+        store = getattr(ctx, "_conversation_store", None) if ctx is not None else None
+        if store is None or not session_id:
+            return []
+        try:
+            rows = store.get_messages(
+                session_id,
+                limit=limit,
+                offset=offset,
+                active_only=not include_inactive,
+            )
+        except TypeError:
+            rows = store.get_messages(session_id, limit=limit + offset)
+            if offset:
+                rows = rows[offset:]
+        except Exception:
+            logger.debug("daemon: session detail messages unavailable", exc_info=True)
+            return []
+        return [self._conversation_message_to_dict(row) for row in rows]
+
+    @staticmethod
+    def _conversation_session_to_dict(session: Any) -> dict[str, Any]:
+        return {
+            "session_id": str(getattr(session, "session_id", "") or ""),
+            "title": str(getattr(session, "title", "") or ""),
+            "created_at": float(getattr(session, "created_at", 0.0) or 0.0),
+            "updated_at": float(getattr(session, "updated_at", 0.0) or 0.0),
+            "parent_session_id": getattr(session, "parent_session_id", None),
+            "model": str(getattr(session, "model", "") or ""),
+            "source": str(getattr(session, "source", "") or ""),
+            "cwd": str(getattr(session, "cwd", "") or ""),
+            "message_count": int(getattr(session, "message_count", 0) or 0),
+            "total_tokens": int(getattr(session, "total_tokens", 0) or 0),
+            "is_active": bool(getattr(session, "is_active", True)),
+            "metadata": dict(getattr(session, "metadata", {}) or {}),
+            "summary": str(getattr(session, "summary", "") or ""),
+        }
+
+    @staticmethod
+    def _session_workspace_mismatch(session: Any, workspace: Path) -> dict[str, Any] | None:
+        raw_cwd = str(getattr(session, "cwd", "") or "")
+        if not raw_cwd:
+            return None
+        try:
+            session_workspace = Path(raw_cwd).expanduser().resolve()
+        except OSError:
+            session_workspace = Path(raw_cwd).expanduser().absolute()
+        if session_workspace == workspace:
+            return None
+        return {
+            "session_id": str(getattr(session, "session_id", "") or ""),
+            "expected_workspace_root": str(session_workspace),
+            "requested_workspace_root": str(workspace),
+        }
+
     @staticmethod
     def _conversation_message_to_dict(message: Any) -> dict[str, Any]:
         if isinstance(message, dict):
             return dict(message)
         return {
+            "message_id": str(getattr(message, "message_id", "") or ""),
+            "session_id": str(getattr(message, "session_id", "") or ""),
             "role": str(getattr(message, "role", "")),
             "content": str(getattr(message, "content", "")),
             "tool_name": str(getattr(message, "tool_name", "") or ""),
             "tool_call_id": str(getattr(message, "tool_call_id", "") or ""),
+            "tool_calls_json": getattr(message, "tool_calls_json", None),
+            "active": bool(getattr(message, "active", True)),
+            "compacted": bool(getattr(message, "compacted", False)),
+            "token_count": int(getattr(message, "token_count", 0) or 0),
             "created_at": float(getattr(message, "created_at", 0.0) or 0.0),
             "metadata": dict(getattr(message, "metadata", {}) or {}),
         }
@@ -402,9 +536,13 @@ class SessionCoordinator:
         return "\n".join(lines)
 
     @staticmethod
-    def _workspace_root(ctx: Any, settings: Any) -> Path:
-        s = getattr(ctx, "settings", settings) if ctx is not None else settings
-        return Path(str(getattr(s, "workspace_root", os.getcwd()))).expanduser().resolve()
+    def _workspace_root(ctx: Any, settings: Any, *, workspace_root: str = "") -> Path:
+        if workspace_root:
+            raw = workspace_root
+        else:
+            s = getattr(ctx, "settings", settings) if ctx is not None else settings
+            raw = getattr(s, "workspace_root", os.getcwd())
+        return Path(str(raw or os.getcwd())).expanduser().resolve()
 
 
 def _parse_session_json(content: str) -> Any:
