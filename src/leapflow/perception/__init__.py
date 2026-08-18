@@ -50,6 +50,7 @@ __all__ = [
     "InteractionSignal",
     "Keyframe",
     "MacroAnalysisResult",
+    "TelegramBotSignalSource",
     "TimelineMarker",
     "VideoAction",
     "VideoSegment",
@@ -65,4 +66,7 @@ def __getattr__(name: str):  # noqa: N807
     if name == "FeishuIMSignalSource":
         from leapflow.perception.active_sources.feishu_im import FeishuIMSignalSource
         return FeishuIMSignalSource
+    if name == "TelegramBotSignalSource":
+        from leapflow.perception.active_sources.telegram_bot import TelegramBotSignalSource
+        return TelegramBotSignalSource
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
