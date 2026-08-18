@@ -85,7 +85,11 @@ Test surface (assertions to update):
 
 Recommended migration (three landings, each independently green):
 
-Landing A — stop *depending* on the ``gp_`` prefix in dispatch:
+Landing A — stop *depending* on the ``gp_`` prefix in dispatch: ✅ completed 2026-08-18
+    Reversed dispatch priority in ``_execute_general_tool``: handlers.get(name)
+    is now the primary path; ToolBridge is a debug-logged fallback only.
+
+    Original steps (all done):
     1. In ``_execute_general_tool``, prefer ``handlers.get(name)`` before
        falling back to bridge dispatch. Because ``_resolve_handlers`` already
        merges semantic handlers in, this covers today's branch (0)/(1)/(2)

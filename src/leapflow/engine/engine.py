@@ -4820,15 +4820,13 @@ class AgentEngine:
     async def _execute_general_tool(
         self, tool_call: Dict[str, Any], handlers: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Execute a general-purpose tool via ToolBridge (preferred) or TOOL_HANDLERS fallback.
+        """Execute a general-purpose tool via registry handlers (preferred) or ToolBridge fallback.
 
-        Routing priority:
-        0. Semantic desktop tools (bridge-registered, not in the static
-           registry) — admitted only when this turn's handler table carries
-           them, and gated by the desktop approval gate when mutating
-        1. ToolBridge dispatch (gp_-prefixed) — local Python GP tools, always available
-        2. ToolBridge dispatch (exact name) — may route to ExecutionPort or semantic tools
-        3. TOOL_HANDLERS dict (static fallback when no bridge)
+        Routing priority (Landing A):
+        0. Semantic desktop tools — admitted only when this turn's handler
+           table carries them, gated by the desktop approval gate when mutating
+        1. Registry-merged handlers dict (includes plugin + semantic handlers)
+        2. ToolBridge fallback (legacy path, emits debug warning when used)
 
         Security: untrusted tool results (MCP, web) are wrapped with delimiters.
         Secrets in error messages are redacted before returning to LLM.
@@ -4875,35 +4873,34 @@ class AgentEngine:
         t0 = time.perf_counter()
 
         try:
-            # Route through ToolBridge when available (single source of truth)
-            if self._tool_bridge is not None:
+            # Landing A: prefer registry-provided handlers (merged dict includes
+            # plugin handlers + semantic handlers via build_semantic_handlers)
+            handler = handlers.get(name)
+            if handler is not None:
+                result = await asyncio.wait_for(handler(args), timeout=timeout)
+            elif self._tool_bridge is not None:
+                # Fallback: ToolBridge dispatch (legacy path)
+                logger.debug(
+                    "Tool '%s' not in registry handlers; falling back to ToolBridge dispatch",
+                    name,
+                )
                 prefixed = f"gp_{name}"
                 result = await asyncio.wait_for(
                     self._tool_bridge.dispatch(TC(name=prefixed, params=args)),
                     timeout=timeout,
                 )
-                if not (isinstance(result, dict) and "unknown_tool" in str(result.get("error", ""))):
-                    duration = (time.perf_counter() - t0) * 1000
-                    is_ok = not (isinstance(result, dict) and not result.get("ok", True))
-                    self._usage_tracker.record_tool_call(name, is_ok, duration)
-                    return self._post_process_tool_result(name, result)
-                result = await asyncio.wait_for(
-                    self._tool_bridge.dispatch(TC(name=name, params=args)),
-                    timeout=timeout,
-                )
-                if not (isinstance(result, dict) and "unknown_tool" in str(result.get("error", ""))):
-                    duration = (time.perf_counter() - t0) * 1000
-                    is_ok = not (isinstance(result, dict) and not result.get("ok", True))
-                    self._usage_tracker.record_tool_call(name, is_ok, duration)
-                    return self._post_process_tool_result(name, result)
-
-            # Fallback: direct handler dispatch
-            handler = handlers.get(name)
-            if handler is None:
+                if isinstance(result, dict) and "unknown_tool" in str(result.get("error", "")):
+                    result = await asyncio.wait_for(
+                        self._tool_bridge.dispatch(TC(name=name, params=args)),
+                        timeout=timeout,
+                    )
+                    if isinstance(result, dict) and "unknown_tool" in str(result.get("error", "")):
+                        missing_resolution = registry.resolve(original_name, args)
+                        return registry.unknown_result(missing_resolution)
+            else:
+                # No handler and no bridge — tool is truly unknown
                 missing_resolution = registry.resolve(original_name, args)
                 return registry.unknown_result(missing_resolution)
-
-            result = await asyncio.wait_for(handler(args), timeout=timeout)
         except asyncio.TimeoutError:
             duration = (time.perf_counter() - t0) * 1000
             self._usage_tracker.record_tool_call(name, False, duration)
