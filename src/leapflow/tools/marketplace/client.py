@@ -12,6 +12,7 @@ Installation flow:
 
 Security:
     - Checksum verification before install (integrity)
+    - Ed25519 signature verification when trusted_pubkeys provided (authenticity)
     - requires_sandbox defaults True (untrusted execution isolation)
     - Install is a deliberate action requiring approval (not automatic)
 """
@@ -19,7 +20,7 @@ Security:
 from __future__ import annotations
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, Set, runtime_checkable
 
 from leapflow.tools.marketplace.manifest import PluginManifest
 
@@ -81,8 +82,22 @@ class MarketplaceClient:
         """List all available plugins from the source."""
         return self._source.list_manifests()
 
-    def install(self, name: str, *, verify: bool = True) -> Dict[str, Any]:
+    def install(
+        self,
+        name: str,
+        *,
+        verify: bool = True,
+        trusted_pubkeys: Optional[Set[str]] = None,
+    ) -> Dict[str, Any]:
         """Download, verify, and install a plugin by name.
+
+        Args:
+            name: Plugin identifier to install.
+            verify: When True, verify SHA-256 checksum (integrity).
+            trusted_pubkeys: When provided, Ed25519 signature verification
+                is MANDATORY.  The manifest's signer_pubkey must be in
+                this set and the signature must be valid over the canonical
+                payload.  If verification fails, install is refused.
 
         Returns a result dict with ok/error and the installed path.
         Does NOT auto-load the plugin — that's a separate approval-gated step.
@@ -102,6 +117,17 @@ class MarketplaceClient:
                 return {
                     "ok": False,
                     "error": f"Checksum mismatch for '{name}' — refusing to install (integrity failure)",
+                }
+
+        # Authenticity verification (Ed25519 signature)
+        if trusted_pubkeys is not None:
+            if not manifest.verify_signature(code, trusted_pubkeys):
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Signature verification failed for '{name}' — "
+                        "refusing to install (authenticity failure)"
+                    ),
                 }
 
         # Write to install directory
