@@ -2217,7 +2217,8 @@ def _build_desktop_engine(td: str, bridge, llm=None, **settings_overrides):
 @pytest.mark.asyncio
 async def test_unified_catalog_merges_semantic_tools_when_bridge_online() -> None:
     """Catalog and handler table gain the bridge's semantic tools; static registry untouched."""
-    from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+    from leapflow.tools import registry as _tool_reg
+    TOOL_DEFINITIONS = _tool_reg.tool_definitions
 
     bridge, _ = _desktop_bridge()
     with tempfile.TemporaryDirectory() as td:
@@ -2241,7 +2242,8 @@ async def test_unified_catalog_merges_semantic_tools_when_bridge_online() -> Non
 @pytest.mark.asyncio
 async def test_unified_catalog_rebuilds_when_static_registry_grows() -> None:
     """Tools appended after engine construction (session_search pattern) are picked up."""
-    from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+    from leapflow.tools import registry as _tool_reg
+    TOOL_DEFINITIONS = _tool_reg.tool_definitions
 
     bridge, _ = _desktop_bridge()
     with tempfile.TemporaryDirectory() as td:
@@ -2314,7 +2316,7 @@ async def test_semantic_execution_gate_and_perception_offline() -> None:
     offline the tool is unavailable rather than unknown."""
     import types
 
-    from leapflow.tools import registry_bootstrap as rb
+    from leapflow.tools import registry as _tool_reg
 
     bridge, calls = _desktop_bridge()
     with tempfile.TemporaryDirectory() as td:
@@ -2328,7 +2330,7 @@ async def test_semantic_execution_gate_and_perception_offline() -> None:
             assert observed.get("ok") is True
             assert calls == [("observe_ui", {"app": "Safari"})]
 
-            rb.set_desktop_gate(None)
+            _tool_reg.set_desktop_gate(None)
             denied = await engine._execute_general_tool(
                 {"name": "click", "arguments": {"selector": "#go"}}, handlers
             )
@@ -2340,14 +2342,14 @@ async def test_semantic_execution_gate_and_perception_offline() -> None:
                 async def evaluate(self, action):
                     return types.SimpleNamespace(approved=True, denial_message="")
 
-            rb.set_desktop_gate(_Approve())
+            _tool_reg.set_desktop_gate(_Approve())
             clicked = await engine._execute_general_tool(
                 {"name": "click", "arguments": {"selector": "#go"}}, handlers
             )
             assert clicked.get("ok") is True
             assert calls[-1] == ("click", {"selector": "#go"})
         finally:
-            rb.set_desktop_gate(None)
+            _tool_reg.set_desktop_gate(None)
             lt.close()
 
     # Perception offline: no bridge handlers -> explicit unavailability.

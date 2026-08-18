@@ -181,7 +181,7 @@ def test_schedule_reentry_handler_registers(tmp_path) -> None:
     import asyncio
 
     from leapflow.storage.reentry_store import ReentryStore, build_reentry_trigger
-    from leapflow.tools import registry_bootstrap as rb
+    from leapflow.tools import registry as _tool_reg
 
     store = ReentryStore(tmp_path / "leap.duckdb")
 
@@ -194,25 +194,25 @@ def test_schedule_reentry_handler_registers(tmp_path) -> None:
         store.save(trig)
         return {"ok": True, "trigger_id": trig.trigger_id, "kind": trig.kind}
 
-    rb.set_reentry_scheduler(_scheduler)
+    _tool_reg.set_reentry_scheduler(_scheduler)
     try:
-        res = asyncio.run(rb.TOOL_HANDLERS["schedule_reentry"](
+        res = asyncio.run(_tool_reg.tool_handlers["schedule_reentry"](
             {"kind": "time", "reason": "continue after deploy", "delay_seconds": 60}
         ))
         assert res["ok"] is True and "trigger_id" in res
         assert store.load(res["trigger_id"]) is not None
     finally:
-        rb.set_reentry_scheduler(None)
+        _tool_reg.set_reentry_scheduler(None)
         store.close()
-    unset = asyncio.run(rb.TOOL_HANDLERS["schedule_reentry"]({"kind": "time", "reason": "x"}))
+    unset = asyncio.run(_tool_reg.tool_handlers["schedule_reentry"]({"kind": "time", "reason": "x"}))
     assert unset["ok"] is False                              # not initialized after reset
 
 
 def test_schedule_reentry_disclosed_and_blocked_in_subagents() -> None:
     from leapflow.engine.subagent import DELEGATE_BLOCKED_TOOLS
-    from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+    from leapflow.tools import registry as _tool_reg
 
-    names = {td.get("function", {}).get("name") for td in TOOL_DEFINITIONS}
+    names = {td.get("function", {}).get("name") for td in _tool_reg.tool_definitions}
     assert "schedule_reentry" in names                       # disclosed (core-eligible)
     assert "schedule_reentry" in DELEGATE_BLOCKED_TOOLS       # but not for subagents
 

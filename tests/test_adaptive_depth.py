@@ -804,24 +804,25 @@ def test_research_note_tool_handler_roundtrip() -> None:
     import asyncio
 
     from leapflow.engine.research_ledger import ResearchLedger
-    from leapflow.tools import registry_bootstrap as rb
+    from leapflow.tools import registry as _tool_reg
 
     led = ResearchLedger()
-    rb.set_research_ledger(led)
+    _tool_reg.set_research_ledger(led)
     try:
-        ok = asyncio.run(rb.TOOL_HANDLERS["research_note"]({"kind": "finding", "text": "cache reuses KV"}))
+        ok = asyncio.run(_tool_reg.tool_handlers["research_note"]({"kind": "finding", "text": "cache reuses KV"}))
         assert ok["ok"] is True
         assert "cache reuses KV" in led.as_dict()["findings"]
-        bad = asyncio.run(rb.TOOL_HANDLERS["research_note"]({"kind": "nope", "text": "x"}))
+        bad = asyncio.run(_tool_reg.tool_handlers["research_note"]({"kind": "nope", "text": "x"}))
         assert bad["ok"] is False
     finally:
-        rb.set_research_ledger(None)                      # avoid leaking global into other tests
-    unset = asyncio.run(rb.TOOL_HANDLERS["research_note"]({"kind": "finding", "text": "y"}))
+        _tool_reg.set_research_ledger(None)                      # avoid leaking global into other tests
+    unset = asyncio.run(_tool_reg.tool_handlers["research_note"]({"kind": "finding", "text": "y"}))
     assert unset["ok"] is False
 
 
 def test_research_note_is_disclosed_tool() -> None:
-    from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+    from leapflow.tools import registry as _tool_reg
+    TOOL_DEFINITIONS = _tool_reg.tool_definitions
 
     names = {td.get("function", {}).get("name") for td in TOOL_DEFINITIONS}
     assert "research_note" in names

@@ -7,7 +7,9 @@ from leapflow.engine.context_disclosure import (
     DisclosureRuntimeState,
     build_capability_manifests,
 )
-from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+from leapflow.tools import registry as _tool_reg
+
+TOOL_DEFINITIONS = _tool_reg.tool_definitions
 
 
 def _tool_names(plan) -> set[str]:
@@ -257,17 +259,18 @@ def test_desktop_tools_included_in_full_plan() -> None:
 def test_capability_expand_provider_exposes_desktop_category() -> None:
     import asyncio
 
-    from leapflow.tools import registry_bootstrap as rb
+    from leapflow.tools import registry as _tool_reg
+    from leapflow.tools.plugins.orchestration import plugin as orch_plugin
 
     desktop_defs = _desktop_definitions()
-    rb.set_capability_catalog_provider(lambda: list(TOOL_DEFINITIONS) + desktop_defs)
+    _tool_reg.set_capability_catalog_provider(lambda: list(TOOL_DEFINITIONS) + desktop_defs)
     try:
-        result = asyncio.run(rb._capability_expand_handler({"category": "desktop"}))
+        result = asyncio.run(orch_plugin._capability_expand_handler({"category": "desktop"}))
         assert result["ok"] is True
         expanded_names = {td["function"]["name"] for td in result["expanded_tools"]}
         assert expanded_names == {"observe_ui", "click", "list_apps"}
 
-        unknown = asyncio.run(rb._capability_expand_handler({"category": "nope"}))
+        unknown = asyncio.run(orch_plugin._capability_expand_handler({"category": "nope"}))
         assert unknown["ok"] is False
         assert "desktop" in unknown["available_categories"]
 
@@ -278,15 +281,16 @@ def test_capability_expand_provider_exposes_desktop_category() -> None:
         )
         assert "desktop" in desc
     finally:
-        rb.set_capability_catalog_provider(None)
+        _tool_reg.set_capability_catalog_provider(None)
 
 
 def test_capability_expand_falls_back_to_static_catalog_without_provider() -> None:
     import asyncio
 
-    from leapflow.tools import registry_bootstrap as rb
+    from leapflow.tools import registry as _tool_reg
+    from leapflow.tools.plugins.orchestration import plugin as orch_plugin
 
-    rb.set_capability_catalog_provider(None)
-    result = asyncio.run(rb._capability_expand_handler({"category": "file"}))
+    _tool_reg.set_capability_catalog_provider(None)
+    result = asyncio.run(orch_plugin._capability_expand_handler({"category": "file"}))
     assert result["ok"] is True
     assert result["expanded_tools"]

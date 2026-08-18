@@ -214,6 +214,25 @@ class DefaultRiskClassifier:
 
     @staticmethod
     def _platform_risk_level(action: ActionDescriptor) -> RiskAssessment | None:
+        # Self-modification is always HIGH risk, no permanent grants allowed.
+        # This is a defense-in-depth guard: even if a caller forgets to set
+        # explicit risk metadata, plugin_management actions are treated as
+        # HIGH so that "always allow" grants are never offered for actions
+        # that change the agent's own composition.
+        if action.metadata.get("platform") == "plugin_management":
+            return RiskAssessment(
+                level=RiskLevel.HIGH,
+                score=0.78,
+                reasons=("agent_self_modification",),
+                explanation="This action changes the agent's own plugin composition.",
+                hardline=False,
+                allow_permanent=False,
+                metadata={
+                    "backend_kind": action.metadata.get("backend_kind", ""),
+                    "platform": action.metadata.get("platform", ""),
+                    "action": action.metadata.get("action", ""),
+                },
+            )
         raw = str(action.metadata.get("risk_level") or "").lower()
         if not raw:
             return None

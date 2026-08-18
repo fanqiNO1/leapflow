@@ -103,28 +103,29 @@ _TOOL_RESULT_PREVIEW_LIMIT = 240
 _TASK_CONTRACT_HEADING = "## Task Contract"
 
 
-_registry_cache: tuple[int, int, ToolRegistry] | None = None
+_registry_cache: tuple[int, int, int, ToolRegistry] | None = None
 
 
 def _default_tool_registry() -> ToolRegistry:
     """Return the runtime tool registry, rebuilding when late-registered tools arrive."""
     global _registry_cache
-    from leapflow.tools.registry_bootstrap import (
-        TOOL_DEFINITIONS, TOOL_HANDLERS, TOOL_REGISTRY, _BRIDGE_TOOLS,
-    )
+    from leapflow.tools import registry as _plugin_registry
     from leapflow.tools.name_resolver import TOOL_NAME_ALIASES
 
-    size_key = (len(TOOL_DEFINITIONS), len(TOOL_HANDLERS))
-    if _registry_cache is not None and _registry_cache[:2] == size_key:
-        return _registry_cache[2]
-    # First call: if sizes match the static registry, use it directly (no rebuild cost)
-    if _registry_cache is None and len(TOOL_REGISTRY.specs) >= len(TOOL_DEFINITIONS):
-        _registry_cache = (*size_key, TOOL_REGISTRY)
-        return TOOL_REGISTRY
-    # Late registrations detected — rebuild
+    if not _plugin_registry._assembled:
+        _plugin_registry.assemble()
+
+    td = _plugin_registry.tool_definitions
+    th = _plugin_registry.tool_handlers
+    bt = _plugin_registry.bridge_tools
+
+    size_key = (len(td), len(th), _plugin_registry.version)
+    if _registry_cache is not None and _registry_cache[:3] == size_key:
+        return _registry_cache[3]
+    # Rebuild
     registry = ToolRegistry.from_definitions(
-        TOOL_DEFINITIONS, TOOL_HANDLERS,
-        bridge_tools=_BRIDGE_TOOLS, aliases=TOOL_NAME_ALIASES,
+        td, th,
+        bridge_tools=bt, aliases=TOOL_NAME_ALIASES,
     )
     _registry_cache = (*size_key, registry)
     return registry
@@ -1172,6 +1173,12 @@ class AgentEngine:
 
         # Per-turn usage tracking
         self._usage_tracker = TurnUsageTracker()
+        # Wire plugin learning sink (process-global; graceful no-op if unavailable)
+        try:
+            from leapflow.engine.session_factory import _wire_plugin_stats_sink
+            _wire_plugin_stats_sink(self._usage_tracker)
+        except (ImportError, RuntimeError, AttributeError):
+            pass
 
         # Per-tool timeout (seconds); can be overridden via set_tool_timeouts
         self._default_tool_timeout_s: float = 120.0
@@ -1254,8 +1261,8 @@ class AgentEngine:
         self._unified_catalog: List[Dict[str, Any]] = []
         # Capability discovery resolves the live catalog through this engine, so
         # runtime-injected categories (desktop) become expandable.
-        from leapflow.tools.registry_bootstrap import set_capability_catalog_provider
-        set_capability_catalog_provider(self._unified_tool_catalog)
+        from leapflow.tools import registry as _plugin_registry
+        _plugin_registry.set_capability_catalog_provider(self._unified_tool_catalog)
         self._healer = MessageHealer()
 
         # B2: Prompt cache optimization (None = disabled)
@@ -1839,9 +1846,9 @@ class AgentEngine:
         else:
             self._research_ledger.reset()
         try:
-            from leapflow.tools.registry_bootstrap import set_research_ledger, set_reentry_scheduler
-            set_research_ledger(self._research_ledger)
-            set_reentry_scheduler(self._schedule_reentry)
+            from leapflow.tools import registry as _plugin_registry
+            _plugin_registry.set_research_ledger(self._research_ledger)
+            _plugin_registry.set_reentry_scheduler(self._schedule_reentry)
         except ImportError:
             pass
         self._current_task_contract = self._build_task_contract(user_text)
@@ -3003,6 +3010,16 @@ class AgentEngine:
             ),
         )
 
+    def _new_usage_tracker(self) -> TurnUsageTracker:
+        """Fresh TurnUsageTracker with plugin learning sink wired."""
+        tracker = TurnUsageTracker()
+        try:
+            from leapflow.engine.session_factory import _wire_plugin_stats_sink
+            _wire_plugin_stats_sink(tracker)
+        except (ImportError, RuntimeError, AttributeError):
+            pass
+        return tracker
+
     def _build_child_frame(
         self,
         user_text: str,
@@ -3026,7 +3043,7 @@ class AgentEngine:
             governance=self._new_governance(),
             ledger=ResearchLedger(),
             commitment=PrefixCommitmentController(),
-            usage_tracker=TurnUsageTracker(),
+            usage_tracker=self._new_usage_tracker(),
             compressor=self._new_compressor(),
             tool_filter=tool_filter,
             enable_thinking=enable_thinking,
@@ -4339,11 +4356,11 @@ class AgentEngine:
         construction), so a length change invalidates exactly like a
         bridge hot-swap does.
         """
-        from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+        from leapflow.tools import registry as _plugin_registry
 
-        cache_key = (id(self._tool_bridge), len(TOOL_DEFINITIONS))
+        cache_key = (id(self._tool_bridge), len(_plugin_registry.tool_definitions))
         if self._unified_catalog_key != cache_key:
-            self._unified_catalog = list(TOOL_DEFINITIONS) + self._semantic_tool_schemas()
+            self._unified_catalog = list(_plugin_registry.tool_definitions) + self._semantic_tool_schemas()
             self._unified_catalog_key = cache_key
             # Downstream caches are keyed on the catalog contents.
             self._manifests_by_name = None
@@ -4351,11 +4368,17 @@ class AgentEngine:
         return self._unified_catalog
 
     def _unified_tool_handlers(self) -> Dict[str, Any]:
-        """Per-turn handler table: static handlers plus bridge semantic handlers."""
-        from leapflow.tools.registry_bootstrap import TOOL_HANDLERS
+        """Per-turn handler table: static handlers plus bridge semantic handlers.
+
+        Returns a fresh dict() copy of the plugin registry's handlers, giving each
+        turn an isolated snapshot. Plugin reloads during a turn do not affect the
+        turn in progress — it keeps using its own snapshot until completion.
+        New turns starting after a reload pick up the new handlers.
+        """
+        from leapflow.tools import registry as _plugin_registry
         from leapflow.skills.semantic_schema import build_semantic_handlers
 
-        handlers: Dict[str, Any] = dict(TOOL_HANDLERS)
+        handlers: Dict[str, Any] = dict(_plugin_registry.tool_handlers)
         handlers.update(build_semantic_handlers(self._tool_bridge))
         return handlers
 
@@ -4369,9 +4392,9 @@ class AgentEngine:
 
         if not semantic_requires_approval(name):
             return True, ""
-        from leapflow.tools.registry_bootstrap import get_desktop_gate
+        from leapflow.tools import registry as _plugin_registry
 
-        gate = get_desktop_gate()
+        gate = _plugin_registry.get_desktop_gate()
         if gate is None:
             return False, f"Desktop action '{name}' blocked: no approval gate configured"
         try:

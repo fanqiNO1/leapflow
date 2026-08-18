@@ -265,7 +265,10 @@ def test_edit_file_single_edit_shorthand(tmp_path) -> None:
 # ── governance: registry classification ──────────────────────────────
 
 def test_new_tools_execution_policy_classification() -> None:
-    from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS, TOOL_HANDLERS, _BRIDGE_TOOLS
+    from leapflow.tools import registry as _tool_reg
+    TOOL_DEFINITIONS = _tool_reg.tool_definitions
+    TOOL_HANDLERS = _tool_reg.tool_handlers
+    _BRIDGE_TOOLS = _tool_reg.bridge_tools
     from leapflow.tools.name_resolver import ToolRegistry, TOOL_NAME_ALIASES
     from leapflow.engine.tool_execution import execution_policy_for
 

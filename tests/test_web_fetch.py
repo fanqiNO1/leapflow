@@ -932,7 +932,9 @@ def test_web_fetch_is_read_only_for_the_execution_ledger() -> None:
 def test_web_fetch_is_disclosed_in_the_core_tier() -> None:
     """A network capability the model cannot see is why it fell back to shell."""
     from leapflow.engine.context_disclosure import DisclosurePlanner, DisclosureRuntimeState
-    from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS, TOOL_HANDLERS
+    from leapflow.tools import registry as _tool_reg
+    TOOL_DEFINITIONS = _tool_reg.tool_definitions
+    TOOL_HANDLERS = _tool_reg.tool_handlers
 
     plan = DisclosurePlanner().plan(
         TOOL_DEFINITIONS, DisclosureRuntimeState(native_tools_enabled=True)

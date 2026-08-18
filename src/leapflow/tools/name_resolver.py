@@ -359,7 +359,7 @@ class ToolRegistry:
 
 
 def _infer_risk_level(name: str, bridge_mutates: bool) -> RiskLevel:
-    if name.startswith("gateway_") or name.startswith("hub_"):
+    if name.startswith("gateway_") or name.startswith("hub_") or name.startswith("platform_"):
         return "external"
     if name in _READ_ONLY_TOOLS and not bridge_mutates:
         return "read_only"

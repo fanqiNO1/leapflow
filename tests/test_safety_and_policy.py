@@ -266,7 +266,7 @@ async def test_gateway_start_skips_failed_auto_connect_platform(tmp_path, monkey
 
 @pytest.mark.asyncio
 async def test_file_read_gate_supports_legacy_two_argument_check(tmp_path) -> None:
-    from leapflow.tools import registry_bootstrap
+    from leapflow.tools import registry as _tool_reg
     from leapflow.tools.file_operations import file_read
 
     class LegacyReadGate:
@@ -280,11 +280,11 @@ async def test_file_read_gate_supports_legacy_two_argument_check(tmp_path) -> No
     target = tmp_path / ".env"
     target.write_text("SECRET=value", encoding="utf-8")
     gate = LegacyReadGate()
-    registry_bootstrap.set_file_read_gate(gate)
+    _tool_reg.set_file_read_gate(gate)
     try:
         result = await file_read({"path": str(target), "mode": "raw"})
     finally:
-        registry_bootstrap.set_file_read_gate(None)
+        _tool_reg.set_file_read_gate(None)
 
     assert result["ok"] is True
     assert gate.calls == [(str(target.resolve()), "raw")]
@@ -292,7 +292,7 @@ async def test_file_read_gate_supports_legacy_two_argument_check(tmp_path) -> No
 
 @pytest.mark.asyncio
 async def test_file_write_gate_supports_legacy_three_argument_check(tmp_path) -> None:
-    from leapflow.tools import registry_bootstrap
+    from leapflow.tools import registry as _tool_reg
     from leapflow.tools.file_operations import file_write
 
     class LegacyWriteGate:
@@ -305,11 +305,11 @@ async def test_file_write_gate_supports_legacy_three_argument_check(tmp_path) ->
 
     target = tmp_path / ".env"
     gate = LegacyWriteGate()
-    registry_bootstrap.set_file_write_gate(gate)
+    _tool_reg.set_file_write_gate(gate)
     try:
         result = await file_write({"path": str(target), "content": "SECRET=value", "mode": "overwrite"})
     finally:
-        registry_bootstrap.set_file_write_gate(None)
+        _tool_reg.set_file_write_gate(None)
 
     assert result["ok"] is True
     assert target.read_text(encoding="utf-8") == "SECRET=value"

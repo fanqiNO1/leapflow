@@ -327,8 +327,8 @@ async def file_read(params: Dict[str, Any]) -> Dict[str, Any]:
 
     if sensitivity.requires_approval:
         try:
-            from leapflow.tools.registry_bootstrap import get_file_read_gate
-            gate = get_file_read_gate()
+            from leapflow.tools import registry as _tool_registry
+            gate = _tool_registry.get_file_read_gate()
             if gate is None:
                 return {
                     "ok": False,
@@ -437,8 +437,8 @@ async def file_write(params: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": _write_block_message(target, sensitivity)}
 
     try:
-        from leapflow.tools.registry_bootstrap import get_file_write_gate
-        gate = get_file_write_gate()
+        from leapflow.tools import registry as _tool_registry
+        gate = _tool_registry.get_file_write_gate()
         if gate is not None:
             try:
                 approved = await gate.check(str(target), content, mode, _sensitivity_metadata(sensitivity))
@@ -922,8 +922,8 @@ async def edit_file(params: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     try:
-        from leapflow.tools.registry_bootstrap import get_file_write_gate
-        gate = get_file_write_gate()
+        from leapflow.tools import registry as _tool_registry
+        gate = _tool_registry.get_file_write_gate()
         if gate is not None:
             try:
                 approved = await gate.check(str(target), content, "overwrite", _sensitivity_metadata(sensitivity))

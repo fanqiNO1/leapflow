@@ -104,6 +104,7 @@ class Settings:
     config_sources: tuple[str, ...] = ()
     watched_config_paths: tuple[Path, ...] = ()
     config_warnings: tuple[str, ...] = ()
+    disabled_plugins: tuple[str, ...] = ()
     runtime_dir: Path = field(default_factory=lambda: _bootstrap_profile_layout().runtime_dir)
 
     # Audit
@@ -453,6 +454,11 @@ class Settings:
     signal_channels: frozenset = frozenset()
     signal_reactive_capture: bool = False
     signal_noise_gate_enabled: bool = True
+
+    # Active signal sources (Phase 2.5)
+    active_signal_sources: tuple = ()
+    active_source_queue_capacity: int = 256
+    active_source_shutdown_timeout_s: float = 5.0
     signal_noise_same_source_cooldown_s: float = 2.0
     signal_noise_allow_fs_outside_workspace: bool = False
     signal_noise_path_fragments: tuple = (

@@ -1,0 +1,281 @@
+"""Unit tests for EffectScope and PluginFiber domain primitives."""
+
+from __future__ import annotations
+
+import pytest
+
+from leapflow.domain.effect_scope import EffectScope, ScopeState
+from leapflow.domain.plugin_fiber import (
+    FiberState,
+    IllegalStateTransition,
+    PluginFiber,
+)
+
+
+# ════════════════════════════════════════════════════════════════
+# EffectScope tests
+# ════════════════════════════════════════════════════════════════
+
+
+class TestEffectScopeLIFO:
+    """Effects execute in reverse registration order (LIFO)."""
+
+    def test_effect_scope_lifo_dispose_order(self) -> None:
+        scope = EffectScope("lifo-test")
+        order: list[int] = []
+        scope.effect(lambda: order.append(1))
+        scope.effect(lambda: order.append(2))
+        scope.effect(lambda: order.append(3))
+        scope.dispose()
+        assert order == [3, 2, 1], "Effects must run in reverse registration order"
+
+
+class TestEffectScopeIdempotent:
+    """Calling dispose() multiple times is safe."""
+
+    def test_effect_scope_idempotent_dispose(self) -> None:
+        scope = EffectScope("idempotent-test")
+        call_count = [0]
+        scope.effect(lambda: call_count.__setitem__(0, call_count[0] + 1))
+        scope.dispose()
+        scope.dispose()  # second call should be no-op
+        assert call_count[0] == 1, "Effects must only run once even with multiple dispose() calls"
+        assert scope.state == ScopeState.DISPOSED
+
+
+class TestEffectScopeExceptionSafe:
+    """One failing cleanup must not block others."""
+
+    def test_effect_scope_exception_safe_cleanup(self) -> None:
+        scope = EffectScope("exc-safe")
+        executed: list[str] = []
+
+        scope.effect(lambda: executed.append("first"))
+        scope.effect(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        scope.effect(lambda: executed.append("third"))
+
+        # The middle effect raises, but both first and third should still run.
+        # Effects run in reverse: third → boom → first
+        scope.dispose()
+        assert "first" in executed, "First effect must run even if a later one raised"
+        assert "third" in executed, "Third effect must run even if a later one raised"
+        assert scope.state == ScopeState.DISPOSED
+
+
+class TestEffectScopeChildCascade:
+    """Disposing parent cascades to children."""
+
+    def test_effect_scope_child_cascade(self) -> None:
+        parent = EffectScope("parent")
+        child = parent.child("child")
+        child_disposed = [False]
+        child.effect(lambda: child_disposed.__setitem__(0, True))
+        parent.dispose()
+        assert child_disposed[0], "Child effects must run when parent is disposed"
+        assert child.state == ScopeState.DISPOSED
+        assert parent.state == ScopeState.DISPOSED
+
+    def test_effect_scope_nested_children_order(self) -> None:
+        """Multi-level hierarchy disposes in correct order (deepest first, LIFO)."""
+        order: list[str] = []
+        root = EffectScope("root")
+        root.effect(lambda: order.append("root"))
+
+        child_a = root.child("child-a")
+        child_a.effect(lambda: order.append("child-a"))
+
+        child_b = root.child("child-b")
+        child_b.effect(lambda: order.append("child-b"))
+
+        grandchild = child_b.child("grandchild")
+        grandchild.effect(lambda: order.append("grandchild"))
+
+        root.dispose()
+        # Children reverse: child_b (with grandchild), then child_a, then root effects
+        assert order.index("grandchild") < order.index("child-b")
+        assert order.index("child-b") < order.index("child-a")
+        assert order.index("child-a") < order.index("root")
+
+
+class TestEffectScopeAfterDispose:
+    """Registering effects/children on a disposed scope raises."""
+
+    def test_effect_scope_register_after_dispose_raises(self) -> None:
+        scope = EffectScope("closed")
+        scope.dispose()
+        with pytest.raises(RuntimeError, match="disposed"):
+            scope.effect(lambda: None)
+
+    def test_effect_scope_child_after_dispose_raises(self) -> None:
+        scope = EffectScope("closed")
+        scope.dispose()
+        with pytest.raises(RuntimeError, match="disposed"):
+            scope.child("should-fail")
+
+
+class TestEffectScopeContextManager:
+    """Context manager protocol disposes on exit."""
+
+    def test_effect_scope_context_manager(self) -> None:
+        executed = [False]
+        with EffectScope("ctx") as scope:
+            scope.effect(lambda: executed.__setitem__(0, True))
+            assert scope.is_active
+        assert executed[0]
+        assert scope.is_disposed
+
+
+class TestEffectScopeStateTransitions:
+    """State transitions: ACTIVE → DISPOSING → DISPOSED."""
+
+    def test_effect_scope_state_transitions(self) -> None:
+        states_seen: list[ScopeState] = []
+        scope = EffectScope("transitions")
+        states_seen.append(scope.state)
+
+        # Record state during cleanup (should be DISPOSING)
+        scope.effect(lambda: states_seen.append(scope.state))
+        scope.dispose()
+        states_seen.append(scope.state)
+
+        assert states_seen == [
+            ScopeState.ACTIVE,
+            ScopeState.DISPOSING,
+            ScopeState.DISPOSED,
+        ]
+
+
+class TestEffectScopeDiagnostics:
+    """Diagnostics properties (effect_count, child_count)."""
+
+    def test_effect_scope_diagnostics(self) -> None:
+        scope = EffectScope("diag")
+        assert scope.effect_count == 0
+        assert scope.child_count == 0
+
+        scope.effect(lambda: None)
+        scope.effect(lambda: None)
+        assert scope.effect_count == 2
+
+        scope.child("a")
+        scope.child("b")
+        scope.child("c")
+        assert scope.child_count == 3
+
+
+# ════════════════════════════════════════════════════════════════
+# PluginFiber tests
+# ════════════════════════════════════════════════════════════════
+
+
+class TestFiberLifecycle:
+    """Valid lifecycle: PENDING → ACTIVE → UNLOADING → DISPOSED."""
+
+    def test_fiber_valid_lifecycle(self) -> None:
+        scope = EffectScope("fiber-test")
+        fiber = PluginFiber(plugin_id="test-plugin", scope=scope)
+        assert fiber.state == FiberState.PENDING
+
+        fiber.activate()
+        assert fiber.state == FiberState.ACTIVE
+        assert fiber.is_active
+
+        fiber.begin_unload()
+        assert fiber.state == FiberState.UNLOADING
+
+        fiber.dispose()
+        assert fiber.state == FiberState.DISPOSED
+        assert fiber.is_disposed
+        assert scope.is_disposed
+
+    def test_fiber_dispose_triggers_scope_dispose(self) -> None:
+        scope = EffectScope("fiber-scope")
+        cleanup_ran = [False]
+        scope.effect(lambda: cleanup_ran.__setitem__(0, True))
+
+        fiber = PluginFiber(plugin_id="test", scope=scope)
+        fiber.activate()
+        fiber.begin_unload()
+        fiber.dispose()
+
+        assert cleanup_ran[0], "Fiber disposal must trigger scope disposal"
+        assert scope.is_disposed
+
+
+class TestFiberIllegalTransitions:
+    """Invalid state transitions raise IllegalStateTransition."""
+
+    def test_fiber_illegal_transition_pending_to_disposed(self) -> None:
+        scope = EffectScope("bad-transition")
+        fiber = PluginFiber(plugin_id="test", scope=scope)
+        with pytest.raises(IllegalStateTransition):
+            fiber.dispose()  # PENDING → DISPOSED is invalid
+
+    def test_fiber_illegal_transition_active_to_disposed(self) -> None:
+        scope = EffectScope("bad-transition-2")
+        fiber = PluginFiber(plugin_id="test", scope=scope)
+        fiber.activate()
+        with pytest.raises(IllegalStateTransition):
+            fiber.dispose()  # ACTIVE → DISPOSED is invalid (must go through UNLOADING)
+
+    def test_fiber_illegal_reactivate(self) -> None:
+        scope = EffectScope("reactivate")
+        fiber = PluginFiber(plugin_id="test", scope=scope)
+        fiber.activate()
+        fiber.begin_unload()
+        fiber.dispose()
+        with pytest.raises(IllegalStateTransition):
+            fiber.activate()  # DISPOSED → ACTIVE is invalid
+
+
+class TestFiberActivation:
+    """Basic activation from PENDING."""
+
+    def test_fiber_activate_from_pending(self) -> None:
+        scope = EffectScope("activate")
+        fiber = PluginFiber(plugin_id="test", scope=scope)
+        assert not fiber.is_active
+        fiber.activate()
+        assert fiber.is_active
+        assert not fiber.is_disposed
+
+
+class TestFiberProperties:
+    """Property correctness across lifecycle."""
+
+    def test_fiber_is_active_is_disposed_properties(self) -> None:
+        scope = EffectScope("props")
+        fiber = PluginFiber(plugin_id="test", scope=scope)
+
+        assert not fiber.is_active
+        assert not fiber.is_disposed
+
+        fiber.activate()
+        assert fiber.is_active
+        assert not fiber.is_disposed
+
+        fiber.begin_unload()
+        assert not fiber.is_active
+        assert not fiber.is_disposed
+
+        fiber.dispose()
+        assert not fiber.is_active
+        assert fiber.is_disposed
+
+
+class TestFiberScopeEffects:
+    """Effects registered on fiber's scope run on dispose."""
+
+    def test_fiber_dispose_runs_registered_effects(self) -> None:
+        scope = EffectScope("fiber-effects")
+        fiber = PluginFiber(plugin_id="test", scope=scope)
+
+        effects_log: list[str] = []
+        scope.effect(lambda: effects_log.append("effect-1"))
+        scope.effect(lambda: effects_log.append("effect-2"))
+
+        fiber.activate()
+        fiber.begin_unload()
+        fiber.dispose()
+
+        assert effects_log == ["effect-2", "effect-1"], "Effects must run LIFO on fiber dispose"

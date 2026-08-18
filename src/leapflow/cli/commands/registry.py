@@ -130,6 +130,13 @@ COMMAND_REGISTRY: Tuple[CommandDef, ...] = (
     CommandDef("app events", "Inspect or control an app event source", "App Connector", args_hint="[status|start|stop] <platform>", effect=CommandEffect.EXTERNAL, execution=CommandExecution.SHORT_OPERATION),
     CommandDef("app actions", "List App Connector action domains", "App Connector", args_hint="<platform>"),
 
+    # Plugins (self-management)
+    CommandDef("plugin", "List all plugins", "Skills & Tools", aliases=("plugin list",)),
+    CommandDef("plugin status", "Show plugin details and trust level", "Skills & Tools", args_hint="<id>"),
+    CommandDef("plugin reload", "Hot-reload a plugin (daemon mode, approval required)", "Skills & Tools", args_hint="<id>", requires_host=True, effect=CommandEffect.SESSION, execution=CommandExecution.SHORT_OPERATION),
+    CommandDef("plugin disable", "Disable a plugin (daemon mode, approval required)", "Skills & Tools", args_hint="<id>", requires_host=True, effect=CommandEffect.DESTRUCTIVE, execution=CommandExecution.SHORT_OPERATION),
+    CommandDef("plugin enable", "Re-enable a disabled plugin (daemon mode, approval required)", "Skills & Tools", args_hint="<id>", requires_host=True, effect=CommandEffect.SESSION, execution=CommandExecution.SHORT_OPERATION),
+
     # Scheduler
     CommandDef("arm", "Schedule a skill for timed execution", "Scheduler", args_hint="<skill> <cron>"),
     CommandDef("task", "List scheduled tasks", "Scheduler"),

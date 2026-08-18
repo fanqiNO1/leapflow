@@ -351,11 +351,13 @@ async def cmd_interactive(ctx: "Context", *, resume_id: Optional[str] = None) ->
         handle_config,
         handle_gateway,
         handle_app,
+        handle_plugin,
+        _is_plugin_command,
         render_command_payload,
     )
     from leapflow.utils.terminal_io import TerminalIOProvider
     from leapflow.engine.session import SessionMode
-    from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+    from leapflow.tools import registry as _tool_registry
 
     theme = detect_theme()
     console = LeapConsole(theme)
@@ -463,7 +465,7 @@ async def cmd_interactive(ctx: "Context", *, resume_id: Optional[str] = None) ->
             cwd=os.getcwd(),
             session_id=getattr(ctx.session, "session_id", ""),
             platform_online=_platform_online(),
-            tool_defs=TOOL_DEFINITIONS,
+            tool_defs=_tool_registry.tool_definitions,
             skills=all_skills,
             context_length=ctx_len,
             mcp_tools=mcp_count,
@@ -685,6 +687,11 @@ async def cmd_interactive(ctx: "Context", *, resume_id: Optional[str] = None) ->
                 app_args = cmd_text[len("app"):].strip()
                 await handle_app(ctx, console, app_args)
                 _update_status()
+                return
+
+            if _is_plugin_command(canonical):
+                plugin_args = cmd_text[len("plugin"):].strip()
+                await handle_plugin(ctx, console, plugin_args)
                 return
 
             if canonical == "usage":
@@ -965,7 +972,7 @@ async def cmd_interactive_daemon(
     )
     from leapflow.cli.tui_app.status import StatusBar
     from leapflow.daemon.lease import ClientLease
-    from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+    from leapflow.tools import registry as _tool_registry
 
     theme = detect_theme()
     console = LeapConsole(theme)
@@ -1082,7 +1089,7 @@ async def cmd_interactive_daemon(
             cwd=os.getcwd(),
             session_id=active_session_id,
             platform_online=runtime_host_online,
-            tool_defs=TOOL_DEFINITIONS,
+            tool_defs=_tool_registry.tool_definitions,
             skills=[],
             context_length=runtime_context_length,
             mcp_tools=0,

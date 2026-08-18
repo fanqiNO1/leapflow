@@ -23,11 +23,11 @@ logger = logging.getLogger(__name__)
 def build_tool_payload(ctx: "Context") -> dict[str, Any]:
     """Build a serializable tool summary for local or daemon rendering."""
     from leapflow.cli.banner import _categorize_tools
-    from leapflow.tools.registry_bootstrap import _capability_catalog
+    from leapflow.tools import registry as _tool_registry
 
     # Live catalog: static registry plus semantic desktop tools while
     # perception is online (falls back to the static list otherwise).
-    tool_groups = _categorize_tools(_capability_catalog())
+    tool_groups = _categorize_tools(_tool_registry.capability_catalog())
     groups = {category: sorted(names) for category, names in tool_groups.items()}
     mcp_count = 0
     if hasattr(ctx.rpc, "connected") and ctx.rpc.connected:
@@ -1090,6 +1090,196 @@ async def handle_app(ctx: "Context", console: "LeapConsole", args: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# /plugin slash command
+# PENDING HUMAN CONFIRMATION per AGENTS.md:
+# This slash command requires a second human confirmation before shipping.
+# The behavior to exercise: /plugin list, /plugin status text_utils,
+# /plugin reload text_utils (in daemon mode with approval gate).
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _is_plugin_command(canonical: str) -> bool:
+    """Return True for any /plugin subcommand."""
+    return canonical == "plugin" or canonical.startswith("plugin ")
+
+
+async def build_plugin_payload(ctx: "Context", args: str) -> dict[str, Any]:
+    """Build a serializable payload for /plugin commands."""
+    parts = args.strip().split(None, 1)
+    subcommand = parts[0] if parts else "list"
+    sub_args = parts[1].strip() if len(parts) > 1 else ""
+
+    from leapflow.tools import get_registry, get_scoped_registry
+
+    if subcommand == "list":
+        try:
+            reg = get_registry()
+            scoped = get_scoped_registry()
+            plugins_info: list[dict[str, Any]] = []
+            for plugin_id, plugin in reg.plugins.items():
+                fiber = scoped.get_fiber(plugin_id)
+                plugins_info.append({
+                    "plugin_id": plugin_id,
+                    "category": plugin.category,
+                    "tool_count": len(plugin.tools),
+                    "state": fiber.state.value if fiber else "unmanaged",
+                    "generation": fiber.generation if fiber else None,
+                })
+            return {
+                "ok": True,
+                "view": "plugin_list",
+                "plugin_count": len(plugins_info),
+                "plugins": plugins_info,
+            }
+        except (RuntimeError, AttributeError) as exc:
+            return {"ok": False, "error": f"plugin list failed: {exc}"}
+
+    if subcommand == "status":
+        if not sub_args:
+            return {"ok": False, "error": "Usage: /plugin status <plugin_id>"}
+        plugin_id = sub_args.split()[0]
+        try:
+            reg = get_registry()
+            plugin = reg.get_plugin(plugin_id)
+            if plugin is None:
+                return {"ok": False, "error": f"Plugin '{plugin_id}' not registered"}
+            scoped = get_scoped_registry()
+            fiber = scoped.get_fiber(plugin_id)
+            response: dict[str, Any] = {
+                "ok": True,
+                "view": "plugin_status",
+                "plugin_id": plugin_id,
+                "category": plugin.category,
+                "dependencies": list(plugin.dependencies),
+                "tools": [
+                    {"name": t.name, "description": t.description}
+                    for t in plugin.tools
+                ],
+                "fiber": {
+                    "state": fiber.state.value if fiber else "unmanaged",
+                    "generation": fiber.generation if fiber else None,
+                },
+            }
+            # Additive trust info
+            try:
+                from leapflow.learning.plugin_advisor import get_default_advisor
+
+                advisor = get_default_advisor()
+                if advisor is not None:
+                    trust = advisor._trust_ledger.level(plugin_id)
+                    response["trust_level"] = trust.name
+            except (ImportError, AttributeError, RuntimeError):
+                pass
+            return response
+        except (RuntimeError, AttributeError) as exc:
+            return {"ok": False, "error": f"plugin status failed: {exc}"}
+
+    if subcommand in ("reload", "disable", "enable"):
+        if not sub_args:
+            return {"ok": False, "error": f"Usage: /plugin {subcommand} <plugin_id>"}
+        plugin_id = sub_args.split()[0]
+        # Delegate to self_management plugin handler
+        try:
+            reg = get_registry()
+            sm_plugin = reg.get_plugin("self_management")
+            if sm_plugin is None:
+                return {"ok": False, "error": "self_management plugin not available"}
+            handler_name = f"_plugin_{subcommand}_handler"
+            handler = getattr(sm_plugin, handler_name, None)
+            if handler is None:
+                return {"ok": False, "error": f"Handler for '{subcommand}' not found"}
+            result = await handler(plugin_id=plugin_id)
+            result["view"] = f"plugin_{subcommand}"
+            return result
+        except (RuntimeError, AttributeError) as exc:
+            return {"ok": False, "error": f"plugin {subcommand} failed: {exc}"}
+
+    return {"ok": False, "error": f"Unknown subcommand: /plugin {subcommand}. Use: list, status, reload, disable, enable"}
+
+
+def render_plugin_payload(console: "LeapConsole", payload: dict[str, Any]) -> None:
+    """Render a /plugin command result."""
+    if not payload.get("ok", True):
+        console.warning(str(payload.get("error") or "Plugin command failed."))
+        return
+
+    view = str(payload.get("view") or "")
+
+    if view == "plugin_list":
+        from rich.table import Table
+
+        plugins = payload.get("plugins") or []
+        if not plugins:
+            console.system("No plugins registered.")
+            return
+        table = Table(
+            title="Registered Plugins",
+            show_header=True,
+            header_style="bold",
+            border_style="bright_black",
+            title_style="bold cyan",
+            padding=(0, 1),
+        )
+        table.add_column("Plugin ID", style="cyan", no_wrap=True)
+        table.add_column("Category")
+        table.add_column("Tools", justify="center")
+        table.add_column("State")
+        table.add_column("Gen", justify="center")
+        for p in plugins:
+            state = str(p.get("state") or "unknown")
+            state_style = "green" if state == "active" else ("red" if state == "disposed" else "yellow")
+            table.add_row(
+                str(p.get("plugin_id") or ""),
+                str(p.get("category") or ""),
+                str(p.get("tool_count") or 0),
+                f"[{state_style}]{state}[/{state_style}]",
+                str(p.get("generation") or "-"),
+            )
+        console.print(table)
+        console.system(f"{payload.get('plugin_count', 0)} plugins registered")
+        return
+
+    if view == "plugin_status":
+        from rich.panel import Panel
+        from rich.text import Text
+
+        info = Text()
+        info.append(f"Plugin:      {payload.get('plugin_id')}\n")
+        info.append(f"Category:    {payload.get('category')}\n")
+        fiber = payload.get("fiber") or {}
+        info.append(f"State:       {fiber.get('state', 'unknown')}\n")
+        info.append(f"Generation:  {fiber.get('generation', '-')}\n")
+        trust = payload.get("trust_level")
+        if trust:
+            info.append(f"Trust:       {trust}\n")
+        deps = payload.get("dependencies") or []
+        if deps:
+            info.append(f"Deps:        {', '.join(deps)}\n")
+        tools = payload.get("tools") or []
+        if tools:
+            info.append(f"Tools ({len(tools)}):")
+            for t in tools:
+                info.append(f"\n  - {t.get('name')}: {t.get('description', '')[:50]}")
+        console.print(Panel(info, title=str(payload.get("plugin_id") or "Plugin"), border_style="cyan"))
+        return
+
+    # Mutation results (reload, disable, enable)
+    action = str(payload.get("action") or view.replace("plugin_", ""))
+    plugin_id = str(payload.get("plugin_id") or "")
+    if payload.get("requires_approval"):
+        console.warning(str(payload.get("error") or f"Action '{action}' requires approval."))
+    else:
+        state = str(payload.get("state") or "")
+        gen = payload.get("new_generation") or payload.get("generation") or "-"
+        console.success(f"Plugin '{plugin_id}' {action}: state={state}, generation={gen}")
+
+
+async def handle_plugin(ctx: "Context", console: "LeapConsole", args: str) -> None:
+    """Handle /plugin slash command dispatch."""
+    render_plugin_payload(console, await build_plugin_payload(ctx, args))
+
+
+# ══════════════════════════════════════════════════════════════════════
 # Unified command_execute: dispatches any engine-routed slash command
 # ══════════════════════════════════════════════════════════════════════
 
@@ -1194,6 +1384,13 @@ async def command_execute(
         return _execute_scheduler_task(ctx)
     if name == "board" or name.startswith("board "):
         return await _execute_dashboard(ctx, name, args, session_id=session_id)
+    if _is_plugin_command(name):
+        plugin_args = name[len("plugin"):].strip()
+        if plugin_args:
+            plugin_args = plugin_args + (" " + args if args else "")
+        else:
+            plugin_args = args
+        return await build_plugin_payload(ctx, plugin_args)
     return {"ok": False, "message": f"Unknown command: /{name}"}
 
 

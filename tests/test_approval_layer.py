@@ -197,7 +197,7 @@ async def test_orchestrator_cancel_workflow_is_denied_with_strong_message() -> N
 @pytest.mark.asyncio
 async def test_file_write_returns_gate_denial_message(tmp_path: Path) -> None:
     from leapflow.tools.file_operations import file_write
-    from leapflow.tools.registry_bootstrap import set_file_write_gate
+    from leapflow.tools import registry as _tool_reg
 
     class DenyingGate:
         denial_message = "BLOCKED: User denied this action. Do not retry."
@@ -211,14 +211,14 @@ async def test_file_write_returns_gate_denial_message(tmp_path: Path) -> None:
         ) -> bool:
             return False
 
-    set_file_write_gate(DenyingGate())
+    _tool_reg.set_file_write_gate(DenyingGate())
     try:
         result = await file_write({
             "path": str(tmp_path / "approval-output.py"),
             "content": "print('hello')",
         })
     finally:
-        set_file_write_gate(None)
+        _tool_reg.set_file_write_gate(None)
 
     assert result == {
         "ok": False,
@@ -242,11 +242,11 @@ def test_default_risk_classifier_detects_sensitive_file_read() -> None:
 @pytest.mark.asyncio
 async def test_sensitive_file_read_requires_approval_without_gate(tmp_path: Path) -> None:
     from leapflow.tools.file_operations import file_read
-    from leapflow.tools.registry_bootstrap import set_file_read_gate
+    from leapflow.tools import registry as _tool_reg
 
     target = tmp_path / ".env"
     target.write_text("API_KEY=sk-secret-value-123456\n", encoding="utf-8")
-    set_file_read_gate(None)
+    _tool_reg.set_file_read_gate(None)
 
     result = await file_read({"path": str(target)})
 
@@ -258,7 +258,7 @@ async def test_sensitive_file_read_requires_approval_without_gate(tmp_path: Path
 @pytest.mark.asyncio
 async def test_sensitive_file_read_approval_redacts_content(tmp_path: Path) -> None:
     from leapflow.tools.file_operations import file_read
-    from leapflow.tools.registry_bootstrap import set_file_read_gate
+    from leapflow.tools import registry as _tool_reg
 
     class AllowingReadGate:
         denial_message = ""
@@ -278,11 +278,11 @@ async def test_sensitive_file_read_approval_redacts_content(tmp_path: Path) -> N
     target = tmp_path / ".env"
     target.write_text("API_KEY=sk-secret-value-123456\nPUBLIC_VALUE=ok\n", encoding="utf-8")
     gate = AllowingReadGate()
-    set_file_read_gate(gate)
+    _tool_reg.set_file_read_gate(gate)
     try:
         result = await file_read({"path": str(target)})
     finally:
-        set_file_read_gate(None)
+        _tool_reg.set_file_read_gate(None)
 
     assert result["ok"] is True
     assert gate.calls[0][2]["sensitivity_category"] == "credential"
@@ -294,7 +294,7 @@ async def test_sensitive_file_read_approval_redacts_content(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_sensitive_file_write_uses_approval_gate(tmp_path: Path) -> None:
     from leapflow.tools.file_operations import file_write
-    from leapflow.tools.registry_bootstrap import set_file_write_gate
+    from leapflow.tools import registry as _tool_reg
 
     class AllowingWriteGate:
         denial_message = ""
@@ -314,11 +314,11 @@ async def test_sensitive_file_write_uses_approval_gate(tmp_path: Path) -> None:
 
     target = tmp_path / ".env"
     gate = AllowingWriteGate()
-    set_file_write_gate(gate)
+    _tool_reg.set_file_write_gate(gate)
     try:
         result = await file_write({"path": str(target), "content": "API_KEY=sk-new-value-123456\n"})
     finally:
-        set_file_write_gate(None)
+        _tool_reg.set_file_write_gate(None)
 
     assert result["ok"] is True
     assert target.read_text(encoding="utf-8") == "API_KEY=sk-new-value-123456\n"
@@ -328,7 +328,7 @@ async def test_sensitive_file_write_uses_approval_gate(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_runtime_database_read_is_hardline_blocked(tmp_path: Path) -> None:
     from leapflow.tools.file_operations import file_read
-    from leapflow.tools.registry_bootstrap import set_file_read_gate
+    from leapflow.tools import registry as _tool_reg
 
     class FailingGate:
         async def check(self, *_args, **_kwargs) -> bool:
@@ -336,11 +336,11 @@ async def test_runtime_database_read_is_hardline_blocked(tmp_path: Path) -> None
 
     target = tmp_path / "leap.duckdb"
     target.write_bytes(b"not text")
-    set_file_read_gate(FailingGate())
+    _tool_reg.set_file_read_gate(FailingGate())
     try:
         result = await file_read({"path": str(target)})
     finally:
-        set_file_read_gate(None)
+        _tool_reg.set_file_read_gate(None)
 
     assert result["ok"] is False
     assert "Runtime database" in result["error"]

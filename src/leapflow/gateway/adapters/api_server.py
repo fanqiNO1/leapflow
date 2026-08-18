@@ -134,3 +134,20 @@ class APIServerAdapter(AdapterLifecycle):
                 },
             ],
         }
+
+
+# ── Plugin registration ───────────────────────────────────────
+
+from leapflow.gateway.adapter_registry import BuiltinAdapterPlugin  # noqa: E402
+
+plugin = BuiltinAdapterPlugin(
+    _platform_id="api_server",
+    _display_name="API Server (OpenAI-compatible)",
+    _adapter_module="leapflow.gateway.adapters.api_server",
+    _adapter_class="APIServerAdapter",
+    _config_schema={
+        "api_key": {"type": "string", "required": True, "min_length": 16},
+        "host": {"type": "string", "default": "127.0.0.1"},
+        "port": {"type": "integer", "default": 8080},
+    },
+)

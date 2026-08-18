@@ -30,6 +30,39 @@ from leapflow.engine.tool_execution import ToolExecutionLedger
 from leapflow.engine.turn_usage import TurnUsageTracker
 
 
+def _wire_plugin_stats_sink(tracker: TurnUsageTracker) -> None:
+    """Attach process-global plugin learning sink to a TurnUsageTracker.
+
+    Lazily initializes the PluginUsageTracker, PluginTrustLedger, and
+    PluginAdvisor singletons on first call. Safe to call multiple times;
+    subsequent calls simply set the sink reference.
+    """
+    try:
+        from leapflow.learning.plugin_advisor import (
+            PluginAdvisor,
+            get_default_advisor,
+            set_default_advisor,
+        )
+        from leapflow.learning.plugin_stats import PluginUsageTracker as _PUTracker
+        from leapflow.learning.plugin_trust import PluginTrustLedger
+
+        advisor = get_default_advisor()
+        if advisor is not None:
+            # Already initialized — just set the sink
+            tracker.set_plugin_stats_sink(advisor._usage_tracker)
+            return
+
+        # First-time initialization
+        trust_ledger = PluginTrustLedger()
+        usage_tracker = _PUTracker()
+        usage_tracker.set_trust_ledger(trust_ledger)
+        advisor = PluginAdvisor(trust_ledger, usage_tracker)
+        set_default_advisor(advisor)
+        tracker.set_plugin_stats_sink(usage_tracker)
+    except (ImportError, RuntimeError, AttributeError):
+        pass  # Learning module not available — degrade gracefully
+
+
 def _settings_for_workspace(settings: Any, workspace_root: str | Path | None) -> Any:
     if settings is None or not workspace_root:
         return settings
@@ -77,6 +110,7 @@ def build_session_engine(
     engine._research_ledger = ResearchLedger()
     engine._prefix_commitment = PrefixCommitmentController()
     engine._usage_tracker = TurnUsageTracker()
+    _wire_plugin_stats_sink(engine._usage_tracker)
     engine._recovery_coordinator = RecoveryCoordinator()
     engine._last_context_snapshot = {}
     engine._last_turn_tool_categories = frozenset()

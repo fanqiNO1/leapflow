@@ -32,11 +32,7 @@ class ApprovalCoordinator:
             from leapflow.security.policy import ApprovalPolicyEngine
             from leapflow.tools.config_tools import set_config_approval_gate
             from leapflow.tools.gateway_tool import set_gateway_approval_gate
-            from leapflow.tools.registry_bootstrap import (
-                set_desktop_gate,
-                set_file_read_gate,
-                set_file_write_gate,
-            )
+            from leapflow.tools import get_registry as _get_tool_registry
             from leapflow.tools.shell_tools import set_approval_gate
             from leapflow.tools.web_fetch import set_web_approval_gate
 
@@ -59,7 +55,14 @@ class ApprovalCoordinator:
             set_web_approval_gate(orchestrator)
             # Mutating semantic desktop tools (click, type_text, ...) share the
             # same approval path.
-            set_desktop_gate(orchestrator)
+            _tool_registry = _get_tool_registry()
+            _tool_registry.set_desktop_gate(orchestrator)
+            # Inject the plugin self-modification approval gate (Phase 2.4
+            # Self-Modification). Reuses the same orchestrator as the desktop
+            # gate so plugin management gets identical human-in-the-loop
+            # treatment; bind_runtime only reaches plugins that declare the
+            # 'plugin_approval_gate' dependency (self_management).
+            _tool_registry.bind_runtime(plugin_approval_gate=orchestrator)
 
             class _FileReadGate:
                 def __init__(self) -> None:
@@ -94,11 +97,19 @@ class ApprovalCoordinator:
                     self.denial_message = result.denial_message if not result.approved else ""
                     return result.approved
 
-            set_file_read_gate(_FileReadGate())
-            set_file_write_gate(_FileWriteGate())
+            _tool_registry.set_file_read_gate(_FileReadGate())
+            _tool_registry.set_file_write_gate(_FileWriteGate())
             logger.debug("daemon approval gate installed")
-        except Exception:
-            logger.debug("daemon approval gate installation skipped", exc_info=True)
+        except (ImportError, AttributeError) as exc:
+            logger.debug("daemon approval gate installation skipped: %s", exc, exc_info=True)
+        except Exception as exc:  # noqa: BLE001 - intentional broad catch: gate wiring must not crash daemon startup
+            logger.error(
+                "daemon approval gate installation failed with unexpected error: %s. "
+                "Daemon will continue without full approval gating. "
+                "This is a serious safety issue that should be investigated.",
+                exc,
+                exc_info=True,
+            )
 
     async def request_approval(self, request: Any, route: "tuple[asyncio.Queue[StreamChunk], str] | None") -> str:
         """Block until approval decision; called from tool execution.

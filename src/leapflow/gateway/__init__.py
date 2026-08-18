@@ -10,6 +10,11 @@ Public API:
 - ``SessionKey`` / ``build_session_key`` for structured session routing
 - ``GatewayRouter`` for per-session LLM processing of inbound messages
 """
+from leapflow.gateway.adapter_registry import (
+    BuiltinAdapterPlugin,
+    GatewayAdapterPlugin,
+    GatewayAdapterRegistry,
+)
 from leapflow.gateway.config_store import GatewayConfig, GatewayConfigStore
 from leapflow.gateway.credential_vault import CredentialVault
 from leapflow.gateway.events import (
@@ -46,6 +51,10 @@ __all__ = [
     # Adapter contract
     "PlatformAdapter",
     "PlatformAdapterMixin",
+    # Adapter plugin registry
+    "GatewayAdapterPlugin",
+    "GatewayAdapterRegistry",
+    "BuiltinAdapterPlugin",
     # Events
     "GatewayMessageReceived",
     "GatewaySessionCreated",

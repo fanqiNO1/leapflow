@@ -751,7 +751,7 @@ class Context:
 
     def _configure_mcp_manager(self, settings: Settings) -> None:
         """Rebuild MCP manager and global MCP tool registrations from layout config."""
-        from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS, TOOL_HANDLERS
+        from leapflow.tools import registry as _tool_registry
 
         previous_names = set(getattr(self, "_mcp_tool_names", ()))
         previous_manager = getattr(self, "_mcp_manager", None)
@@ -761,12 +761,12 @@ class Context:
             except Exception:
                 logger.debug("MCP manager close failed during rebuild", exc_info=True)
         if previous_names:
-            TOOL_DEFINITIONS[:] = [
-                definition for definition in TOOL_DEFINITIONS
+            _tool_registry.tool_definitions[:] = [
+                definition for definition in _tool_registry.tool_definitions
                 if str((definition.get("function") or {}).get("name") or "") not in previous_names
             ]
             for name in previous_names:
-                TOOL_HANDLERS.pop(name, None)
+                _tool_registry.tool_handlers.pop(name, None)
         self._mcp_manager = None
         self._mcp_tool_names = ()
 
@@ -820,8 +820,8 @@ class Context:
                         schema.name,
                         [t.pattern_name for t in threats],
                     )
-                TOOL_DEFINITIONS.append(schema.to_openai_function())
-                TOOL_HANDLERS[schema.name] = _build_mcp_handler(mgr, schema.name)
+                _tool_registry.tool_definitions.append(schema.to_openai_function())
+                _tool_registry.tool_handlers[schema.name] = _build_mcp_handler(mgr, schema.name)
                 tool_names.append(schema.name)
 
             if tool_names:
@@ -1261,8 +1261,8 @@ class Context:
         self.copilot_config = None
 
         # ── Wire memory tools into TOOL_HANDLERS (late binding) ──
-        from leapflow.tools.registry_bootstrap import set_memory_manager
-        set_memory_manager(self.memory)
+        from leapflow.tools import registry as _tool_registry
+        _tool_registry.set_memory_manager(self.memory)
 
         # ── Config tools: bind this Context so a config write reloads the live
         # session, the same way `/config set` does. Without it the write lands on
@@ -1280,7 +1280,6 @@ class Context:
             GatewaySessionEnded,
         )
         from leapflow.gateway.connectors.protocol import BackendEvent
-        from leapflow.tools.registry_bootstrap import set_gateway_server
         from leapflow.tools.gateway_tool import set_gateway_approval_gate
 
         async def _on_gateway_event(event: object) -> None:
@@ -1362,7 +1361,7 @@ class Context:
             dedup_store=_dedup_store,
         )
         self.gateway_server.discover_manifests()
-        set_gateway_server(self.gateway_server)
+        _tool_registry.set_gateway_server(self.gateway_server)
         set_gateway_approval_gate(self._approval_orchestrator)
         # Config writes are gated too: several writable keys weaken safety
         # machinery (guardrail.enabled, confirm.default_level, codegen.sandbox),
@@ -1439,7 +1438,7 @@ class Context:
                 return str(msg.get("content") or msg.get("text") or "")
             return ""
 
-        from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS, TOOL_HANDLERS
+        from leapflow.tools import registry as _tool_registry_gw
 
         self._gateway_router = GatewayRouter(
             llm=self.llm,
@@ -1449,8 +1448,8 @@ class Context:
                 "and conversational."
             ),
             send_fn=_gateway_send,
-            tool_definitions=TOOL_DEFINITIONS,
-            tool_handlers=TOOL_HANDLERS,
+            tool_definitions=_tool_registry_gw.tool_definitions,
+            tool_handlers=_tool_registry_gw.tool_handlers,
             persistence=getattr(self, "_conversation_store", None),
             indicator_fn=_gateway_indicator,
             stream_send_fn=_gateway_stream_send,
@@ -1526,8 +1525,8 @@ class Context:
         except Exception:
             logger.debug("Shell approval gate setup skipped", exc_info=True)
         try:
-            from leapflow.tools.registry_bootstrap import set_desktop_gate
-            set_desktop_gate(self._approval_orchestrator)
+            from leapflow.tools import registry as _tool_reg_desktop
+            _tool_reg_desktop.set_desktop_gate(self._approval_orchestrator)
             logger.debug("Desktop approval gate: action orchestrator mode")
         except Exception:
             logger.debug("Desktop approval gate setup skipped", exc_info=True)
@@ -1590,10 +1589,11 @@ class Context:
         # ── Wire SubagentManager + delegate_task tool ──
         try:
             from leapflow.engine.subagent import DefaultSubagentExecutor, SubagentManager
-            from leapflow.tools.registry_bootstrap import (
-                TOOL_DEFINITIONS as _TD, TOOL_HANDLERS as _TH,
-                set_subagent_manager,
-            )
+            from leapflow.tools import registry as _tool_reg_sub
+            if not _tool_reg_sub._assembled:
+                _tool_reg_sub.assemble()
+            _TD = _tool_reg_sub.tool_definitions
+            _TH = _tool_reg_sub.tool_handlers
             if getattr(settings, "agent_subagent_full_loop", False):
                 # Opt-in: subagents run the engine's full adaptive loop on an
                 # isolated child frame (state-isolated via per-frame swap).
@@ -1615,7 +1615,7 @@ class Context:
                 max_depth=settings.agent_subagent_max_depth,
                 max_concurrent=settings.agent_subagent_max_concurrent,
             )
-            set_subagent_manager(self._subagent_manager)
+            _tool_reg_sub.set_subagent_manager(self._subagent_manager)
             logger.info("SubagentManager wired with delegate_task tool")
         except Exception:
             self._subagent_manager = None
@@ -1705,7 +1705,7 @@ class Context:
         # ── Wire File Read Approval Gate ──
         try:
             from leapflow.security.actions import ActionDescriptor
-            from leapflow.tools.registry_bootstrap import set_file_read_gate
+            from leapflow.tools import registry as _tool_reg_fread
 
             approval_orchestrator = self._approval_orchestrator
 
@@ -1727,7 +1727,7 @@ class Context:
                     self.denial_message = result.denial_message if not result.approved else ""
                     return result.approved
 
-            set_file_read_gate(_FileReadGate())
+            _tool_reg_fread.set_file_read_gate(_FileReadGate())
             logger.debug("File read approval gate: action orchestrator")
         except Exception:
             logger.debug("File read gate setup skipped", exc_info=True)
@@ -1735,7 +1735,7 @@ class Context:
         # ── Wire File Write Approval Gate ──
         try:
             from leapflow.security.actions import ActionDescriptor
-            from leapflow.tools.registry_bootstrap import set_file_write_gate
+            from leapflow.tools import registry as _tool_reg_fwrite
 
             approval_orchestrator = self._approval_orchestrator
 
@@ -1758,7 +1758,7 @@ class Context:
                     self.denial_message = result.denial_message if not result.approved else ""
                     return result.approved
 
-            set_file_write_gate(_FileWriteGate())
+            _tool_reg_fwrite.set_file_write_gate(_FileWriteGate())
             logger.debug("File write approval gate: action orchestrator")
         except Exception:
             logger.debug("File write gate setup skipped", exc_info=True)
@@ -1780,7 +1780,9 @@ class Context:
         if self._conversation_store:
             try:
                 from leapflow.daemon.session_coordinator import SessionCoordinator
-                from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS, TOOL_HANDLERS
+                from leapflow.tools import registry as _tool_reg_session
+                if not _tool_reg_session._assembled:
+                    _tool_reg_session.assemble()
                 conv_store = self._conversation_store
                 session_reader = SessionCoordinator()
                 fallback_workspace_cwd = str(Path(str(getattr(self.settings, "workspace_root", "") or os.getcwd())).expanduser().resolve())
@@ -1797,22 +1799,6 @@ class Context:
                     return min(max(parsed, minimum), maximum)
 
                 # ── Register session_search tool ──
-                TOOL_DEFINITIONS.append({
-                    "type": "function",
-                    "function": {
-                        "name": "session_search",
-                        "description": "Search past conversation sessions in the current workspace for relevant context.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string", "description": "Search keywords"},
-                                "limit": {"type": "integer", "description": "Max results (default: 5)"},
-                            },
-                            "required": ["query"],
-                        },
-                    },
-                })
-
                 async def _session_search_handler(params: dict) -> dict:
                     query = str(params.get("query", "") or "")
                     limit = _bounded_int(params.get("limit", 5), 5, minimum=1, maximum=50)
@@ -1838,8 +1824,25 @@ class Context:
                     ]
                     return {"ok": True, "result": _json_result(items)}
 
-                TOOL_HANDLERS["session_search"] = _session_search_handler
-                TOOL_HANDLERS["gp_session_search"] = _session_search_handler
+                _tool_reg_session.register_late_tool(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "session_search",
+                            "description": "Search past conversation sessions in the current workspace for relevant context.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "query": {"type": "string", "description": "Search keywords"},
+                                    "limit": {"type": "integer", "description": "Max results (default: 5)"},
+                                },
+                                "required": ["query"],
+                            },
+                        },
+                    },
+                    _session_search_handler,
+                    "session_search",
+                )
                 logger.debug("session_search tool registered")
 
                 # ── Register session_list tool ──
@@ -1851,25 +1854,6 @@ class Context:
                         return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
                     except (TypeError, ValueError, OSError):
                         return str(ts)[:16]
-
-                TOOL_DEFINITIONS.append({
-                    "type": "function",
-                    "function": {
-                        "name": "session_list",
-                        "description": (
-                            "List recent conversation sessions in the current workspace with stable ids, titles, dates, and summaries. "
-                            "Use for browsing past tasks or when user asks to see history without specific search terms. "
-                            "No keywords needed — returns chronological list."
-                        ),
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "limit": {"type": "integer", "description": "Max sessions to return (default: 10, max: 30)"},
-                            },
-                            "required": [],
-                        },
-                    },
-                })
 
                 async def _session_list_handler(params: dict) -> dict:
                     limit = _bounded_int(params.get("limit", 10), 10, minimum=1, maximum=30)
@@ -1893,32 +1877,31 @@ class Context:
                         items.append(item)
                     return {"ok": True, "result": _json_result(items)}
 
-                TOOL_HANDLERS["session_list"] = _session_list_handler
-                TOOL_HANDLERS["gp_session_list"] = _session_list_handler
+                _tool_reg_session.register_late_tool(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "session_list",
+                            "description": (
+                                "List recent conversation sessions in the current workspace with stable ids, titles, dates, and summaries. "
+                                "Use for browsing past tasks or when user asks to see history without specific search terms. "
+                                "No keywords needed \u2014 returns chronological list."
+                            ),
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "limit": {"type": "integer", "description": "Max sessions to return (default: 10, max: 30)"},
+                                },
+                                "required": [],
+                            },
+                        },
+                    },
+                    _session_list_handler,
+                    "session_list",
+                )
                 logger.debug("session_list tool registered")
 
                 # ── Register session_detail tool ──
-                TOOL_DEFINITIONS.append({
-                    "type": "function",
-                    "function": {
-                        "name": "session_detail",
-                        "description": (
-                            "Read a paginated persisted transcript for one past conversation session in the current workspace. "
-                            "Use after session_list or session_search returns a session_id."
-                        ),
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "session_id": {"type": "string", "description": "Exact session_id from session_list or session_search"},
-                                "limit": {"type": "integer", "description": "Max messages to return (default: 200, max: 1000)"},
-                                "offset": {"type": "integer", "description": "Message offset for pagination (default: 0)"},
-                                "include_inactive": {"type": "boolean", "description": "Include inactive or compacted messages (default: true)"},
-                            },
-                            "required": ["session_id"],
-                        },
-                    },
-                })
-
                 async def _session_detail_handler(params: dict) -> dict:
                     session_id = str(params.get("session_id", "") or "").strip()
                     limit = _bounded_int(params.get("limit", 200), 200, minimum=1, maximum=1000)
@@ -1940,8 +1923,30 @@ class Context:
                         response["error"] = str(detail.get("error", "session detail unavailable"))
                     return response
 
-                TOOL_HANDLERS["session_detail"] = _session_detail_handler
-                TOOL_HANDLERS["gp_session_detail"] = _session_detail_handler
+                _tool_reg_session.register_late_tool(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "session_detail",
+                            "description": (
+                                "Read a paginated persisted transcript for one past conversation session in the current workspace. "
+                                "Use after session_list or session_search returns a session_id."
+                            ),
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "session_id": {"type": "string", "description": "Exact session_id from session_list or session_search"},
+                                    "limit": {"type": "integer", "description": "Max messages to return (default: 200, max: 1000)"},
+                                    "offset": {"type": "integer", "description": "Message offset for pagination (default: 0)"},
+                                    "include_inactive": {"type": "boolean", "description": "Include inactive or compacted messages (default: true)"},
+                                },
+                                "required": ["session_id"],
+                            },
+                        },
+                    },
+                    _session_detail_handler,
+                    "session_detail",
+                )
                 logger.debug("session_detail tool registered")
             except Exception:
                 logger.debug("persisted session tool registration failed", exc_info=True)

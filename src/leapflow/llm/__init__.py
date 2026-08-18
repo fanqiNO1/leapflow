@@ -21,6 +21,14 @@ from leapflow.llm.model_capabilities import (
     ModelCapabilities,
     ModelCapabilityRegistry,
 )
+from leapflow.llm.provider_registry import (
+    LLMProviderPlugin,
+    LLMProviderRegistry,
+    get_default_registry,
+    get_scoped_default_registry,
+    reset_default_registry,
+    ENTRY_POINT_GROUP,
+)
 
 __all__ = [
     "LLMProvider",
@@ -34,6 +42,12 @@ __all__ = [
     "AuxiliaryClient",
     "ModelCapabilities",
     "ModelCapabilityRegistry",
+    "LLMProviderPlugin",
+    "LLMProviderRegistry",
+    "get_default_registry",
+    "get_scoped_default_registry",
+    "reset_default_registry",
+    "ENTRY_POINT_GROUP",
     "parse_provider_configs",
     "parse_credential_pools",
     "build_assistant_message",

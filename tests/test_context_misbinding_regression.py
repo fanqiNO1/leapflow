@@ -9,7 +9,9 @@ from leapflow.llm.message_builder import build_system_message, build_user_messag
 from leapflow.memory.providers.episodic import EpisodicMemoryProvider
 from leapflow.memory.providers.semantic import SemanticMemoryProvider
 from leapflow.memory.providers.working import WorkingMemoryProvider
-from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+from leapflow.tools import registry as _tool_reg
+
+TOOL_DEFINITIONS = _tool_reg.tool_definitions
 
 
 class _Classifier:
