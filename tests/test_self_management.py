@@ -858,7 +858,118 @@ class TestSelfModificationRiskClassification:
 
 
 class TestP1Features:
-    """Tests for the three P1 features: plugin_enable, cross-subsystem introspection, MonitorProducer."""
+    """Tests for P1 features: proposal, plugin_enable, cross-subsystem introspection, MonitorProducer."""
+
+    @pytest.mark.asyncio
+    async def test_plugin_propose_from_explicit_request(self, self_mgmt_plugin: Any, tmp_path: Any) -> None:
+        from leapflow.storage.plugin_proposal_store import JsonPluginProposalStore
+        store = JsonPluginProposalStore(tmp_path / "proposals.json")
+        self_mgmt_plugin.bind_runtime(plugin_proposal_store=store)
+
+        result = await self_mgmt_plugin._plugin_propose_handler(
+            requested_capability="Validate JSON and pretty-print it",
+            plugin_id="json_tools",
+            proposed_tools=["json_validate", "json_pretty_print"],
+        )
+
+        assert result["ok"] is True
+        proposal = result["proposal"]
+        assert proposal["plugin_id"] == "json_tools"
+        assert proposal["gap_type"] == "tool_plugin"
+        assert [tool["name"] for tool in proposal["proposed_tools"]] == [
+            "json_validate",
+            "json_pretty_print",
+        ]
+        assert result["next_actions"]
+        assert store.get(proposal["proposal_id"]) is not None
+
+    @pytest.mark.asyncio
+    async def test_plugin_propose_from_unknown_tool_evidence(self, self_mgmt_plugin: Any, tmp_path: Any) -> None:
+        from leapflow.storage.plugin_proposal_store import JsonPluginProposalStore
+        self_mgmt_plugin.bind_runtime(plugin_proposal_store=JsonPluginProposalStore(tmp_path / "proposals.json"))
+
+        evidence = {
+            "error_type": "unknown_tool",
+            "original_tool_name": "json.pretty-print",
+            "suggestions": ["text_replace"],
+            "recovery_hint": "No JSON formatter is registered.",
+        }
+
+        result = await self_mgmt_plugin._plugin_propose_handler(
+            requested_capability="Format JSON text",
+            evidence=evidence,
+        )
+
+        assert result["ok"] is True
+        proposal = result["proposal"]
+        assert proposal["plugin_id"] == "json_pretty_print_plugin"
+        assert proposal["proposed_tools"][0]["name"] == "json_pretty_print"
+        assert proposal["evidence"][0]["evidence_type"] == "unknown_tool"
+
+    @pytest.mark.asyncio
+    async def test_plugin_propose_rejects_empty_request(self, self_mgmt_plugin: Any, tmp_path: Any) -> None:
+        from leapflow.storage.plugin_proposal_store import JsonPluginProposalStore
+        self_mgmt_plugin.bind_runtime(plugin_proposal_store=JsonPluginProposalStore(tmp_path / "proposals.json"))
+
+        result = await self_mgmt_plugin._plugin_propose_handler(requested_capability="")
+
+        assert result["ok"] is False
+        assert "requested_capability" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_proposal_governed_generate_and_install(
+        self, self_mgmt_plugin: Any, tmp_path: Any
+    ) -> None:
+        from leapflow.plugins import get_registry
+        from leapflow.storage.plugin_proposal_store import JsonPluginProposalStore
+
+        class _FakeLLM:
+            async def achat(self, messages):  # type: ignore[no-untyped-def]
+                return _valid_plugin_src("proposal_echo", "proposal_echo_tool")
+
+        store = JsonPluginProposalStore(tmp_path / "proposals.json")
+        self_mgmt_plugin.bind_runtime(
+            plugin_proposal_store=store,
+            llm_provider=_FakeLLM(),
+            plugin_generation_enabled=True,
+            plugin_install_dir=str(tmp_path / "plugins"),
+        )
+        self_mgmt_plugin._plugin_approval_gate = FakeApprovalGate(approved=True)
+
+        proposed = await self_mgmt_plugin._plugin_propose_handler(
+            requested_capability="Echo a message from a generated plugin",
+            plugin_id="proposal_echo",
+            proposed_tools=["proposal_echo_tool"],
+            test_cases=[
+                {
+                    "tool_name": "proposal_echo_tool",
+                    "arguments": {"message": "hi"},
+                    "expected_subset": {"ok": True, "echoed": "hi"},
+                }
+            ],
+        )
+        proposal_id = proposed["proposal"]["proposal_id"]
+
+        generated = await self_mgmt_plugin._plugin_generate_handler(proposal_id=proposal_id)
+        assert generated["ok"], generated
+        assert generated["proposal_id"] == proposal_id
+        assert store.get(proposal_id).status == "review"
+
+        installed = await self_mgmt_plugin._plugin_install_handler(
+            proposal_id=proposal_id,
+            code=generated["code"],
+        )
+        assert installed["ok"], installed
+        assert installed["proposal_id"] == proposal_id
+        assert installed["behavior_tests"][0]["result"] == {"ok": True, "echoed": "hi"}
+        assert store.get(proposal_id).status == "approved"
+        assert "proposal_echo_tool" in get_registry().tool_handlers
+        try:
+            result = await get_registry().tool_handlers["proposal_echo_tool"](message="hi")
+            assert result == {"ok": True, "echoed": "hi"}
+        finally:
+            _cleanup_installed("proposal_echo")
+            _reset_install_deps(self_mgmt_plugin)
 
     # ── plugin_enable tests ──────────────────────────────
 
@@ -1197,6 +1308,8 @@ def _reset_install_deps(plugin: Any) -> None:
     plugin._plugin_install_dir = None
     plugin._marketplace_client = None
     plugin._trusted_pubkeys = set()
+    plugin._plugin_proposal_store = None
+    plugin._plugin_version_store = None
 
 
 class TestPluginInstallPath:
@@ -1268,6 +1381,127 @@ class TestPluginInstallPath:
             assert get_registry().get_plugin(plugin_id) is None
             assert tool_name not in get_registry().tool_handlers
             assert get_scoped_registry().get_plugin_module(plugin_id) is None
+        finally:
+            _cleanup_installed(plugin_id)
+            _reset_install_deps(self_mgmt_plugin)
+
+    @pytest.mark.asyncio
+    async def test_plugin_versions_and_rollback(
+        self, self_mgmt_plugin: Any, tmp_path: Any
+    ) -> None:
+        from leapflow.plugins import get_registry
+        from leapflow.storage.plugin_version_store import PluginVersionStore
+
+        plugin_id = "tst_versioned_plug"
+        tool_name = "tst_versioned_tool"
+        install_dir = tmp_path / "plugins"
+        version_store = PluginVersionStore(tmp_path / "versions")
+        self_mgmt_plugin._plugin_approval_gate = FakeApprovalGate(approved=True)
+        self_mgmt_plugin.bind_runtime(
+            plugin_install_dir=str(install_dir),
+            plugin_version_store=version_store,
+        )
+
+        def source(label: str) -> str:
+            return _valid_plugin_src(plugin_id, tool_name).replace(
+                "return {'ok': True, 'echoed': message}",
+                f"return {{'ok': True, 'echoed': message, 'version': {label!r}}}",
+            )
+
+        try:
+            install = await self_mgmt_plugin._plugin_install_handler(
+                plugin_id=plugin_id,
+                code=source("v0"),
+                version_label="v0",
+            )
+            assert install["ok"], install
+            assert install["version"] == "v0"
+            assert (await get_registry().tool_handlers[tool_name](message="x"))["version"] == "v0"
+
+            (install_dir / f"{plugin_id}.py").write_text(source("v1"), encoding="utf-8")
+            reload_result = await self_mgmt_plugin._plugin_reload_handler(
+                plugin_id=plugin_id,
+                version_label="v1",
+            )
+            assert reload_result["ok"], reload_result
+            assert reload_result["version"] == "v1"
+            assert (await get_registry().tool_handlers[tool_name](message="x"))["version"] == "v1"
+
+            versions = await self_mgmt_plugin._plugin_versions_handler(plugin_id=plugin_id)
+            assert [item["version"] for item in versions["versions"]] == ["v0", "v1"]
+
+            rollback = await self_mgmt_plugin._plugin_rollback_handler(plugin_id=plugin_id, version="v0")
+            assert rollback["ok"], rollback
+            assert rollback["version"] == "v0"
+            assert (await get_registry().tool_handlers[tool_name](message="x"))["version"] == "v0"
+        finally:
+            _cleanup_installed(plugin_id)
+            _reset_install_deps(self_mgmt_plugin)
+
+    @pytest.mark.asyncio
+    async def test_plugin_reload_restores_previous_version_when_behavior_tests_fail(
+        self, self_mgmt_plugin: Any, tmp_path: Any
+    ) -> None:
+        from leapflow.domain.plugin_proposal import BehaviorTestCase, PluginProposal
+        from leapflow.plugins import get_registry
+        from leapflow.storage.plugin_proposal_store import JsonPluginProposalStore
+        from leapflow.storage.plugin_version_store import PluginVersionStore
+
+        plugin_id = "tst_behavior_reload_plug"
+        tool_name = "tst_behavior_reload_tool"
+        install_dir = tmp_path / "plugins"
+        proposal_store = JsonPluginProposalStore(tmp_path / "proposals.json")
+        version_store = PluginVersionStore(tmp_path / "versions")
+        proposal = proposal_store.save(
+            PluginProposal.create(
+                plugin_id=plugin_id,
+                capability_summary="Echo a message and preserve the expected behavior marker",
+                proposed_tools=(),
+                test_cases=(
+                    BehaviorTestCase.create(
+                        tool_name,
+                        arguments={"message": "x"},
+                        expected_subset={"ok": True, "echoed": "x", "version": "good"},
+                    ),
+                ),
+            )
+        )
+        self_mgmt_plugin._plugin_approval_gate = FakeApprovalGate(approved=True)
+        self_mgmt_plugin.bind_runtime(
+            plugin_install_dir=str(install_dir),
+            plugin_proposal_store=proposal_store,
+            plugin_version_store=version_store,
+        )
+
+        def source(label: str) -> str:
+            return _valid_plugin_src(plugin_id, tool_name).replace(
+                "return {'ok': True, 'echoed': message}",
+                f"return {{'ok': True, 'echoed': message, 'version': {label!r}}}",
+            )
+
+        try:
+            install = await self_mgmt_plugin._plugin_install_handler(
+                proposal_id=proposal.proposal_id,
+                code=source("good"),
+                version_label="good",
+            )
+            assert install["ok"], install
+            assert install["behavior_tests"][0]["result"]["version"] == "good"
+
+            target = install_dir / f"{plugin_id}.py"
+            target.write_text(source("bad"), encoding="utf-8")
+            reload_result = await self_mgmt_plugin._plugin_reload_handler(
+                plugin_id=plugin_id,
+                version_label="bad",
+            )
+
+            assert reload_result["ok"] is False
+            assert "Behavior tests failed" in reload_result["error"]
+            assert reload_result["rolled_back"] is True
+            assert (await get_registry().tool_handlers[tool_name](message="x"))["version"] == "good"
+            assert "'version': 'good'" in target.read_text(encoding="utf-8")
+            versions = await self_mgmt_plugin._plugin_versions_handler(plugin_id=plugin_id)
+            assert [item["version"] for item in versions["versions"]] == ["good"]
         finally:
             _cleanup_installed(plugin_id)
             _reset_install_deps(self_mgmt_plugin)

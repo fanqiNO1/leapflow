@@ -10,9 +10,9 @@ This is a composition wrapper — the underlying ToolPluginRegistry is NOT modif
 from __future__ import annotations
 
 import importlib
-import importlib.util
 import logging
 import sys
+import types
 from pathlib import Path
 from typing import Any, Optional
 
@@ -194,14 +194,19 @@ class ScopedToolRegistry:
 
     @staticmethod
     def _load_module_from_file(module_path: str, file_path: Path) -> Any:
-        """Load ``module_path`` from ``file_path`` without relying on sys.path."""
-        spec = importlib.util.spec_from_file_location(module_path, file_path)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"Cannot create import spec for plugin file '{file_path}'")
-        module = importlib.util.module_from_spec(spec)
+        """Load ``module_path`` from current source text, bypassing pyc caches."""
+        try:
+            source = file_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"Cannot read plugin file '{file_path}': {exc}") from exc
+        module = types.ModuleType(module_path)
+        module.__file__ = str(file_path)
+        module.__package__ = ""
+        module.__loader__ = None
+        module.__spec__ = None
         sys.modules[module_path] = module
         try:
-            spec.loader.exec_module(module)
+            exec(compile(source, str(file_path), "exec"), module.__dict__)
         except Exception:
             sys.modules.pop(module_path, None)
             raise

@@ -290,7 +290,7 @@ async def serve_daemon(settings: Any, *, mock_host: bool = False) -> int:
 
     runtime_dir = settings.runtime_dir
     sock_path = get_transport().readiness_path(runtime_dir)
-    service = RuntimeLeapService(settings, mock_host=mock_host)
+    service = RuntimeLeapService(settings, mock_host=mock_host, auto_start_deferred=False)
     await service.start()
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
@@ -312,6 +312,8 @@ async def serve_daemon(settings: Any, *, mock_host: bool = False) -> int:
             logger.debug("daemon: signal handlers unsupported on this event loop")
 
     task = asyncio.create_task(server.serve_forever())
+    await _wait_server_listening(server, task)
+    service.start_deferred_init()
     idle_task = asyncio.create_task(
         _watch_idle_shutdown(
             server,
@@ -336,6 +338,14 @@ async def serve_daemon(settings: Any, *, mock_host: bool = False) -> int:
         await service.shutdown()
         cleanup_runtime_dir(runtime_dir)
     return 0
+
+
+async def _wait_server_listening(server: UnixRpcServer, task: asyncio.Task[None]) -> None:
+    """Wait until the RPC server has bound its transport before background init."""
+    while getattr(server, "_server", None) is None:
+        if task.done():
+            await task
+        await asyncio.sleep(0.01)
 
 
 async def _watch_idle_shutdown(

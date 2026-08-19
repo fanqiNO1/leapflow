@@ -56,9 +56,10 @@ class RuntimeLeapService:
 
     # ── Construction ─────────────────────────────────────────────────
 
-    def __init__(self, settings: Any, *, mock_host: bool = False) -> None:
+    def __init__(self, settings: Any, *, mock_host: bool = False, auto_start_deferred: bool = True) -> None:
         self._settings = settings
         self._mock_host = mock_host
+        self._auto_start_deferred = auto_start_deferred
         self._ctx: Any | None = None
         self._monitor_coordinator = MonitorCoordinator()
         self._reentry_coordinator = ReentryCoordinator()
@@ -111,7 +112,8 @@ class RuntimeLeapService:
         self._approval_coordinator.install_gate(ctx, self)
         install_learn_notifications(ctx, self.notification_bus)
         self._ctx = ctx
-        self._deferred_init_task = asyncio.create_task(self._run_deferred_init(ctx))
+        if self._auto_start_deferred:
+            self.start_deferred_init()
         # Monitor: start only when scheduler is enabled (coordinator checks internally)
         settings = getattr(ctx, "settings", self._settings)
         self._monitor_coordinator._build_services_proxy = lambda c, s: _ProducerServices(self)
@@ -136,6 +138,13 @@ class RuntimeLeapService:
                 except Exception:
                     logger.debug("daemon: observation subsystem start failed", exc_info=True)
                     self._observation = None
+
+    def start_deferred_init(self) -> None:
+        """Start background non-critical initialization once."""
+        if self._ctx is None:
+            raise RuntimeError("leapd runtime is not initialized")
+        if self._deferred_init_task is None or self._deferred_init_task.done():
+            self._deferred_init_task = asyncio.create_task(self._run_deferred_init(self._ctx))
 
     async def shutdown(self) -> None:
         self._build_staleness.cancel_pending()

@@ -485,7 +485,7 @@ result = client.install("plugin_name", verify=True, trusted_pubkeys={"..."})
 - `/plugin` — List all registered plugins.
 - `/plugin status <id>` — Show plugin details and trust level.
 
-Mutating operations (install, reload, disable, enable) are only available through the self-management tools in daemon mode, and require explicit approval.
+Mutating operations (install, rollback, reload, disable, remove, enable) are only available through the self-management tools in daemon mode, and require explicit approval. Read-only governance tools such as `plugin_versions` can inspect recorded profile-scoped source snapshots without approval.
 
 ---
 

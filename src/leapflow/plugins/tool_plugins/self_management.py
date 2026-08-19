@@ -1,24 +1,28 @@
 """Self-Management plugin — lets the Agent introspect and manage its own plugin composition.
 
-This is the Phase 2.4 Self-Modification MVP. It exposes seven tools:
+This is the Phase 2.4 Self-Modification MVP. It exposes eleven tools:
 
-Read-only introspection (no approval needed):
-    - plugin_list    : list all registered plugins across Tool/Gateway/LLM subsystems
-    - plugin_status  : detailed info about one plugin (tools, deps, fiber state, generation)
+Read-only governance (no approval needed):
+    - plugin_list     : list all registered plugins across Tool/Gateway/LLM subsystems
+    - plugin_status   : detailed info about one plugin (tools, deps, fiber state, generation)
+    - plugin_versions : inspect recorded profile plugin versions and the active pointer
+    - plugin_propose  : create a side-effect-free proposal from capability-gap evidence
 
 Generation (no approval needed — produces validated code without installing):
-    - plugin_generate: describe a capability need; the LLM produces conformant
-                       plugin code and it is rigorously validated. The validated
-                       code is returned; installation is a separate, gated step.
+    - plugin_generate : describe a capability need; the LLM produces conformant
+                        plugin code and it is rigorously validated. The validated
+                        code is returned; installation is a separate, gated step.
 
 State-mutating (REQUIRES approval — routed through the plugin_approval_gate):
-    - plugin_install : write validated code (from plugin_generate) or a
-                       marketplace payload into the profile-scoped plugins
-                       directory and load it dynamically. This mutates the
-                       filesystem and the live registry.
-    - plugin_reload  : hot-reload a plugin
-    - plugin_disable : dispose a plugin's fiber (removes its tools)
-    - plugin_enable  : re-enable a previously disabled plugin
+    - plugin_install  : write validated code (from plugin_generate) or a
+                        marketplace payload into the profile-scoped plugins
+                        directory and load it dynamically. This mutates the
+                        filesystem and the live registry.
+    - plugin_rollback : restore a recorded source snapshot and hot-reload it
+    - plugin_reload   : hot-reload a plugin
+    - plugin_disable  : dispose a plugin's fiber (removes its tools)
+    - plugin_remove   : terminally remove a plugin and optionally delete source
+    - plugin_enable   : re-enable a previously disabled plugin
 
 Concurrency note: plugin_install, plugin_disable, plugin_reload, and plugin_enable
 operate at the process-global registry level; changes affect all sessions in this
@@ -78,6 +82,11 @@ class SelfManagementPlugin:
         # Hex-encoded Ed25519 public keys trusted to sign marketplace plugins.
         # When non-empty, marketplace installs require a valid signature.
         self._trusted_pubkeys: set[str] = set()
+        # Optional persistent store for PluginProposal review queue. When not
+        # injected, it is resolved lazily from ProfileLayout.plugin_proposals_path.
+        self._plugin_proposal_store: Any = None
+        # Optional version store; lazily resolved from ProfileLayout.plugin_versions_dir.
+        self._plugin_version_store: Any = None
 
     @property
     def plugin_id(self) -> str:
@@ -96,6 +105,8 @@ class SelfManagementPlugin:
             "plugin_install_dir",
             "marketplace_client",
             "marketplace_trusted_pubkeys",
+            "plugin_proposal_store",
+            "plugin_version_store",
         ]
 
     def bind_runtime(self, **deps: Any) -> None:
@@ -113,6 +124,10 @@ class SelfManagementPlugin:
         if "marketplace_trusted_pubkeys" in deps:
             raw = deps["marketplace_trusted_pubkeys"] or ()
             self._trusted_pubkeys = {str(k).strip() for k in raw if str(k).strip()}
+        if "plugin_proposal_store" in deps:
+            self._plugin_proposal_store = deps["plugin_proposal_store"]
+        if "plugin_version_store" in deps:
+            self._plugin_version_store = deps["plugin_version_store"]
 
     # ── Read-only introspection ────────────────────────────
 
@@ -231,13 +246,103 @@ class SelfManagementPlugin:
 
     # ── Generation (produces code, does NOT install) ──────────
 
-    async def _plugin_generate_handler(self, plugin_id: str, description: str, **kwargs: Any) -> Dict[str, Any]:
+    async def _plugin_propose_handler(
+        self,
+        requested_capability: str,
+        plugin_id: str = "",
+        proposed_tools: list[str] | None = None,
+        test_cases: list[dict[str, Any]] | None = None,
+        risk_level: str = "read_only",
+        evidence: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Create a side-effect-free plugin proposal from explicit evidence."""
+        try:
+            from leapflow.learning.capability_gap_detector import CapabilityGapDetector
+        except ImportError as exc:
+            return {"ok": False, "error": f"Capability gap detector unavailable: {exc}"}
+
+        detector = CapabilityGapDetector()
+        try:
+            proposal = None
+            if evidence and evidence.get("error_type") == "unknown_tool":
+                proposal = detector.proposal_from_unknown_tool(
+                    evidence,
+                    requested_capability=requested_capability,
+                )
+            if proposal is None:
+                proposal = detector.proposal_from_capability_request(
+                    requested_capability,
+                    plugin_id=plugin_id,
+                    proposed_tool_names=tuple(proposed_tools or ()),
+                    risk_level=risk_level,  # type: ignore[arg-type]
+                    evidence_summary=str((evidence or {}).get("summary") or ""),
+                )
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": f"Proposal failed: {exc}"}
+
+        if test_cases:
+            try:
+                from leapflow.domain.plugin_proposal import BehaviorTestCase, PluginProposal
+                parsed_tests = tuple(
+                    BehaviorTestCase.create(
+                        str(item.get("tool_name") or ""),
+                        arguments=dict(item.get("arguments") or {}),
+                        expected_subset=dict(item.get("expected_subset") or {}),
+                        description=str(item.get("description") or ""),
+                    )
+                    for item in test_cases
+                    if isinstance(item, dict)
+                )
+                proposal = PluginProposal(
+                    proposal_id=proposal.proposal_id,
+                    plugin_id=proposal.plugin_id,
+                    capability_summary=proposal.capability_summary,
+                    gap_type=proposal.gap_type,
+                    risk_level=proposal.risk_level,
+                    status=proposal.status,
+                    evidence=proposal.evidence,
+                    proposed_tools=proposal.proposed_tools,
+                    test_cases=parsed_tests,
+                    created_at=proposal.created_at,
+                )
+            except (TypeError, ValueError) as exc:
+                return {"ok": False, "error": f"Proposal test case parsing failed: {exc}"}
+
+        try:
+            stored = self._proposal_store().save(proposal)
+        except (RuntimeError, OSError, ValueError, AttributeError) as exc:
+            return {"ok": False, "error": f"Proposal persistence failed: {exc}"}
+
+        return {
+            "ok": True,
+            "action": "propose",
+            "proposal": stored.to_dict(),
+            "next_actions": [
+                "Review proposal fields and risk level.",
+                "If acceptable, call plugin_generate with proposal_id to preserve review metadata.",
+                "Install generated code separately with plugin_install(proposal_id=...) after validation and approval.",
+            ],
+        }
+
+    async def _plugin_generate_handler(
+        self, plugin_id: str = "", description: str = "", proposal_id: str = "", **kwargs: Any
+    ) -> Dict[str, Any]:
         """Generate a new plugin via LLM and validate it. Returns validated code (does NOT install).
 
         This is the LLM co-evolution entry point: describe a capability need,
         the LLM generates conformant plugin code, and it's rigorously validated.
         Installation is a SEPARATE approval-gated step (plugin_install).
         """
+        if proposal_id:
+            proposal = self._proposal_store().get(proposal_id)
+            if proposal is None:
+                return {"ok": False, "error": f"Plugin proposal '{proposal_id}' not found"}
+            plugin_id = plugin_id or proposal.plugin_id
+            description = description or proposal.capability_summary
+        if not plugin_id or not description:
+            return {"ok": False, "error": "plugin_id and description are required unless proposal_id is provided"}
+
         if not self._plugin_generation_enabled:
             return {
                 "ok": False,
@@ -266,6 +371,10 @@ class SelfManagementPlugin:
             generator = PluginGenerator(llm_provider=self._llm_provider)
             request = PluginGenerationRequest(plugin_id=plugin_id, description=description)
             result = await generator.generate_and_validate(request)
+            if proposal_id:
+                result["proposal_id"] = proposal_id
+                if result.get("ok"):
+                    self._proposal_store().update_status(proposal_id, "review")
             return result
         except (AttributeError, RuntimeError) as exc:
             return {"ok": False, "error": f"Generation failed: {exc}"}
@@ -273,7 +382,7 @@ class SelfManagementPlugin:
     # ── State-mutating (requires approval) ─────────────────
 
     async def _plugin_install_handler(
-        self, plugin_id: str, code: str = "", marketplace_name: str = "", **kwargs: Any
+        self, plugin_id: str = "", code: str = "", marketplace_name: str = "", proposal_id: str = "", version_label: str = "", **kwargs: Any
     ) -> Dict[str, Any]:
         """Install a plugin from validated code or marketplace, then load it. REQUIRES approval.
 
@@ -287,7 +396,16 @@ class SelfManagementPlugin:
         smoke-tested in an isolated subprocess (SandboxHost). Any failure path
         rolls back cleanly: no half-initialized fiber and no orphaned file.
         """
-        approved, denial = await self._check_approval("install", plugin_id)
+        proposal = None
+        if proposal_id:
+            proposal = self._proposal_store().get(proposal_id)
+            if proposal is None:
+                return {"ok": False, "error": f"Plugin proposal '{proposal_id}' not found"}
+            plugin_id = plugin_id or proposal.plugin_id
+        if not plugin_id:
+            return {"ok": False, "error": "plugin_id is required unless proposal_id is provided"}
+
+        approved, denial = await self._check_approval("install", plugin_id, proposal_id=proposal_id)
         if not approved:
             return {"ok": False, "error": denial, "requires_approval": True}
 
@@ -309,10 +427,16 @@ class SelfManagementPlugin:
 
         try:
             if code:
-                return await self._install_from_code(plugin_id, code)
-            if marketplace_name:
-                return await self._install_from_marketplace(plugin_id, marketplace_name)
-            return {"ok": False, "error": "Must provide either code or marketplace_name"}
+                result = await self._install_from_code(plugin_id, code, proposal=proposal, version_label=version_label)
+            elif marketplace_name:
+                result = await self._install_from_marketplace(plugin_id, marketplace_name)
+            else:
+                return {"ok": False, "error": "Must provide either code or marketplace_name"}
+            if proposal_id:
+                result["proposal_id"] = proposal_id
+                if result.get("ok"):
+                    self._proposal_store().update_status(proposal_id, "approved")
+            return result
         except (ImportError, AttributeError, OSError, RuntimeError, ValueError) as exc:
             logger.warning("plugin_install failed for %s: %s", plugin_id, exc, exc_info=True)
             return {"ok": False, "error": f"Install failed: {exc}"}
@@ -336,7 +460,37 @@ class SelfManagementPlugin:
             return profile_layout.plugins_dir
         return Path(settings.layout.root) / "plugins"
 
-    async def _install_from_code(self, plugin_id: str, code: str) -> Dict[str, Any]:
+    def _proposal_store(self) -> Any:
+        """Resolve the profile-scoped proposal store."""
+        if self._plugin_proposal_store is not None:
+            return self._plugin_proposal_store
+        from leapflow.config import get_settings
+        from leapflow.storage.plugin_proposal_store import JsonPluginProposalStore
+
+        settings = get_settings()
+        profile_layout = getattr(settings, "profile_layout", None)
+        if profile_layout is None:
+            raise RuntimeError("profile_layout is required for plugin proposal storage")
+        self._plugin_proposal_store = JsonPluginProposalStore(profile_layout.plugin_proposals_path)
+        return self._plugin_proposal_store
+
+    def _version_store(self) -> Any:
+        """Resolve the profile-scoped plugin version store."""
+        if self._plugin_version_store is not None:
+            return self._plugin_version_store
+        from leapflow.config import get_settings
+        from leapflow.storage.plugin_version_store import PluginVersionStore
+
+        settings = get_settings()
+        profile_layout = getattr(settings, "profile_layout", None)
+        if profile_layout is None:
+            raise RuntimeError("profile_layout is required for plugin version storage")
+        self._plugin_version_store = PluginVersionStore(profile_layout.plugin_versions_dir)
+        return self._plugin_version_store
+
+    async def _install_from_code(
+        self, plugin_id: str, code: str, *, proposal: Any = None, version_label: str = ""
+    ) -> Dict[str, Any]:
         """Re-validate, write to the profile dir, smoke test, then load in-process."""
         from leapflow.learning.plugin_generator import PluginValidator
 
@@ -359,7 +513,35 @@ class SelfManagementPlugin:
             self._safe_unlink(target)
             return {"ok": False, "error": smoke_err}
 
-        return self._register_inprocess(plugin_id, plugin_id, target)
+        result = self._register_inprocess(plugin_id, plugin_id, target)
+        if not result.get("ok"):
+            return result
+        if proposal is not None and getattr(proposal, "test_cases", ()):
+            ok, error, observations = await self._run_behavior_tests_for_plugin(
+                plugin_id, tuple(getattr(proposal, "test_cases", ()) or ())
+            )
+            result["behavior_tests"] = observations
+            if not ok:
+                from leapflow.plugins import get_scoped_registry
+
+                scoped = get_scoped_registry()
+                try:
+                    scoped.dispose_plugin(plugin_id, prune_metadata=True)
+                except KeyError:
+                    pass
+                self._safe_unlink(target)
+                return {"ok": False, "error": f"Behavior tests failed: {error}"}
+        try:
+            version_info = self._version_store().record_source(
+                plugin_id,
+                target,
+                version=version_label,
+                metadata={"source": "plugin_install", "proposal_id": getattr(proposal, "proposal_id", "")},
+            )
+            result["version"] = version_info.get("version", "")
+        except (RuntimeError, OSError, ValueError, AttributeError) as exc:
+            logger.debug("plugin version recording skipped for %s: %s", plugin_id, exc, exc_info=True)
+        return result
 
     async def _install_from_marketplace(self, plugin_id: str, marketplace_name: str) -> Dict[str, Any]:
         """Install via the configured MarketplaceClient with verification + smoke test."""
@@ -455,7 +637,9 @@ class SelfManagementPlugin:
             except (OSError, RuntimeError):
                 pass
 
-    def _register_inprocess(self, plugin_id: str, module_name: str, target: "Path") -> Dict[str, Any]:
+    def _register_inprocess(
+        self, plugin_id: str, module_name: str, target: "Path"
+    ) -> Dict[str, Any]:
         """Dynamically load the installed module and register it on the registry.
 
         On any failure the fiber is disposed, the module removed from
@@ -645,6 +829,115 @@ class SelfManagementPlugin:
         except OSError:
             pass
 
+    def _active_snapshot_path(self, plugin_id: str) -> "Path | None":
+        """Return the active version snapshot path, if one is recorded."""
+        try:
+            active = self._version_store().active(plugin_id)
+        except (RuntimeError, OSError, ValueError, AttributeError):
+            return None
+        if not isinstance(active, dict):
+            return None
+        raw_path = str(active.get("snapshot_path") or "")
+        if not raw_path:
+            return None
+        path = Path(raw_path)
+        return path if path.exists() else None
+
+    def _active_proposal_tests(self, plugin_id: str) -> tuple[str, tuple[Any, ...], str]:
+        """Return behavior tests linked to the plugin's active proposal, if any."""
+        try:
+            active = self._version_store().active(plugin_id)
+        except (RuntimeError, OSError, ValueError, AttributeError) as exc:
+            logger.debug("Cannot read active plugin version for %s: %s", plugin_id, exc, exc_info=True)
+            return "", (), ""
+        if not isinstance(active, dict):
+            return "", (), ""
+        metadata = active.get("metadata")
+        if not isinstance(metadata, dict):
+            return "", (), ""
+        proposal_id = str(metadata.get("proposal_id") or "")
+        if not proposal_id:
+            return "", (), ""
+        try:
+            proposal = self._proposal_store().get(proposal_id)
+        except (RuntimeError, OSError, ValueError, AttributeError) as exc:
+            return proposal_id, (), f"Plugin proposal '{proposal_id}' unavailable for behavior tests: {exc}"
+        if proposal is None:
+            return proposal_id, (), f"Plugin proposal '{proposal_id}' not found for behavior tests"
+        return proposal_id, tuple(getattr(proposal, "test_cases", ()) or ()), ""
+
+    async def _run_behavior_tests_for_plugin(
+        self, plugin_id: str, test_cases: tuple[Any, ...]
+    ) -> tuple[bool, str, list[dict[str, Any]]]:
+        """Execute behavior tests against the currently registered plugin instance."""
+        if not test_cases:
+            return True, "", []
+        from leapflow.learning.plugin_behavior_tests import run_plugin_behavior_tests
+        from leapflow.plugins import get_registry
+
+        plugin = get_registry().get_plugin(plugin_id)
+        if plugin is None:
+            return False, f"Plugin '{plugin_id}' is not registered for behavior tests", []
+        return await run_plugin_behavior_tests(plugin, test_cases)
+
+    def _restore_plugin_source(
+        self,
+        plugin_id: str,
+        source_path: "Path | None",
+        snapshot_path: "Path | None",
+    ) -> str:
+        """Restore a previous source snapshot and reload it; return an error string on failure."""
+        if source_path is None or snapshot_path is None:
+            return "no previous source snapshot is available"
+        try:
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_bytes(snapshot_path.read_bytes())
+            from leapflow.plugins import reload_plugin
+
+            reload_plugin(plugin_id)
+            return ""
+        except (OSError, RuntimeError, KeyError, AttributeError) as exc:
+            logger.warning("plugin rollback after failed behavior tests failed: %s", exc, exc_info=True)
+            return str(exc)
+
+    async def _plugin_versions_handler(self, plugin_id: str, **kwargs: Any) -> Dict[str, Any]:
+        """List recorded versions and the active pointer for a profile plugin."""
+        try:
+            store = self._version_store()
+            return {
+                "ok": True,
+                "plugin_id": plugin_id,
+                "active": store.active(plugin_id),
+                "versions": store.versions(plugin_id),
+            }
+        except (RuntimeError, OSError, ValueError, AttributeError) as exc:
+            return {"ok": False, "error": f"Version query failed: {exc}"}
+
+    async def _plugin_rollback_handler(self, plugin_id: str, version: str, **kwargs: Any) -> Dict[str, Any]:
+        """Rollback a profile plugin to a recorded source snapshot and reload it."""
+        approved, denial = await self._check_approval("rollback", plugin_id)
+        if not approved:
+            return {"ok": False, "error": denial, "requires_approval": True}
+        try:
+            from leapflow.plugins import reload_plugin
+
+            target = self._resolve_install_dir() / f"{plugin_id}.py"
+            entry = self._version_store().rollback(plugin_id, version, target)
+            fiber = reload_plugin(plugin_id)
+            return {
+                "ok": True,
+                "action": "rollback",
+                "plugin_id": plugin_id,
+                "version": entry.get("version", version),
+                "state": fiber.state.value,
+                "new_generation": fiber.generation,
+            }
+        except KeyError as exc:
+            return {"ok": False, "error": str(exc)}
+        except (RuntimeError, OSError, AttributeError) as exc:
+            logger.warning("plugin_rollback failed: %s", exc, exc_info=True)
+            return {"ok": False, "error": f"Rollback failed: {exc}"}
+
     async def _plugin_enable_handler(self, plugin_id: str, **kwargs: Any) -> Dict[str, Any]:
         """Re-enable a previously disabled plugin. REQUIRES approval.
 
@@ -673,7 +966,9 @@ class SelfManagementPlugin:
         except RuntimeError as exc:
             return {"ok": False, "error": f"Enable failed: {exc}"}
 
-    async def _check_approval(self, action: str, plugin_id: str) -> tuple[bool, str]:
+    async def _check_approval(
+        self, action: str, plugin_id: str, *, proposal_id: str = ""
+    ) -> tuple[bool, str]:
         """Consult the plugin approval gate. Returns (approved, denial_message).
 
         Progressive Trust: PRODUCTION-level plugins get auto-approved for
@@ -716,6 +1011,7 @@ class SelfManagementPlugin:
                     "effect": "write",
                     "risk_level": "high",
                     "category": "self_modification",
+                    "proposal_id": proposal_id,
                 },
             )
             result = await self._plugin_approval_gate.evaluate(descriptor)
@@ -730,22 +1026,67 @@ class SelfManagementPlugin:
             logger.warning("approval check failed: %s", exc, exc_info=True)
             return False, f"Plugin action '{action}' blocked: approval check error"
 
-    async def _plugin_reload_handler(self, plugin_id: str, **kwargs: Any) -> Dict[str, Any]:
+    async def _plugin_reload_handler(self, plugin_id: str, version_label: str = "", **kwargs: Any) -> Dict[str, Any]:
         """Hot-reload a plugin. REQUIRES approval."""
         approved, denial = await self._check_approval("reload", plugin_id)
         if not approved:
             return {"ok": False, "error": denial, "requires_approval": True}
 
         try:
-            from leapflow.plugins import reload_plugin
+            from leapflow.plugins import get_scoped_registry, reload_plugin
+
+            scoped = get_scoped_registry()
+            source_path = scoped.get_plugin_file(plugin_id)
+            previous_snapshot = self._active_snapshot_path(plugin_id)
+            proposal_id, test_cases, test_error = self._active_proposal_tests(plugin_id)
+            if test_error:
+                return {"ok": False, "error": test_error}
+
             new_fiber = reload_plugin(plugin_id)
-            return {
+            behavior_observations: list[dict[str, Any]] = []
+            if test_cases:
+                ok, error, behavior_observations = await self._run_behavior_tests_for_plugin(
+                    plugin_id, test_cases
+                )
+                if not ok:
+                    restore_error = self._restore_plugin_source(
+                        plugin_id, source_path, previous_snapshot
+                    )
+                    response: Dict[str, Any] = {
+                        "ok": False,
+                        "error": f"Behavior tests failed: {error}",
+                        "plugin_id": plugin_id,
+                        "proposal_id": proposal_id,
+                        "behavior_tests": behavior_observations,
+                        "rolled_back": restore_error == "",
+                    }
+                    if restore_error:
+                        response["rollback_error"] = restore_error
+                    return response
+
+            version = ""
+            if version_label:
+                source_path = scoped.get_plugin_file(plugin_id)
+                if source_path is not None:
+                    version_info = self._version_store().record_source(
+                        plugin_id,
+                        source_path,
+                        version=version_label,
+                        metadata={"source": "plugin_reload", "proposal_id": proposal_id},
+                    )
+                    version = str(version_info.get("version") or "")
+            response = {
                 "ok": True,
                 "action": "reload",
                 "plugin_id": plugin_id,
                 "new_generation": new_fiber.generation,
                 "state": new_fiber.state.value,
+                "version": version,
             }
+            if behavior_observations:
+                response["proposal_id"] = proposal_id
+                response["behavior_tests"] = behavior_observations
+            return response
         except KeyError:
             return {"ok": False, "error": f"Plugin '{plugin_id}' not scoped-registered"}
         except RuntimeError as exc:
@@ -882,6 +1223,79 @@ class SelfManagementPlugin:
                 },
             ),
             ToolMetadata(
+                name="plugin_versions",
+                description="List recorded source versions and active pointer for a profile-scoped plugin.",
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "plugin_id": {
+                            "type": "string",
+                            "description": "The plugin identifier to inspect.",
+                        },
+                    },
+                    "required": ["plugin_id"],
+                },
+                handler=self._plugin_versions_handler,
+                x_leapflow={
+                    "category": "system",
+                    "risk_level": "read_only",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                    "summary": "list plugin source versions",
+                },
+            ),
+            ToolMetadata(
+                name="plugin_propose",
+                description=(
+                    "Create a side-effect-free PluginProposal from explicit capability-gap evidence. "
+                    "Use this before plugin_generate when a missing capability should be reviewed. "
+                    "Does not call an LLM, write files, or install anything."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "requested_capability": {
+                            "type": "string",
+                            "description": "Capability the plugin should provide.",
+                        },
+                        "plugin_id": {
+                            "type": "string",
+                            "description": "Optional proposed plugin id; auto-derived when omitted.",
+                        },
+                        "proposed_tools": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional proposed tool names.",
+                        },
+                        "test_cases": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": "Optional behavior tests: {tool_name, arguments, expected_subset}.",
+                        },
+                        "risk_level": {
+                            "type": "string",
+                            "enum": ["read_only", "low", "medium", "high", "mutating", "external"],
+                            "description": "Risk classification for the proposed plugin.",
+                        },
+                        "evidence": {
+                            "type": "object",
+                            "description": "Optional structured evidence such as an unknown_tool result.",
+                        },
+                    },
+                    "required": ["requested_capability"],
+                },
+                handler=self._plugin_propose_handler,
+                x_leapflow={
+                    "category": "system",
+                    "risk_level": "read_only",
+                    "schema_cost": "medium",
+                    "requires_approval": False,
+                    "effect_scope": "none",
+                    "idempotency_scope": "turn",
+                    "summary": "create a reviewable plugin proposal without side effects",
+                },
+            ),
+            ToolMetadata(
                 name="plugin_generate",
                 description=(
                     "Generate a new ToolPlugin from a natural-language capability "
@@ -903,8 +1317,12 @@ class SelfManagementPlugin:
                             "type": "string",
                             "description": "Natural-language description of the capability the plugin should provide.",
                         },
+                        "proposal_id": {
+                            "type": "string",
+                            "description": "Optional PluginProposal id to generate from; fills plugin_id/description when omitted.",
+                        },
                     },
-                    "required": ["plugin_id", "description"],
+                    "required": [],
                 },
                 handler=self._plugin_generate_handler,
                 x_leapflow={
@@ -943,8 +1361,16 @@ class SelfManagementPlugin:
                             "type": "string",
                             "description": "Marketplace entry name to install from. Mutually exclusive with code.",
                         },
+                        "proposal_id": {
+                            "type": "string",
+                            "description": "Optional PluginProposal id to link into approval metadata and mark approved on success.",
+                        },
+                        "version_label": {
+                            "type": "string",
+                            "description": "Optional version id to record for code installs.",
+                        },
                     },
-                    "required": ["plugin_id"],
+                    "required": [],
                 },
                 handler=self._plugin_install_handler,
                 x_leapflow={
@@ -955,6 +1381,38 @@ class SelfManagementPlugin:
                     "effect_scope": "persistent",
                     "idempotency_scope": "session",
                     "summary": "install a plugin from validated code or marketplace (approval required)",
+                },
+                mutates_state=True,
+            ),
+            ToolMetadata(
+                name="plugin_rollback",
+                description=(
+                    "Rollback a profile-scoped plugin to a recorded source version and reload it. "
+                    "REQUIRES APPROVAL."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "plugin_id": {
+                            "type": "string",
+                            "description": "The plugin identifier to rollback.",
+                        },
+                        "version": {
+                            "type": "string",
+                            "description": "Recorded version id to restore.",
+                        },
+                    },
+                    "required": ["plugin_id", "version"],
+                },
+                handler=self._plugin_rollback_handler,
+                x_leapflow={
+                    "category": "system",
+                    "risk_level": "high",
+                    "schema_cost": "medium",
+                    "requires_approval": True,
+                    "effect_scope": "persistent",
+                    "idempotency_scope": "session",
+                    "summary": "rollback a plugin to a recorded version (approval required)",
                 },
                 mutates_state=True,
             ),
@@ -972,6 +1430,10 @@ class SelfManagementPlugin:
                         "plugin_id": {
                             "type": "string",
                             "description": "The plugin identifier to reload.",
+                        },
+                        "version_label": {
+                            "type": "string",
+                            "description": "Optional version id to record after reload.",
                         },
                     },
                     "required": ["plugin_id"],

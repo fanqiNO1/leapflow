@@ -768,26 +768,29 @@ Plugin assembly is fully fiberized from startup; there is no bootstrap shim and 
 
 ### Hot-Reload
 
-`reload_plugin(plugin_id)` (public API in `plugins/__init__.py`) disposes the old fiber, `importlib.reload`s the module, registers the fresh instance, re-binds runtime dependencies, and bumps the registry version so engine caches invalidate. In-flight turns are unaffected: the engine snapshots the handler table per turn, so a reload only takes effect on the **next** turn.
+`reload_plugin(plugin_id)` (public API in `plugins/__init__.py`) disposes the old fiber, reloads built-ins through their module and profile-installed plugins directly from their current source file, registers the fresh instance, re-binds runtime dependencies, and bumps the registry version so engine caches invalidate. In-flight turns are unaffected: the engine snapshots the handler table per turn, so a reload only takes effect on the **next** turn.
 
 ### Self-Modification
 
-The `self_management` plugin exposes **eight** tools to the agent:
+The `self_management` plugin exposes **eleven** tools to the agent:
 
 | Tool | Kind | Effect |
 |------|------|--------|
 | `plugin_list` | read-only | List plugins across the Tool/Gateway/LLM subsystems |
 | `plugin_status` | read-only | Inspect one plugin (tools, deps, fiber state, trust level, advisor recommendation) |
-| `plugin_reload` | mutating | Hot-reload a plugin |
-| `plugin_disable` | mutating | Disable a plugin (takes effect immediately; tools re-resolved per read) |
-| `plugin_enable` | mutating | Re-enable a disabled plugin |
-| `plugin_remove` | mutating | Terminally remove a plugin, dispose its fiber, unregister tools, and optionally delete source |
+| `plugin_versions` | read-only | Inspect recorded source snapshots and the active version pointer for a profile plugin |
+| `plugin_propose` | read-only | Create a side-effect-free PluginProposal from explicit capability-gap evidence |
 | `plugin_generate` | mutating | Ask the LLM to synthesize + validate new plugin code |
-| `plugin_install` | mutating | Install from generated code or a marketplace entry |
+| `plugin_install` | mutating | Install from generated code or a marketplace entry, optionally linked to a proposal and version label |
+| `plugin_rollback` | mutating | Restore a recorded profile plugin source snapshot and hot-reload it |
+| `plugin_reload` | mutating | Hot-reload a plugin; proposal-linked behavior tests run before recording a new version |
+| `plugin_disable` | mutating | Disable a plugin (takes effect immediately; tools re-resolved per read) |
+| `plugin_remove` | mutating | Terminally remove a plugin, dispose its fiber, unregister tools, and optionally delete source |
+| `plugin_enable` | mutating | Re-enable a disabled plugin |
 
 Every mutation routes through the `ApprovalGate` at **HIGH** risk with `allow_permanent=False` — `security/risk.py` forces HIGH for `platform == "plugin_management"`, so no permanent grant can be minted. `self_management` cannot disable or reload itself.
 
-`plugin_install` writes to a **profile-scoped** directory (`ProfileLayout.plugins_dir`) and loads the code dynamically — it is never injected into the installed Python package. A duplicate `plugin_id` is rejected cleanly, a real **sandbox smoke-test** gates the install, and `marketplace_name` installs are wired when a `MarketplaceClient` is configured.
+`plugin_install` writes to a **profile-scoped** directory (`ProfileLayout.plugins_dir`) and loads the code dynamically — it is never injected into the installed Python package. A duplicate `plugin_id` is rejected cleanly, a real **sandbox smoke-test** gates the install, proposal-defined behavior tests can gate install/reload, and `marketplace_name` installs are wired when a `MarketplaceClient` is configured.
 
 ### Learning Loop (closed)
 

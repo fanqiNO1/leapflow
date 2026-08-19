@@ -153,20 +153,29 @@ class DaemonClient:
         somebody else.
 
         ``daemon.status`` is read-only and idempotent, so it tolerates the short
-        startup/restart window where a socket accept succeeds but the server
-        closes the connection before the control-plane request is handled.
+        startup/restart window where a socket is not yet accepting, or accepts
+        and closes before the control-plane request is handled.
         """
         params = {"session_id": session_id} if session_id else {}
         last_error: DaemonUnavailableError | None = None
-        for attempt in range(6):
+        retry_budget_s = 30.0 if self._timeout_s > 60.0 else 5.0
+        deadline = asyncio.get_running_loop().time() + min(max(self._timeout_s, 1.0), retry_budget_s)
+        attempt = 0
+        while True:
             try:
                 result = await self.request("daemon.status", params)
                 return dict(result or {})
             except DaemonUnavailableError as exc:
                 last_error = exc
-                if "closed the connection unexpectedly" not in str(exc):
+                message = str(exc)
+                transient_startup = (
+                    "closed the connection unexpectedly" in message
+                    or "Cannot connect to leapd" in message
+                )
+                if not transient_startup or asyncio.get_running_loop().time() >= deadline:
                     raise
-                await asyncio.sleep(0.05 * (attempt + 1))
+                attempt += 1
+                await asyncio.sleep(min(0.5, 0.05 * attempt))
         assert last_error is not None
         raise last_error
 

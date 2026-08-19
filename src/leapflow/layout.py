@@ -374,6 +374,17 @@ class ProfileLayout:
         return self.root / "plugins"
 
     @property
+    def plugin_proposals_path(self) -> Path:
+        # Profile-scoped review queue for capability-gap → plugin proposals.
+        # It is durable user/profile state, not runtime scratch.
+        return self.root / "plugins" / "proposals.json"
+
+    @property
+    def plugin_versions_dir(self) -> Path:
+        # Versioned source snapshots and active pointers for profile-installed plugins.
+        return self.root / "plugins" / "versions"
+
+    @property
     def gateway(self) -> GatewayLayout:
         return GatewayLayout(self.root / "gateway", self.gateway_config_path)
 

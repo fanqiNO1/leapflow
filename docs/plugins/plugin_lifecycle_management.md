@@ -122,9 +122,12 @@ A plugin's state is the **composition** of three independent axes: Runtime, Trus
 |--------|-------|---------------|----------------------|--------------|-------------|
 | **plugin_list** | Agent tool | None | Always | — | No (read-only) |
 | **plugin_status** | Agent tool | None | Always | — | No (read-only) |
+| **plugin_versions** | Agent tool | None | Always | `ProfileLayout.plugin_versions_dir` | No (read-only) |
+| **plugin_propose** | Agent tool | None | Always (proposal only, no LLM/file/runtime mutation) | `ProfileLayout.plugin_proposals_path` | No (proposal store write only) |
 | **plugin_generate** | Agent tool | None | Always (code generation only, no filesystem write) | `plugin_generation_enabled` must be `True`; needs `llm_provider` bound | No (ephemeral output) |
-| **plugin_install** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Never (always requires human) | `plugin_install_dir`, `plugin_marketplace_root/url`, `plugin_marketplace_trusted_pubkeys` | Yes — action descriptor metadata recorded |
-| **plugin_reload** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Trust == PRODUCTION (auto-approved) | — | Yes |
+| **plugin_install** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Never (always requires human) | `plugin_install_dir`, proposal/version stores, `plugin_marketplace_root/url`, `plugin_marketplace_trusted_pubkeys` | Yes — action descriptor metadata recorded |
+| **plugin_rollback** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Never (always requires human) | `ProfileLayout.plugin_versions_dir` | Yes |
+| **plugin_reload** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Trust == PRODUCTION (auto-approved) | proposal/version stores when behavior tests or version labels are used | Yes |
 | **plugin_disable** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Never (always requires human) | — | Yes |
 | **plugin_enable** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Never (always requires human) | — | Yes |
 | **plugin_remove** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Never (always requires human) | — | Yes |
@@ -153,11 +156,13 @@ A plugin's state is the **composition** of three independent axes: Runtime, Trus
 6. **File write**: Code written to `ProfileLayout.plugins_dir / <plugin_id>.py`.
 7. **Sandbox smoke test**: `SandboxHost` starts subprocess → loads plugin → `ping()` + `list_tools()` → verifies conformance in isolation.
 8. **Registration**: `_register_inprocess()` — import module → `scoped_register(plugin, fiber)` → `fiber.activate()`.
-9. **Runtime dep injection**: `bind_runtime(**last_bound_deps)` distributes existing deps to new plugin.
-10. **Version bump**: `registry.notify_mutation()` → engine cache invalidated → next turn sees new tools.
-11. **Trust**: Starts at DRAFT. First 5 successful calls → CANDIDATE.
+9. **Behavior tests**: If installation is linked to a `PluginProposal` with `test_cases`, the live plugin handlers must return the expected subsets before the install is accepted.
+10. **Version snapshot**: Code installs can record a version label or content hash under `ProfileLayout.plugin_versions_dir`; active pointer metadata retains the proposal id when present.
+11. **Runtime dep injection**: `bind_runtime(**last_bound_deps)` distributes existing deps to new plugin.
+12. **Version bump**: `registry.notify_mutation()` → engine cache invalidated → next turn sees new tools.
+13. **Trust**: Starts at DRAFT. First 5 successful calls → CANDIDATE.
 
-**Rollback on failure** (at any step 5–9):
+**Rollback on failure** (at any step 5–10):
 - Fiber disposed (EffectScope cleans registered tools).
 - Module removed from `sys.modules`.
 - File deleted from plugins dir.
@@ -457,7 +462,11 @@ These require human/product input and are not answerable from code alone:
 | Plugin contracts (ToolPlugin / ToolMetadata) | `src/leapflow/plugins/protocol.py` |
 | Plugin subsystem public API | `src/leapflow/plugins/__init__.py` |
 | Plugin discovery (built-in) | `src/leapflow/plugins/tool_plugins/__init__.py` |
-| Self-management tools (8 tools) | `src/leapflow/plugins/tool_plugins/self_management.py` |
+| Self-management tools (11 tools) | `src/leapflow/plugins/tool_plugins/self_management.py` |
+| Proposal domain records | `src/leapflow/domain/plugin_proposal.py` |
+| Proposal persistence | `src/leapflow/storage/plugin_proposal_store.py` |
+| Behavior test execution | `src/leapflow/learning/plugin_behavior_tests.py` |
+| Version snapshot store | `src/leapflow/storage/plugin_version_store.py` |
 | Trust ledger | `src/leapflow/learning/plugin_trust.py` |
 | Usage tracker | `src/leapflow/learning/plugin_stats.py` |
 | Advisor (scoring engine) | `src/leapflow/learning/plugin_advisor.py` |

@@ -18,6 +18,7 @@ from leapflow.domain.platform import (
     capability_from_str,
 )
 from leapflow.domain.plugin_fiber import FiberState, IllegalStateTransition, PluginFiber
+from leapflow.domain.plugin_proposal import BehaviorTestCase, GapEvidence, PluginProposal, ProposedToolSpec
 from leapflow.domain.skill_types import DistillationCandidate, SkillMetadata, SkillParameter
 from leapflow.domain.trajectory import (
     ActionType,
@@ -35,9 +36,11 @@ from leapflow.domain.trajectory import (
 
 __all__ = [
     "ActionType",
+    "BehaviorTestCase",
     "CLIEventType",
     "EffectScope",
     "FiberState",
+    "GapEvidence",
     "ImplicitFeedbackType",
     "LearningEventType",
     "NormalizedEventType",
@@ -52,6 +55,8 @@ __all__ = [
     "PlatformID",
     "PlatformManifest",
     "PluginFiber",
+    "PluginProposal",
+    "ProposedToolSpec",
     "RawAction",
     "RecordingState",
     "ScopeState",
