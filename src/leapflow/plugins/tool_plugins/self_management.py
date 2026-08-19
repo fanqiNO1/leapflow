@@ -606,6 +606,10 @@ class SelfManagementPlugin:
         if plugin_obj is None:
             sys.modules.pop(module_name, None)
             return None, "Installed module has no 'plugin' attribute"
+        try:
+            setattr(plugin_obj, "__leapflow_plugin_path__", str(path))
+        except Exception:
+            logger.debug("Cannot attach plugin source path metadata for %s", module_name, exc_info=True)
         return plugin_obj, ""
 
     @staticmethod
@@ -767,16 +771,7 @@ class SelfManagementPlugin:
         try:
             from leapflow.plugins import get_scoped_registry
             scoped = get_scoped_registry()
-            fiber = scoped.get_fiber(plugin_id)
-            if fiber is None:
-                return {"ok": False, "error": f"Plugin '{plugin_id}' has no fiber"}
-            if fiber.state.value == "disposed":
-                return {"ok": False, "error": f"Plugin '{plugin_id}' already disposed"}
-
-            from leapflow.domain.plugin_fiber import FiberState
-            if fiber.state == FiberState.ACTIVE:
-                fiber.begin_unload()
-            fiber.dispose()
+            fiber = scoped.dispose_plugin(plugin_id)
 
             return {
                 "ok": True,
@@ -784,9 +779,56 @@ class SelfManagementPlugin:
                 "plugin_id": plugin_id,
                 "state": fiber.state.value,
             }
+        except KeyError as exc:
+            return {"ok": False, "error": str(exc)}
         except (RuntimeError, AttributeError) as exc:
             logger.warning("plugin_disable failed: %s", exc, exc_info=True)
             return {"ok": False, "error": f"Disable failed: {exc}"}
+
+    async def _plugin_remove_handler(
+        self, plugin_id: str, delete_source: bool = True, **kwargs: Any
+    ) -> Dict[str, Any]:
+        """Terminally remove a plugin: dispose fiber, unregister tools, delete source."""
+        if plugin_id == "self_management":
+            return {
+                "ok": False,
+                "error": "Cannot remove self_management plugin (would remove this tool)",
+            }
+
+        approved, denial = await self._check_approval("remove", plugin_id)
+        if not approved:
+            return {"ok": False, "error": denial, "requires_approval": True}
+
+        try:
+            import sys
+
+            from leapflow.plugins import get_scoped_registry
+
+            scoped = get_scoped_registry()
+            source_path = scoped.get_plugin_file(plugin_id)
+            module_path = scoped.get_plugin_module(plugin_id)
+            fiber = scoped.dispose_plugin(plugin_id, prune_metadata=True)
+            if module_path:
+                sys.modules.pop(module_path, None)
+            source_deleted = False
+            if delete_source:
+                target = source_path or (self._resolve_install_dir() / f"{plugin_id}.py")
+                if target.exists():
+                    target.unlink()
+                    source_deleted = True
+            return {
+                "ok": True,
+                "action": "remove",
+                "plugin_id": plugin_id,
+                "state": fiber.state.value,
+                "source_path": str(source_path or ""),
+                "source_deleted": source_deleted,
+            }
+        except KeyError as exc:
+            return {"ok": False, "error": str(exc)}
+        except (RuntimeError, AttributeError, OSError) as exc:
+            logger.warning("plugin_remove failed: %s", exc, exc_info=True)
+            return {"ok": False, "error": f"Remove failed: {exc}"}
 
     # ── Tool metadata ──────────────────────────────────────
 
@@ -972,6 +1014,39 @@ class SelfManagementPlugin:
                     "effect_scope": "local",
                     "idempotency_scope": "session",
                     "summary": "disable a plugin (approval required)",
+                },
+                mutates_state=True,
+            ),
+            ToolMetadata(
+                name="plugin_remove",
+                description=(
+                    "Terminally remove a plugin: dispose its fiber, unregister its tools, "
+                    "remove reload metadata, and optionally delete its profile-scoped source file. "
+                    "Cannot remove self_management itself. REQUIRES APPROVAL."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "plugin_id": {
+                            "type": "string",
+                            "description": "The plugin identifier to remove.",
+                        },
+                        "delete_source": {
+                            "type": "boolean",
+                            "description": "Delete the profile-scoped source file as part of removal (default true).",
+                        },
+                    },
+                    "required": ["plugin_id"],
+                },
+                handler=self._plugin_remove_handler,
+                x_leapflow={
+                    "category": "system",
+                    "risk_level": "high",
+                    "schema_cost": "medium",
+                    "requires_approval": True,
+                    "effect_scope": "persistent",
+                    "idempotency_scope": "session",
+                    "summary": "remove a plugin and optionally delete its source (approval required)",
                 },
                 mutates_state=True,
             ),

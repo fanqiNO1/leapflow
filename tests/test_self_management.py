@@ -1161,6 +1161,7 @@ def _valid_plugin_src(plugin_id: str, tool_name: str) -> str:
         "            description='A test-installed echo tool',\n"
         "            parameters_schema={'type': 'object', 'properties': {'message': {'type': 'string'}}},\n"
         "            handler=self._handler,\n"
+        "            x_leapflow={'category': 'custom', 'risk_level': 'read_only'},\n"
         "        )]\n\n"
         "    async def _handler(self, message: str = '', **kwargs: Any) -> dict:\n"
         "        return {'ok': True, 'echoed': message}\n\n\n"
@@ -1232,6 +1233,41 @@ class TestPluginInstallPath:
             handler = reg.tool_handlers["tst_inproc_tool"]
             invoked = await handler(message="hi")
             assert invoked == {"ok": True, "echoed": "hi"}
+        finally:
+            _cleanup_installed(plugin_id)
+            _reset_install_deps(self_mgmt_plugin)
+
+    @pytest.mark.asyncio
+    async def test_plugin_remove_disposes_fiber_and_deletes_source(
+        self, self_mgmt_plugin: Any, tmp_path: Any
+    ) -> None:
+        from leapflow.plugins import get_registry, get_scoped_registry
+
+        plugin_id = "tst_remove_plug"
+        tool_name = "tst_remove_tool"
+        install_dir = tmp_path / "plugins"
+        self_mgmt_plugin._plugin_approval_gate = FakeApprovalGate(approved=True)
+        self_mgmt_plugin.bind_runtime(plugin_install_dir=str(install_dir))
+        try:
+            install = await self_mgmt_plugin._plugin_install_handler(
+                plugin_id=plugin_id,
+                code=_valid_plugin_src(plugin_id, tool_name),
+            )
+            assert install["ok"], install
+            assert tool_name in get_registry().tool_handlers
+            assert get_scoped_registry().get_fiber(plugin_id) is not None
+            assert (install_dir / f"{plugin_id}.py").exists()
+
+            result = await self_mgmt_plugin._plugin_remove_handler(plugin_id=plugin_id)
+
+            assert result["ok"], result
+            assert result["action"] == "remove"
+            assert result["state"] == "disposed"
+            assert result["source_deleted"] is True
+            assert not (install_dir / f"{plugin_id}.py").exists()
+            assert get_registry().get_plugin(plugin_id) is None
+            assert tool_name not in get_registry().tool_handlers
+            assert get_scoped_registry().get_plugin_module(plugin_id) is None
         finally:
             _cleanup_installed(plugin_id)
             _reset_install_deps(self_mgmt_plugin)

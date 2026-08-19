@@ -55,6 +55,7 @@ class EchoE2EPlugin:
                 "required": ["message"],
             },
             handler=self._echo_handler,
+            x_leapflow={"category": "custom", "risk_level": "read_only"},
         )]
     
     async def _echo_handler(self, message: str = "", **kwargs: Any) -> dict:

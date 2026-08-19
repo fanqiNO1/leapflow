@@ -27,6 +27,7 @@ Nothing is auto-installed. Generated code is untrusted until validated AND appro
 from __future__ import annotations
 
 import ast
+import inspect
 import logging
 import tempfile
 from dataclasses import dataclass, field
@@ -195,10 +196,17 @@ class PluginValidator:
                 )
 
             try:
-                tool_names = [t.name for t in plugin_obj.tools]
+                tools = list(plugin_obj.tools)
+                tool_names = [t.name for t in tools]
             except Exception as exc:  # noqa: BLE001 - accessing plugin.tools may raise on malformed generated code
                 return PluginValidationResult(
                     ok=False, stage="protocol", error=f"plugin.tools raised: {exc}"
+                )
+
+            metadata_error = self._validate_tool_metadata(plugin_id, plugin_obj, tools)
+            if metadata_error:
+                return PluginValidationResult(
+                    ok=False, stage="protocol", error=metadata_error
                 )
 
             # Clean up the imported module from sys.modules to avoid pollution
@@ -227,6 +235,79 @@ class PluginValidator:
                 tmpdir.rmdir()
             except OSError:
                 pass
+
+    def _validate_tool_metadata(self, plugin_id: str, plugin_obj: Any, tools: list[Any]) -> str:
+        """Validate ToolMetadata entries without invoking generated handlers."""
+        if plugin_obj.plugin_id != plugin_id:
+            return f"plugin_id mismatch: expected {plugin_id!r}, got {plugin_obj.plugin_id!r}"
+        if not isinstance(plugin_obj.category, str) or not plugin_obj.category.strip():
+            return "plugin.category must be a non-empty string"
+        if not isinstance(plugin_obj.dependencies, list) or not all(
+            isinstance(dep, str) for dep in plugin_obj.dependencies
+        ):
+            return "plugin.dependencies must be list[str]"
+        if not tools:
+            return "plugin.tools must expose at least one ToolMetadata"
+
+        seen: set[str] = set()
+        allowed_risk = {"read_only", "low", "medium", "high", "mutating", "external"}
+        for index, tool in enumerate(tools):
+            name = getattr(tool, "name", None)
+            if not isinstance(name, str) or not name.strip():
+                return f"tool[{index}].name must be a non-empty string"
+            if name in seen:
+                return f"duplicate tool name: {name}"
+            seen.add(name)
+            if not name.replace("_", "").isalnum() or name.lower() != name:
+                return f"tool {name!r} must use lowercase snake_case"
+
+            description = getattr(tool, "description", None)
+            if not isinstance(description, str) or not description.strip():
+                return f"tool {name}: description must be non-empty"
+
+            schema = getattr(tool, "parameters_schema", None)
+            if not isinstance(schema, dict):
+                return f"tool {name}: parameters_schema must be a dict"
+            if schema.get("type") != "object":
+                return f"tool {name}: parameters_schema.type must be 'object'"
+            properties = schema.get("properties", {})
+            if not isinstance(properties, dict):
+                return f"tool {name}: parameters_schema.properties must be a dict"
+            required = schema.get("required", [])
+            if required is not None and not isinstance(required, list):
+                return f"tool {name}: parameters_schema.required must be a list when present"
+
+            x_meta = getattr(tool, "x_leapflow", None)
+            if not isinstance(x_meta, dict):
+                return f"tool {name}: x_leapflow must be a dict"
+            category = x_meta.get("category")
+            if not isinstance(category, str) or not category.strip():
+                return f"tool {name}: x_leapflow.category must be a non-empty string"
+            risk = x_meta.get("risk_level")
+            if not isinstance(risk, str) or risk not in allowed_risk:
+                return f"tool {name}: x_leapflow.risk_level must be one of {sorted(allowed_risk)}"
+
+            handler = getattr(tool, "handler", None)
+            if not callable(handler):
+                return f"tool {name}: handler must be callable"
+            if not inspect.iscoroutinefunction(handler):
+                return f"tool {name}: handler must be an async function"
+            signature = inspect.signature(handler)
+            has_kwargs = any(
+                param.kind == inspect.Parameter.VAR_KEYWORD
+                for param in signature.parameters.values()
+            )
+            if not has_kwargs:
+                return f"tool {name}: handler must accept **kwargs"
+
+            if bool(getattr(tool, "mutates_state", False)):
+                if x_meta.get("requires_approval") is not True:
+                    return f"tool {name}: mutating tools must set x_leapflow.requires_approval=true"
+                if not x_meta.get("effect_scope"):
+                    return f"tool {name}: mutating tools must set x_leapflow.effect_scope"
+                if not x_meta.get("idempotency_scope"):
+                    return f"tool {name}: mutating tools must set x_leapflow.idempotency_scope"
+        return ""
 
 
 class PluginGenerator:
@@ -261,9 +342,11 @@ The plugin MUST:
    - def bind_runtime(self, **deps) -> None
 2. Define a module-level `plugin = YourPluginClass()`
 3. Each tool is a ToolMetadata(name, description, parameters_schema, handler, x_leapflow, mutates_state)
-4. Import from: from leapflow.plugins.protocol import ToolMetadata, ToolPlugin
-5. NO dangerous operations (no eval/exec/os.system/file deletion at import time)
-6. All handlers are async functions taking **kwargs and returning a dict
+4. Every ToolMetadata MUST set x_leapflow to a dict with at least category and risk_level, e.g. {{"category": "custom", "risk_level": "read_only"}}; never use None
+5. Mutating tools MUST set mutates_state=True and x_leapflow.requires_approval=True plus effect_scope and idempotency_scope
+6. Import from: from leapflow.plugins.protocol import ToolMetadata, ToolPlugin
+7. NO dangerous operations (no eval/exec/os.system/file deletion at import time)
+8. All handlers are async functions taking **kwargs and returning a dict
 
 Example structure:
 ```python
@@ -280,7 +363,7 @@ class MyPlugin:
     def bind_runtime(self, **deps: Any) -> None: pass
     @property
     def tools(self) -> list[ToolMetadata]:
-        return [ToolMetadata(name="...", description="...", parameters_schema={{"type":"object","properties":{{}}}}, handler=self._handler)]
+        return [ToolMetadata(name="...", description="...", parameters_schema={{"type":"object","properties":{{}}}}, handler=self._handler, x_leapflow={{"category":"custom","risk_level":"read_only"}})]
     async def _handler(self, **kwargs: Any) -> dict: return {{"ok": True}}
 
 plugin = MyPlugin()

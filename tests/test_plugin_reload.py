@@ -612,3 +612,77 @@ class TestDisabledPluginsEndToEnd:
         
         # Clean up: reset the cached list so other tests aren't affected
         plugins_mod._all_plugins = None
+
+
+def _profile_plugin_source(version: str, *, extra_tool: bool = False) -> str:
+    extra = ""
+    if extra_tool:
+        extra = ''',\n            ToolMetadata(\n                name="profile_version",\n                description="Return the active profile plugin version.",\n                parameters_schema={"type": "object", "properties": {}},\n                handler=self._version,\n                x_leapflow={"category": "profile", "risk_level": "read_only"},\n            )'''
+    return f'''from __future__ import annotations
+from typing import Any
+from leapflow.plugins.protocol import ToolMetadata
+
+VERSION = "{version}"
+
+class ProfilePlugin:
+    @property
+    def plugin_id(self) -> str: return "profile_echo"
+    @property
+    def category(self) -> str: return "profile"
+    @property
+    def dependencies(self) -> list[str]: return []
+    def bind_runtime(self, **deps: Any) -> None: return None
+    @property
+    def tools(self) -> list[ToolMetadata]:
+        return [
+            ToolMetadata(
+                name="profile_echo",
+                description="Echo with profile plugin version.",
+                parameters_schema={{"type": "object", "properties": {{"text": {{"type": "string"}}}}}},
+                handler=self._echo,
+                x_leapflow={{"category": "profile", "risk_level": "read_only"}},
+            ){extra}
+        ]
+    async def _echo(self, text: str = "", **kwargs: Any) -> dict[str, Any]:
+        return {{"ok": True, "version": VERSION, "text": text}}
+    async def _version(self, **kwargs: Any) -> dict[str, Any]:
+        return {{"ok": True, "version": VERSION}}
+
+plugin = ProfilePlugin()
+'''
+
+
+def test_profile_scoped_plugin_discovery(monkeypatch, tmp_path) -> None:
+    plugin_file = tmp_path / "profile_echo.py"
+    plugin_file.write_text(_profile_plugin_source("v0"), encoding="utf-8")
+    import leapflow.plugins.tool_plugins as discovery
+
+    monkeypatch.setattr(discovery, "_profile_plugins_dir", lambda: tmp_path)
+    discovered = discovery.discover_profile_plugins(disabled=set())
+
+    assert [plugin.plugin_id for plugin in discovered] == ["profile_echo"]
+    assert getattr(discovered[0], "__leapflow_plugin_path__") == str(plugin_file)
+
+
+def test_file_backed_plugin_reload_without_syspath(monkeypatch, tmp_path) -> None:
+    plugin_file = tmp_path / "profile_echo.py"
+    plugin_file.write_text(_profile_plugin_source("v0"), encoding="utf-8")
+    import leapflow.plugins.tool_plugins as discovery
+
+    monkeypatch.setattr(discovery, "_profile_plugins_dir", lambda: tmp_path)
+    plugin = discovery.discover_profile_plugins(disabled=set())[0]
+    registry = ToolPluginRegistry()
+    registry.register(plugin)
+    registry.assemble()
+    scoped = ScopedToolRegistry(registry)
+    scoped.adopt_existing_plugins()
+
+    assert registry.get_plugin("profile_echo") is not None
+    plugin_file.write_text(_profile_plugin_source("v1", extra_tool=True), encoding="utf-8")
+    fresh_fiber = scoped.reload("profile_echo")
+
+    assert fresh_fiber.state == FiberState.ACTIVE
+    assert scoped.get_plugin_file("profile_echo") == plugin_file
+    assert "profile_echo" in registry.tool_handlers
+    assert "profile_version" in registry.tool_handlers
+    assert registry.get_plugin("profile_echo").tools[0].handler.__self__.__class__.__module__ == "profile_echo"

@@ -130,6 +130,11 @@ When `mutates_state=True`, `to_openai_schema()` folds it into `x_leapflow.mutate
 
 **`x_leapflow` well-known keys:**
 
+`x_leapflow` is required for every generated ToolMetadata and must be a dict.
+`category` and `risk_level` are mandatory; the validator rejects `None`, missing
+category/risk, malformed schemas, non-callable handlers, and mutating tools that
+omit approval/idempotency metadata.
+
 | Key | Type | Purpose |
 |-----|------|---------|
 | `category` | `str` | PCD disclosure grouping |
@@ -383,7 +388,7 @@ Third-party plugins are installed into the active profile's plugin directory:
 ~/.leapflow/profiles/<profile>/plugins/<entry_point>.py
 ```
 
-Installation is performed by the `plugin_install` tool (part of the `self_management` plugin). The path is derived from `ProfileLayout.plugins_dir` or overridden by `Settings.plugin_install_dir`.
+Installation is performed by the `plugin_install` tool (part of the `self_management` plugin). The path is derived from `ProfileLayout.plugins_dir` or overridden by `Settings.plugin_install_dir`. Profile-scoped `.py` plugins are discovered on registry boot by `discover_profile_plugins()` and loaded with file-backed import specs so reload does not depend on global `sys.path`.
 
 **Install flow**: Validated code → write to profile plugins dir → sandbox smoke test → dynamic import → register in live registry → activate fiber.
 
@@ -399,7 +404,7 @@ my_provider = "my_package.provider:plugin"
 
 `LLMProviderRegistry.discover_entry_points()` loads these at startup.
 
-> **Important**: `ToolPlugin` and `GatewayAdapterPlugin` do NOT support entry_point discovery. They must be installed via the profile plugins dir or registered programmatically.
+> **Important**: `ToolPlugin` supports built-in package discovery, profile-scoped file discovery, marketplace install, and explicit registration. It does NOT yet support setuptools entry_point discovery. `GatewayAdapterPlugin` remains registered through the gateway adapter registry.
 
 ### 5.4 Marketplace Distribution
 
@@ -462,7 +467,7 @@ result = client.install("plugin_name", verify=True, trusted_pubkeys={"..."})
 
 > **Caveat — Marketplace HTTP server**: The HTTP server (`plugins/marketplace/server.py`) is a prototype. Production readiness is not guaranteed.
 
-> **Caveat — `uninstall()` limitation**: `MarketplaceClient.uninstall()` deletes the file but does NOT unregister the plugin from the live registry or dispose its fiber. A full unload requires calling `plugin_disable` via the self-management tool.
+> **Removal**: Use the `plugin_remove(plugin_id, delete_source=true)` self-management tool for live removal. It disposes the fiber, unregisters tools, drops reload metadata, and optionally deletes the profile-scoped source file. `MarketplaceClient.uninstall()` remains a low-level file deletion primitive and does not by itself operate on live runtime state.
 
 ### 5.5 Configuration Keys
 

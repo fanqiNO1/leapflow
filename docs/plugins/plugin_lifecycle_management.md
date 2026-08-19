@@ -86,7 +86,7 @@ A plugin's state is the **composition** of three independent axes: Runtime, Trus
 | **disabled** | Fiber DISPOSED via `plugin_disable` tool; tools removed | ✅ ENFORCED |
 | **disabled-at-boot** | Listed in `Settings.disabled_plugins`; skipped by `get_all_plugins()` | ✅ ENFORCED (confirmed: `plugins/tool_plugins/__init__.py`) |
 | **quarantined** | Disabled + trust frozen to DRAFT + flagged for investigation | ⚠️ **RECOMMENDED POLICY** (not automated; requires human `plugin_disable` + hard failure record) |
-| **removed** | File deleted from profile plugins dir, fiber disposed, no registry entry | ⚠️ **PARTIAL** (marketplace `uninstall()` deletes file but does NOT dispose live fiber — see §4.4) |
+| **removed** | Fiber DISPOSED via `plugin_remove`; tools unregistered and optional profile source file deleted | ✅ ENFORCED |
 
 ### 1.4 Composite State Transition Table
 
@@ -127,7 +127,8 @@ A plugin's state is the **composition** of three independent axes: Runtime, Trus
 | **plugin_reload** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Trust == PRODUCTION (auto-approved) | — | Yes |
 | **plugin_disable** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Never (always requires human) | — | Yes |
 | **plugin_enable** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Never (always requires human) | — | Yes |
-| **marketplace uninstall** | `MarketplaceClient.uninstall()` | Not wired through agent tool (manual/code path) | N/A | — | ⚠️ File deletion only; no fiber cleanup |
+| **plugin_remove** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Never (always requires human) | — | Yes |
+| **marketplace uninstall** | `MarketplaceClient.uninstall()` | File-only low-level primitive; prefer `plugin_remove` for live registry cleanup | N/A | — | File deletion only |
 | **boot-time disable** | Config | N/A (pre-registration) | Automatic (from `Settings.disabled_plugins`) | `disabled_plugins` | Logged at INFO |
 | **/plugin** slash | Human (TUI/CLI) | None (read-only) | Always | — | — |
 
@@ -242,16 +243,17 @@ A plugin's state is the **composition** of three independent axes: Runtime, Trus
 2. **Hard failure record**: If discovered through tool execution (e.g., `_execute_general_tool` catches an internal defect): `trust_ledger.record_failure(plugin_id, hard=True)` → FROZEN to DRAFT permanently.
 3. **Audit inspection**: Check approval logs, usage stats, finding history.
 
-**Full removal** (current state — known gap):
-- `MarketplaceClient.uninstall(name)` deletes the `.py` file from `plugins_dir` BUT:
-  - ⚠️ Does NOT unregister the plugin from the live registry.
-  - ⚠️ Does NOT dispose the fiber.
-  - The plugin remains active until process restart or explicit `plugin_disable` + restart.
+**Full removal**:
+- `plugin_remove(plugin_id, delete_source=True)` performs the live lifecycle operation:
+  - disposes the fiber,
+  - unregisters the plugin and tools from the live registry,
+  - drops reload metadata and `sys.modules` entry,
+  - deletes the profile-scoped source file when requested.
+- `MarketplaceClient.uninstall(name)` remains a low-level file deletion primitive; use `plugin_remove` for live runtime cleanup.
 
-**Correct removal sequence** (operational workaround):
-1. `plugin_disable(plugin_id)` → disposes fiber, removes from registry.
-2. `MarketplaceClient.uninstall(name)` → deletes file.
-3. Restart daemon (ensures module is purged from `sys.modules`).
+**Correct removal sequence**:
+1. `plugin_remove(plugin_id)` → disposes fiber, removes from registry, deletes source file.
+2. Optional daemon restart verifies the plugin does not reappear.
 
 **Rollback**: If wrongly accused → `plugin_enable(plugin_id)` re-imports and re-registers. Trust state remains frozen (requires manual trust ledger reset via DuckDB or code intervention — no tool exposes unfreezing today).
 
@@ -259,8 +261,8 @@ A plugin's state is the **composition** of three independent axes: Runtime, Trus
 |--------|:----------------:|
 | Disable (fiber dispose) | ✅ (with approval) |
 | Hard freeze trust | ✅ (on internal_defect) |
-| File deletion | ✅ (marketplace uninstall) |
-| Live fiber disposal on uninstall | ❌ GAP |
+| File deletion | ✅ (`plugin_remove(delete_source=True)` or low-level marketplace uninstall) |
+| Live fiber disposal on remove | ✅ |
 | Trust unfreeze | ❌ No exposed tool |
 
 ### 4.5 Duplicate Plugin ID / Version Conflict
@@ -316,10 +318,10 @@ A plugin's state is the **composition** of three independent axes: Runtime, Trus
 | Usage sample deques | ❌ | In-memory only; bounded deque resets to empty |
 | Fiber objects | ❌ | Recreated at boot via `adopt_existing_plugins()` (built-ins) or re-install (third-party) |
 | Installed third-party files | ✅ | Filesystem under `ProfileLayout.plugins_dir` |
-| Third-party re-registration | ⚠️ | **NOT automatic** — profile-dir plugins are NOT discovered at boot today; requires explicit re-import or a planned entry-point mechanism |
+| Third-party re-registration | ✅ | Profile-scoped plugin files are discovered from `ProfileLayout.plugins_dir` at registry boot, respecting `disabled_plugins` |
 | `disabled_plugins` config | ✅ | `config.yaml` / Settings |
 
-**Critical gap**: Third-party plugins installed via `plugin_install` are written to `ProfileLayout.plugins_dir`, but `get_all_plugins()` only imports from the hardcoded `_BUILTIN_PLUGIN_MODULES` tuple. After a daemon restart, third-party plugins are NOT re-loaded automatically. **RECOMMENDED POLICY**: Implement `discover_profile_plugins()` to scan `plugins_dir` at boot and register found plugins (respecting `disabled_plugins` filter).
+**Profile discovery**: third-party plugins installed via `plugin_install` are written to `ProfileLayout.plugins_dir`. At registry boot, `discover_profile_plugins()` scans that directory, loads each `.py` file with a file-backed import spec, attaches source-path metadata for reload, and registers plugins not blocked by `disabled_plugins`.
 
 ### 4.9 Multi-Instance / Concurrent TUI
 
@@ -411,11 +413,9 @@ The following items are identified from code analysis as **partial or unwired**.
 | # | Gap | Impact | Recommended fix |
 |---|-----|--------|-----------------|
 | 1 | **Auto-quarantine on health breach** | PluginHealthProducer only advises; a truly misbehaving plugin runs until human acts | Wire `PluginHealthProducer` → `RecoveryCoordinator` with a `plugin_quarantine` strategy that emits `plugin_disable` with `InteractionRequest` for urgent human confirmation |
-| 2 | **Uninstall does not dispose live fiber** | `MarketplaceClient.uninstall()` deletes file but plugin stays live in memory | Add `scoped_registry.dispose_fiber(plugin_id)` call in uninstall path; or require `plugin_disable` before uninstall |
-| 3 | **ActiveSignalSource not fiber-managed** | Signal sources bypass PluginFiber lifecycle; no EffectScope cleanup | Integrate `ActiveSourceManager` with fiber system (already noted in source as "future extension") |
+| 2 | **ActiveSignalSource not fiber-managed** | Signal sources bypass PluginFiber lifecycle; no EffectScope cleanup | Integrate `ActiveSourceManager` with fiber system (already noted in source as "future extension") |
 | 4 | **ScopedLLMProviderRegistry lacks `adopt_existing_plugins()`** | Built-in LLM providers have no fibers at boot | Add adoption logic mirroring `ScopedToolRegistry` |
-| 5 | **No entry-point discovery for ToolPlugins** | Third-party tools cannot be discovered via `pip install`; only profile-dir or marketplace | Implement `setuptools` entry_point group `leapflow.tool_plugins` with discovery at boot |
-| 6 | **Third-party plugins not re-loaded after restart** | Files in `plugins_dir` are inert after daemon restart | Implement `discover_profile_plugins()` scanning `plugins_dir` at boot |
+| 5 | **No entry-point discovery for ToolPlugins** | Third-party tools cannot be discovered via `pip install`; profile-dir and marketplace installs are supported | Implement `setuptools` entry_point group `leapflow.tool_plugins` with discovery at boot |
 | 7 | **No per-plugin resource quotas** | A misbehaving plugin can consume unlimited CPU/memory | Add configurable per-plugin timeout and call-rate ceiling |
 | 8 | **Trust unfreeze not exposed** | A hard-failed plugin can never recover without DB intervention | Add `plugin_unfreeze` tool (gated, HIGH risk) or admin slash command |
 | 9 | **No time-series trust history** | Only current state is persisted; cannot audit historical transitions | Extend `PluginStatsStore` with an append-only transitions table |
@@ -457,7 +457,7 @@ These require human/product input and are not answerable from code alone:
 | Plugin contracts (ToolPlugin / ToolMetadata) | `src/leapflow/plugins/protocol.py` |
 | Plugin subsystem public API | `src/leapflow/plugins/__init__.py` |
 | Plugin discovery (built-in) | `src/leapflow/plugins/tool_plugins/__init__.py` |
-| Self-management tools (7 tools) | `src/leapflow/plugins/tool_plugins/self_management.py` |
+| Self-management tools (8 tools) | `src/leapflow/plugins/tool_plugins/self_management.py` |
 | Trust ledger | `src/leapflow/learning/plugin_trust.py` |
 | Usage tracker | `src/leapflow/learning/plugin_stats.py` |
 | Advisor (scoring engine) | `src/leapflow/learning/plugin_advisor.py` |
@@ -495,8 +495,8 @@ These require human/product input and are not answerable from code alone:
 | PRODUCTION trust auto-approves reload | ✅ ENFORCED |
 | Health finding emission (error rate + trust degrade) | ✅ ENFORCED (advisory) |
 | Auto-quarantine on health breach | ❌ NOT ENFORCED (recommended policy) |
-| Uninstall disposes live fiber | ❌ NOT ENFORCED (gap) |
-| Third-party re-discovery on restart | ❌ NOT ENFORCED (gap) |
+| Uninstall disposes live fiber | ✅ ENFORCED through `plugin_remove` |
+| Third-party re-discovery on restart | ✅ ENFORCED for profile-scoped `.py` plugins |
 | Per-plugin resource quotas | ❌ NOT ENFORCED (roadmap) |
 | ActiveSignalSource fiber management | ❌ NOT ENFORCED (future extension) |
 | Gateway adapter fiber lifecycle | ❌ NOT ENFORCED (unwired) |

@@ -11,7 +11,10 @@ To add a built-in plugin: create the module, expose ``plugin``, and list it in
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import logging
+import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -54,6 +57,67 @@ def _disabled_plugin_ids() -> set[str]:
         return set()
 
 
+def _profile_plugins_dir() -> Path | None:
+    """Return the active profile's installed plugin directory, if configured."""
+    try:
+        from leapflow.config import get_settings
+
+        settings = get_settings()
+        profile_layout = getattr(settings, "profile_layout", None)
+        if profile_layout is None:
+            return None
+        return Path(profile_layout.plugins_dir)
+    except (ImportError, AttributeError, RuntimeError, TypeError, OSError):
+        return None
+
+
+def _load_plugin_from_file(path: Path) -> "ToolPlugin | None":
+    """Load one profile-scoped plugin file and attach its source path metadata."""
+    module_name = path.stem
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        logger.warning("Cannot create import spec for profile plugin %s", path)
+        return None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        logger.warning("Failed to import profile plugin %s", path, exc_info=True)
+        return None
+    plugin = getattr(module, "plugin", None)
+    if plugin is None:
+        sys.modules.pop(module_name, None)
+        logger.warning("Profile plugin %s has no module-level 'plugin'", path)
+        return None
+    try:
+        setattr(plugin, "__leapflow_plugin_path__", str(path))
+    except Exception:
+        logger.debug("Cannot attach plugin source path metadata for %s", path, exc_info=True)
+    return plugin
+
+
+def discover_profile_plugins(disabled: set[str] | None = None) -> "list[ToolPlugin]":
+    """Discover profile-scoped plugins installed under ProfileLayout.plugins_dir."""
+    plugins_dir = _profile_plugins_dir()
+    if plugins_dir is None or not plugins_dir.exists():
+        return []
+    disabled_ids = disabled if disabled is not None else _disabled_plugin_ids()
+    discovered: list[ToolPlugin] = []
+    for path in sorted(plugins_dir.glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        plugin = _load_plugin_from_file(path)
+        if plugin is None:
+            continue
+        if plugin.plugin_id in disabled_ids:
+            logger.info("Skipping disabled profile plugin: %s", plugin.plugin_id)
+            continue
+        discovered.append(plugin)
+    return discovered
+
+
 def _discover_all() -> "list[ToolPlugin]":
     """Import all built-in plugin modules and collect their plugin instances."""
     disabled = _disabled_plugin_ids()
@@ -77,6 +141,12 @@ def _discover_all() -> "list[ToolPlugin]":
             continue
         plugins.append(plugin)
 
+    for plugin in discover_profile_plugins(disabled):
+        if plugin.plugin_id in {p.plugin_id for p in plugins}:
+            logger.warning("Skipping duplicate profile plugin id: %s", plugin.plugin_id)
+            continue
+        plugins.append(plugin)
+
     return plugins
 
 
@@ -92,4 +162,4 @@ def get_all_plugins() -> "list[ToolPlugin]":
     return _all_plugins
 
 
-__all__ = ["get_all_plugins"]
+__all__ = ["discover_profile_plugins", "get_all_plugins"]

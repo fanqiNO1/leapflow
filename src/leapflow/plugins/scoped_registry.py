@@ -9,7 +9,11 @@ This is a composition wrapper — the underlying ToolPluginRegistry is NOT modif
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import logging
+import sys
+from pathlib import Path
 from typing import Any, Optional
 
 from leapflow.domain.effect_scope import EffectScope
@@ -40,6 +44,7 @@ class ScopedToolRegistry:
         self._registry = registry
         self._fibers: dict[str, PluginFiber] = {}
         self._plugin_modules: dict[str, str] = {}  # plugin_id → module path
+        self._plugin_files: dict[str, Path] = {}  # plugin_id → installed source file
 
     def create_fiber(self, plugin_id: str) -> PluginFiber:
         """Create a new PluginFiber for managing a plugin's lifecycle."""
@@ -60,8 +65,11 @@ class ScopedToolRegistry:
         tools when the fiber is disposed.
         """
         plugin_id = plugin.plugin_id
-        # Track module path so reload() can re-import the plugin later.
+        # Track reload metadata so reload() can re-import the plugin later.
         self._plugin_modules[plugin_id] = plugin.__class__.__module__
+        plugin_path = getattr(plugin, "__leapflow_plugin_path__", None)
+        if plugin_path:
+            self._plugin_files[plugin_id] = Path(str(plugin_path))
         # Register on underlying registry
         self._registry.register(plugin)
 
@@ -116,6 +124,9 @@ class ScopedToolRegistry:
                 continue  # already adopted
             fiber = self.create_fiber(plugin_id)
             self._plugin_modules[plugin_id] = plugin.__class__.__module__
+            plugin_path = getattr(plugin, "__leapflow_plugin_path__", None)
+            if plugin_path:
+                self._plugin_files[plugin_id] = Path(str(plugin_path))
             tool_names = [t.name for t in plugin.tools]
 
             def _cleanup(pid: str = plugin_id, names: list = tool_names) -> None:
@@ -128,6 +139,73 @@ class ScopedToolRegistry:
     def fibers(self) -> dict[str, PluginFiber]:
         """Read-only view of managed fibers."""
         return dict(self._fibers)
+
+    def get_plugin_module(self, plugin_id: str) -> str | None:
+        """Return the module path used to reload a plugin, if known."""
+        return self._plugin_modules.get(plugin_id)
+
+    def get_plugin_file(self, plugin_id: str) -> Path | None:
+        """Return the file backing a profile-scoped plugin, if known."""
+        return self._plugin_files.get(plugin_id)
+
+    def dispose_plugin(self, plugin_id: str, *, prune_metadata: bool = False) -> PluginFiber:
+        """Dispose a plugin fiber and remove its tools from the live registry.
+
+        ``prune_metadata`` is reserved for terminal removal: disable keeps module
+        metadata so plugin_enable/plugin_reload can bring the plugin back, while
+        remove drops the reload metadata and sys.modules entry.
+        """
+        fiber = self._fibers.get(plugin_id)
+        if fiber is None:
+            raise KeyError(f"Plugin '{plugin_id}' has no fiber")
+        if fiber.state == FiberState.ACTIVE:
+            fiber.begin_unload()
+        if fiber.state != FiberState.DISPOSED:
+            fiber.dispose()
+        if prune_metadata:
+            module_path = self._plugin_modules.pop(plugin_id, None)
+            self._plugin_files.pop(plugin_id, None)
+            if module_path:
+                sys.modules.pop(module_path, None)
+        return fiber
+
+    def _load_fresh_plugin(self, plugin_id: str, module_path: str) -> ToolPlugin:
+        """Load a fresh plugin instance using file-backed reload when available."""
+        file_path = self._plugin_files.get(plugin_id)
+        if file_path is not None:
+            module = self._load_module_from_file(module_path, file_path)
+        else:
+            if module_path not in sys.modules:
+                raise RuntimeError(
+                    f"Plugin module '{module_path}' not in sys.modules; cannot reload"
+                )
+            module = importlib.reload(sys.modules[module_path])
+        plugin = getattr(module, "plugin", None)
+        if plugin is None:
+            raise RuntimeError(
+                f"Reloaded module '{module_path}' has no 'plugin' attribute"
+            )
+        if file_path is not None:
+            try:
+                setattr(plugin, "__leapflow_plugin_path__", str(file_path))
+            except Exception:
+                logger.debug("Cannot attach plugin file path metadata for %s", plugin_id, exc_info=True)
+        return plugin
+
+    @staticmethod
+    def _load_module_from_file(module_path: str, file_path: Path) -> Any:
+        """Load ``module_path`` from ``file_path`` without relying on sys.path."""
+        spec = importlib.util.spec_from_file_location(module_path, file_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Cannot create import spec for plugin file '{file_path}'")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_path] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(module_path, None)
+            raise
+        return module
 
     def reload(self, plugin_id: str) -> PluginFiber:
         """Reload a plugin: dispose old fiber, re-import module, register new instance.
@@ -175,19 +253,8 @@ class ScopedToolRegistry:
         if old_tool_names:
             self._unregister_tools(plugin_id, old_tool_names)
 
-        # 2. Re-import the plugin module to get a fresh instance
-        import importlib
-        import sys
-        if module_path not in sys.modules:
-            raise RuntimeError(
-                f"Plugin module '{module_path}' not in sys.modules; cannot reload"
-            )
-        fresh_module = importlib.reload(sys.modules[module_path])
-        fresh_plugin = getattr(fresh_module, "plugin", None)
-        if fresh_plugin is None:
-            raise RuntimeError(
-                f"Reloaded module '{module_path}' has no 'plugin' attribute"
-            )
+        # 2. Re-import the plugin module to get a fresh instance.
+        fresh_plugin = self._load_fresh_plugin(plugin_id, module_path)
 
         # 3. Create new fiber and register the fresh plugin
         new_fiber = self.create_fiber(plugin_id)

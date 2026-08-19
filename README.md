@@ -772,7 +772,7 @@ Plugin assembly is fully fiberized from startup; there is no bootstrap shim and 
 
 ### Self-Modification
 
-The `self_management` plugin exposes **seven** tools to the agent:
+The `self_management` plugin exposes **eight** tools to the agent:
 
 | Tool | Kind | Effect |
 |------|------|--------|
@@ -781,6 +781,7 @@ The `self_management` plugin exposes **seven** tools to the agent:
 | `plugin_reload` | mutating | Hot-reload a plugin |
 | `plugin_disable` | mutating | Disable a plugin (takes effect immediately; tools re-resolved per read) |
 | `plugin_enable` | mutating | Re-enable a disabled plugin |
+| `plugin_remove` | mutating | Terminally remove a plugin, dispose its fiber, unregister tools, and optionally delete source |
 | `plugin_generate` | mutating | Ask the LLM to synthesize + validate new plugin code |
 | `plugin_install` | mutating | Install from generated code or a marketplace entry |
 

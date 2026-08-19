@@ -45,6 +45,7 @@ class EchoPlugin:
                 description="Echo the input arguments back",
                 parameters_schema={"type": "object", "properties": {}},
                 handler=self._echo,
+                x_leapflow={"category": "custom", "risk_level": "read_only"},
             )
         ]
 
@@ -123,6 +124,59 @@ async def test_validator_accepts_valid_plugin() -> None:
     assert result.ok, f"Expected pass, got stage={result.stage}, error={result.error}"
     assert result.stage == "passed"
     assert result.exposed_tools == ["echo"]
+
+
+@pytest.mark.asyncio
+async def test_validator_rejects_none_x_leapflow() -> None:
+    validator = PluginValidator()
+    result = await validator.validate(
+        "echo_test",
+        VALID_ECHO_PLUGIN_CODE.replace(
+            'x_leapflow={"category": "custom", "risk_level": "read_only"},',
+            'x_leapflow=None,',
+        ),
+    )
+    assert not result.ok
+    assert "x_leapflow must be a dict" in result.error
+
+
+@pytest.mark.asyncio
+async def test_validator_rejects_bad_parameters_schema() -> None:
+    validator = PluginValidator()
+    result = await validator.validate(
+        "echo_test",
+        VALID_ECHO_PLUGIN_CODE.replace(
+            'parameters_schema={"type": "object", "properties": {}},',
+            'parameters_schema={"type": "array"},',
+        ),
+    )
+    assert not result.ok
+    assert "parameters_schema.type" in result.error
+
+
+@pytest.mark.asyncio
+async def test_validator_rejects_sync_handler() -> None:
+    validator = PluginValidator()
+    result = await validator.validate(
+        "echo_test",
+        VALID_ECHO_PLUGIN_CODE.replace("async def _echo", "def _echo"),
+    )
+    assert not result.ok
+    assert "handler must be an async function" in result.error
+
+
+@pytest.mark.asyncio
+async def test_validator_rejects_mutating_tool_without_approval_metadata() -> None:
+    validator = PluginValidator()
+    result = await validator.validate(
+        "echo_test",
+        VALID_ECHO_PLUGIN_CODE.replace(
+            'x_leapflow={"category": "custom", "risk_level": "read_only"},',
+            'x_leapflow={"category": "custom", "risk_level": "high"},\n                mutates_state=True,',
+        ),
+    )
+    assert not result.ok
+    assert "requires_approval" in result.error
 
 
 @pytest.mark.asyncio
