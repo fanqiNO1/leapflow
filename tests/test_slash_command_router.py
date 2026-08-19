@@ -156,7 +156,8 @@ def test_tools_payload_groups_desktop_tools_when_perception_online() -> None:
     from leapflow.cli.commands.slash_handlers import build_tool_payload
     from leapflow.skills.semantic_schema import semantic_tool_to_openai
     from leapflow.skills.tool_executor import ToolDefinition
-    from leapflow.tools import registry as _tool_reg
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
 
     ctx = SimpleNamespace(rpc=SimpleNamespace(connected=False), platform_tools=[])
 

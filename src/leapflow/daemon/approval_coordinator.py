@@ -30,9 +30,9 @@ class ApprovalCoordinator:
             from leapflow.security.actions import ActionDescriptor
             from leapflow.security.orchestrator import ApprovalOrchestrator
             from leapflow.security.policy import ApprovalPolicyEngine
+            from leapflow.plugins import get_registry as _get_tool_registry
             from leapflow.tools.config_tools import set_config_approval_gate
             from leapflow.tools.gateway_tool import set_gateway_approval_gate
-            from leapflow.tools import get_registry as _get_tool_registry
             from leapflow.tools.shell_tools import set_approval_gate
             from leapflow.tools.web_fetch import set_web_approval_gate
 
@@ -62,7 +62,30 @@ class ApprovalCoordinator:
             # gate so plugin management gets identical human-in-the-loop
             # treatment; bind_runtime only reaches plugins that declare the
             # 'plugin_approval_gate' dependency (self_management).
-            _tool_registry.bind_runtime(plugin_approval_gate=orchestrator)
+            #
+            # Same call also wires the active LLM provider and the opt-in
+            # plugin_generation_enabled flag into self_management, so its
+            # plugin_generate handler can drive real code synthesis in daemon
+            # mode. ``ctx.llm`` is None-safe: if credentials are absent, the
+            # handler still reports the missing provider instead of crashing.
+            settings = getattr(ctx, "settings", None)
+            # Resolve the profile-scoped plugin install directory and (optionally)
+            # a marketplace client from settings. Both are injected via the same
+            # bind_runtime path; self_management declares them as dependencies.
+            plugin_install_dir = self._resolve_plugin_install_dir(settings)
+            marketplace_client = self._build_marketplace_client(settings, plugin_install_dir)
+            _tool_registry.bind_runtime(
+                plugin_approval_gate=orchestrator,
+                llm_provider=getattr(ctx, "llm", None),
+                plugin_generation_enabled=bool(
+                    getattr(settings, "plugin_generation_enabled", False)
+                ),
+                plugin_install_dir=plugin_install_dir,
+                marketplace_client=marketplace_client,
+                marketplace_trusted_pubkeys=tuple(
+                    getattr(settings, "plugin_marketplace_trusted_pubkeys", ()) or ()
+                ),
+            )
 
             class _FileReadGate:
                 def __init__(self) -> None:
@@ -110,6 +133,63 @@ class ApprovalCoordinator:
                 exc,
                 exc_info=True,
             )
+
+    @staticmethod
+    def _resolve_plugin_install_dir(settings: Any) -> str | None:
+        """Resolve the profile-scoped directory for installed plugins.
+
+        Precedence: explicit ``Settings.plugin_install_dir`` -> the active
+        ``ProfileLayout.plugins_dir``. Returns ``None`` when neither can be
+        determined, in which case self_management falls back to resolving the
+        layout itself. Never joins ad-hoc path strings; always defers to the
+        layout API for the profile-scoped default.
+        """
+        configured = getattr(settings, "plugin_install_dir", None)
+        if configured:
+            return str(configured)
+        profile_layout = getattr(settings, "profile_layout", None)
+        if profile_layout is not None:
+            try:
+                return str(profile_layout.plugins_dir)
+            except (AttributeError, OSError):
+                return None
+        return None
+
+    @staticmethod
+    def _build_marketplace_client(settings: Any, install_dir: str | None) -> Any:
+        """Build a MarketplaceClient from settings, or None when unconfigured.
+
+        A URL source takes precedence over a local directory root. The client
+        installs into the resolved profile-scoped plugins directory so that
+        marketplace and code installs share one managed location.
+        """
+        root = getattr(settings, "plugin_marketplace_root", None)
+        url = getattr(settings, "plugin_marketplace_url", None)
+        if not root and not url:
+            return None
+        target_dir = install_dir
+        if not target_dir:
+            profile_layout = getattr(settings, "profile_layout", None)
+            if profile_layout is None:
+                return None
+            target_dir = str(profile_layout.plugins_dir)
+        try:
+            from pathlib import Path
+
+            from leapflow.plugins.marketplace import (
+                HttpMarketplaceSource,
+                MarketplaceClient,
+            )
+            from leapflow.plugins.marketplace.client import LocalDirectorySource
+
+            if url:
+                source: Any = HttpMarketplaceSource(str(url))
+            else:
+                source = LocalDirectorySource(Path(str(root)))
+            return MarketplaceClient(source, install_dir=Path(target_dir))
+        except (ImportError, ValueError, OSError) as exc:
+            logger.warning("marketplace client construction failed: %s", exc, exc_info=True)
+            return None
 
     async def request_approval(self, request: Any, route: "tuple[asyncio.Queue[StreamChunk], str] | None") -> str:
         """Block until approval decision; called from tool execution.

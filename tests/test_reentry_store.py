@@ -181,7 +181,8 @@ def test_schedule_reentry_handler_registers(tmp_path) -> None:
     import asyncio
 
     from leapflow.storage.reentry_store import ReentryStore, build_reentry_trigger
-    from leapflow.tools import registry as _tool_reg
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
 
     store = ReentryStore(tmp_path / "leap.duckdb")
 
@@ -210,7 +211,8 @@ def test_schedule_reentry_handler_registers(tmp_path) -> None:
 
 def test_schedule_reentry_disclosed_and_blocked_in_subagents() -> None:
     from leapflow.engine.subagent import DELEGATE_BLOCKED_TOOLS
-    from leapflow.tools import registry as _tool_reg
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
 
     names = {td.get("function", {}).get("name") for td in _tool_reg.tool_definitions}
     assert "schedule_reentry" in names                       # disclosed (core-eligible)

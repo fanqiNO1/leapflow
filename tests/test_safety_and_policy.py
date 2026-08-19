@@ -79,7 +79,7 @@ async def test_policy_safe_action_allowed():
 async def test_policy_send_action_requires_ask():
     engine = PolicyEngine(default_rules())
     # element_index params carry no semantics — the resolved element
-    # description (filled by ToolBridge's describer) drives the rule.
+    # description (filled by the toolset's describer) drives the rule.
     ctx = PolicyContext(
         skill_name="test", iteration=0, target_description="Button 发送"
     )
@@ -266,7 +266,8 @@ async def test_gateway_start_skips_failed_auto_connect_platform(tmp_path, monkey
 
 @pytest.mark.asyncio
 async def test_file_read_gate_supports_legacy_two_argument_check(tmp_path) -> None:
-    from leapflow.tools import registry as _tool_reg
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
     from leapflow.tools.file_operations import file_read
 
     class LegacyReadGate:
@@ -292,7 +293,8 @@ async def test_file_read_gate_supports_legacy_two_argument_check(tmp_path) -> No
 
 @pytest.mark.asyncio
 async def test_file_write_gate_supports_legacy_three_argument_check(tmp_path) -> None:
-    from leapflow.tools import registry as _tool_reg
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
     from leapflow.tools.file_operations import file_write
 
     class LegacyWriteGate:

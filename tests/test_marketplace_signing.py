@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from leapflow.tools.marketplace import MarketplaceClient, PluginManifest
-from leapflow.tools.marketplace.client import LocalDirectorySource
+from leapflow.plugins.marketplace import MarketplaceClient, PluginManifest
+from leapflow.plugins.marketplace.client import LocalDirectorySource
 
 
 pytestmark = pytest.mark.unit

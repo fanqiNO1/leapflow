@@ -21,11 +21,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from leapflow.domain.effect_scope import EffectScope
 from leapflow.domain.plugin_fiber import PluginFiber, FiberState
-from leapflow.tools.protocol import ToolMetadata, ToolPlugin
-from leapflow.tools.plugin_registry import ToolPluginRegistry
-from leapflow.tools.scoped_registry import ScopedToolRegistry
+from leapflow.plugins.protocol import ToolMetadata
+from leapflow.plugins.registry import ToolPluginRegistry
+from leapflow.plugins.scoped_registry import ScopedToolRegistry
 
 
 # ════════════════════════════════════════════════════════════════
@@ -103,12 +102,10 @@ def _register_and_assemble(
     plugin: FakeToolPlugin,
     registry: ToolPluginRegistry,
 ) -> PluginFiber:
-    """Helper: create fiber, scoped-register, patch-assemble, and activate."""
+    """Helper: create fiber, scoped-register, assemble, and activate."""
     fiber = scoped.create_fiber(plugin.plugin_id)
     scoped.scoped_register(plugin, fiber)
-    with patch.object(registry, "_get_bridge_adapter") as mock_bridge:
-        mock_bridge.return_value = MagicMock()
-        registry.assemble()
+    registry.assemble()
     fiber.activate()
     return fiber
 
@@ -225,9 +222,7 @@ class TestReloadPreservesOtherPlugins:
         fiber_b = scoped_registry.create_fiber("plugin-b")
         scoped_registry.scoped_register(plugin_b, fiber_b)
 
-        with patch.object(fresh_registry, "_get_bridge_adapter") as mock_bridge:
-            mock_bridge.return_value = MagicMock()
-            fresh_registry.assemble()
+        fresh_registry.assemble()
 
         fiber_a.activate()
         fiber_b.activate()
@@ -283,7 +278,7 @@ class TestReloadReplacesToolHandlers:
         _register_and_assemble(scoped_registry, plugin, fresh_registry)
 
         # Capture original handler
-        original_handler = fresh_registry._tool_handlers["htool"]
+        original_handler = fresh_registry.tool_handlers["htool"]
         assert original_handler is _handler_v1
 
         # Prepare new plugin with different handler
@@ -297,7 +292,7 @@ class TestReloadReplacesToolHandlers:
             scoped_registry.reload("handler-test")
 
         # New handler is NOT the original
-        new_handler = fresh_registry._tool_handlers["htool"]
+        new_handler = fresh_registry.tool_handlers["htool"]
         assert new_handler is not original_handler
         assert new_handler is _handler_v2
 
@@ -306,15 +301,15 @@ class TestReloadReplacesToolHandlers:
 
 
 # ════════════════════════════════════════════════════════════════
-# Test 5: reload removes and re-adds gp_ aliases
+# Test 5: reload does NOT produce gp_ aliases (Landing B)
 # ════════════════════════════════════════════════════════════════
 
 
-class TestReloadRemovesAndReaddsGpAliases:
-    """gp_ prefixed aliases are removed during dispose and re-added after reload."""
+class TestReloadDoesNotProduceGpAliases:
+    """After Landing B, reload() only adds the plain tool name — no gp_ alias."""
 
-    def test_reload_removes_and_readds_gp_aliases(
-        self, fresh_registry: ToolPluginRegistry, scoped_registry: ScopedToolRegistry
+    def test_reload_only_adds_plain_name(self
+        , fresh_registry: ToolPluginRegistry, scoped_registry: ScopedToolRegistry
     ) -> None:
         module_name = "tests._fake_gp_alias"
         plugin = FakeToolPlugin(
@@ -330,12 +325,9 @@ class TestReloadRemovesAndReaddsGpAliases:
 
         _register_and_assemble(scoped_registry, plugin, fresh_registry)
 
-        # After assemble, manually add gp_ alias (mimicking bridge_adapter)
-        fresh_registry._tool_handlers["gp_foo"] = fresh_registry._tool_handlers["foo"]
-
-        # Verify both present
+        # Verify plain name present, no gp_ alias
         assert "foo" in fresh_registry._tool_handlers
-        assert "gp_foo" in fresh_registry._tool_handlers
+        assert "gp_foo" not in fresh_registry._tool_handlers
 
         # Prepare new plugin for reload
         new_plugin = FakeToolPlugin(
@@ -347,9 +339,9 @@ class TestReloadRemovesAndReaddsGpAliases:
         with patch("importlib.reload", return_value=fake_mod):
             scoped_registry.reload("alias-plugin")
 
-        # Both foo and gp_foo should be re-added by reload()
+        # Only plain name re-added, no gp_ alias
         assert "foo" in fresh_registry._tool_handlers
-        assert "gp_foo" in fresh_registry._tool_handlers
+        assert "gp_foo" not in fresh_registry._tool_handlers
 
         # Cleanup
         sys.modules.pop(module_name, None)
@@ -424,11 +416,11 @@ class TestDisabledPluginNotRegistered:
         )
 
         # We need to bypass the lazy singleton
-        from leapflow.tools.plugins import _discover_all
+        from leapflow.plugins.tool_plugins import _discover_all
 
         # Patch importlib.import_module to return controlled modules
         # that simulate just text_utils and system_info.
-        # We need to keep leapflow.tools.protocol importable for the ToolPlugin check.
+        # We need to keep leapflow.plugins.protocol importable for the ToolPlugin check.
         _real_import = __import__("importlib").import_module
 
         fake_text_utils = MagicMock()
@@ -437,11 +429,11 @@ class TestDisabledPluginNotRegistered:
         fake_system_info.plugin.plugin_id = "system_info"
 
         def _mock_import(module_path: str) -> Any:
-            if module_path == "leapflow.tools.plugins.text_utils":
+            if module_path == "leapflow.plugins.tool_plugins.text_utils":
                 return fake_text_utils
-            if module_path == "leapflow.tools.plugins.system_info":
+            if module_path == "leapflow.plugins.tool_plugins.system_info":
                 return fake_system_info
-            if module_path.startswith("leapflow.tools.plugins."):
+            if module_path.startswith("leapflow.plugins.tool_plugins."):
                 raise ImportError(f"not testing: {module_path}")
             return _real_import(module_path)
 
@@ -592,7 +584,6 @@ class TestDisabledPluginsEndToEnd:
 
     def test_disabled_plugins_removes_tools_from_fresh_registry(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Setting disabled_plugins in settings causes those tools to not appear in a fresh registry."""
-        from dataclasses import replace
         
         # Force a settings object with disabled_plugins set
         from leapflow.config import get_settings as _real_get_settings
@@ -606,12 +597,12 @@ class TestDisabledPluginsEndToEnd:
         import leapflow.config
         monkeypatch.setattr(leapflow.config, "get_settings", lambda: modified)
         # Also patch it in the plugins module in case it caches
-        import leapflow.tools.plugins as plugins_mod
+        import leapflow.plugins.tool_plugins as plugins_mod
         # Reset the cached ALL_PLUGINS
         plugins_mod._all_plugins = None
         
         # Create a fresh registry and discover
-        from leapflow.tools.plugin_registry import ToolPluginRegistry
+        from leapflow.plugins.registry import ToolPluginRegistry
         reg = ToolPluginRegistry()
         reg.discover_builtin()
         reg.assemble()

@@ -18,7 +18,7 @@ pytestmark = pytest.mark.unit
 
 VALID_ECHO_PLUGIN_CODE = '''
 from typing import Any
-from leapflow.tools.protocol import ToolMetadata
+from leapflow.plugins.protocol import ToolMetadata
 
 
 class EchoPlugin:

@@ -109,15 +109,14 @@ _registry_cache: tuple[int, int, int, ToolRegistry] | None = None
 def _default_tool_registry() -> ToolRegistry:
     """Return the runtime tool registry, rebuilding when late-registered tools arrive."""
     global _registry_cache
-    from leapflow.tools import registry as _plugin_registry
+    from leapflow.plugins import get_registry
+    _plugin_registry = get_registry()
     from leapflow.tools.name_resolver import TOOL_NAME_ALIASES
 
-    if not _plugin_registry._assembled:
-        _plugin_registry.assemble()
+    _plugin_registry.assemble()  # idempotent: no-op once assembled
 
     td = _plugin_registry.tool_definitions
     th = _plugin_registry.tool_handlers
-    bt = _plugin_registry.bridge_tools
 
     size_key = (len(td), len(th), _plugin_registry.version)
     if _registry_cache is not None and _registry_cache[:3] == size_key:
@@ -125,7 +124,7 @@ def _default_tool_registry() -> ToolRegistry:
     # Rebuild
     registry = ToolRegistry.from_definitions(
         td, th,
-        bridge_tools=bt, aliases=TOOL_NAME_ALIASES,
+        aliases=TOOL_NAME_ALIASES,
     )
     _registry_cache = (*size_key, registry)
     return registry
@@ -1094,7 +1093,6 @@ class AgentEngine:
         vlm: Optional[Any] = None,
         memory_manager: Optional[MemoryManager] = None,
         evolution: Optional[EvolutionMemoryProvider] = None,
-        tool_bridge: Optional[Any] = None,
         skill_injector: Optional[Any] = None,
         skill_index: Optional[Any] = None,
         concurrency_policy: Optional[ToolConcurrencyPolicy] = None,
@@ -1128,9 +1126,6 @@ class AgentEngine:
 
         # Skill index for compact prompt injection
         self._skill_index: Optional[Any] = skill_index
-
-        # Pre-built ToolBridge with general-purpose tools registered
-        self._tool_bridge = tool_bridge
 
         # Skill discovery (SkillInjector for slash commands)
         self._skill_injector = skill_injector
@@ -1253,15 +1248,19 @@ class AgentEngine:
         # truth — never derived from re-parsing text.
         self._last_turn_tool_categories: frozenset[str] = frozenset()
         self._manifests_by_name: Dict[str, Any] | None = None
-        # Semantic desktop schema cache: rebuilt when the bridge object changes
-        # (perception hot-swap via reconfigure_host_backend).
-        self._semantic_schema_bridge: Any = None
+        # Semantic desktop schema cache. The plugin is re-resolved from the tool
+        # registry on every read, and cache keys carry (plugin identity, version)
+        # so an unregistered plugin yields zero schemas and a reloaded instance
+        # (whose version counter restarts at 0) never collides with a cached
+        # predecessor entry.
+        self._semantic_plugin_key: Optional[tuple[int, int]] = None
         self._semantic_schemas: List[Dict[str, Any]] = []
-        self._unified_catalog_key: Any = object()
+        self._unified_catalog_key: Optional[tuple] = None
         self._unified_catalog: List[Dict[str, Any]] = []
         # Capability discovery resolves the live catalog through this engine, so
         # runtime-injected categories (desktop) become expandable.
-        from leapflow.tools import registry as _plugin_registry
+        from leapflow.plugins import get_registry
+        _plugin_registry = get_registry()
         _plugin_registry.set_capability_catalog_provider(self._unified_tool_catalog)
         self._healer = MessageHealer()
 
@@ -1308,13 +1307,14 @@ class AgentEngine:
         rpc: HostRpc,
         perception: Optional[Any],
         execution: Optional[Any],
-        tool_bridge: Optional[Any],
     ) -> None:
         """Refresh host RPC and adapters without resetting chat/session state."""
         self._rpc = rpc
         self._perception = perception
         self._execution = execution
-        self._tool_bridge = tool_bridge
+        # Desktop semantic surfaces need no refresh here: the plugin is
+        # re-resolved from the tool registry on every engine read, and the
+        # context has already re-bound it via registry.bind_runtime.
         self._skill_merger = SkillMerger(
             registry=self._registry,
             llm=self._llm,
@@ -1846,7 +1846,8 @@ class AgentEngine:
         else:
             self._research_ledger.reset()
         try:
-            from leapflow.tools import registry as _plugin_registry
+            from leapflow.plugins import get_registry
+            _plugin_registry = get_registry()
             _plugin_registry.set_research_ledger(self._research_ledger)
             _plugin_registry.set_reentry_scheduler(self._schedule_reentry)
         except ImportError:
@@ -2246,7 +2247,7 @@ class AgentEngine:
         return (
             "\n## Learned Skills\n"
             "You have access to the following learned skills. "
-            "Use `gp_skills_list` to browse or `gp_skill_view` to read details:\n"
+            "Use `skills_list` to browse or `skill_view` to read details:\n"
             f"{skill_index_text}\n"
         )
 
@@ -2733,7 +2734,11 @@ class AgentEngine:
         )
 
     def _full_tool_schema_tokens(self) -> int:
-        """Cached token estimate of the full tool catalog schema (per bridge)."""
+        """Cached token estimate of the full unified catalog schema.
+
+        Invalidated whenever the unified catalog rebuilds (static registry
+        growth or desktop plugin identity/version change).
+        """
         if self._full_tools_tokens is None:
             self._full_tools_tokens = self._context_controller.estimator.estimate_tools(
                 self._unified_tool_catalog()
@@ -4332,33 +4337,42 @@ class AgentEngine:
     # ── Unified Loop Helpers ───────────────────────────────────────────────
 
     def _semantic_tool_schemas(self) -> List[Dict[str, Any]]:
-        """Callable schemas for the semantic desktop tools on the live bridge.
+        """Callable schemas for the semantic desktop tools from the desktop plugin.
 
-        Empty when the bridge is absent or carries no semantic tools
-        (perception offline) — the bridge itself is the dynamic on/off switch.
-        Cached by bridge object identity so a hot-swapped bridge rebuilds on
-        first access.
+        The plugin is a process singleton, so it is re-resolved from the tool
+        registry on every read — a disabled/unregistered plugin (plugin_disable,
+        fiber dispose) yields zero schemas immediately and never serves a
+        stale cache entry. Cached on (plugin identity, version): identity makes
+        a reloaded instance (version counter restarting at 0) always miss the
+        predecessor's cache entry; version catches hot-swapped perception
+        ports and re-activation of the same instance.
         """
-        if self._tool_bridge is None:
-            return []
-        if self._semantic_schema_bridge is not self._tool_bridge:
-            from leapflow.skills.semantic_schema import build_semantic_schemas
+        from leapflow.plugins import get_registry
+        _plugin_registry = get_registry()
 
-            self._semantic_schemas = build_semantic_schemas(self._tool_bridge)
-            self._semantic_schema_bridge = self._tool_bridge
+        dp = _plugin_registry.get_desktop_semantic_plugin()
+        if dp is None or not dp.active:
+            return []
+        cache_key = (id(dp), dp.version)
+        if self._semantic_plugin_key != cache_key:
+            self._semantic_schemas = dp.get_semantic_schemas()
+            self._semantic_plugin_key = cache_key
         return self._semantic_schemas
 
     def _unified_tool_catalog(self) -> List[Dict[str, Any]]:
         """Per-turn tool catalog: static registry plus live semantic schemas.
 
-        Cached on (bridge identity, static-registry size): the registry is
-        append-only (session_search, platform schemas land after engine
-        construction), so a length change invalidates exactly like a
-        bridge hot-swap does.
+        Cached on (desktop plugin identity+version, static-registry size): the
+        registry is append-only (session_search, platform schemas land after
+        engine construction), so a length change invalidates exactly like a
+        plugin disable or reload does.
         """
-        from leapflow.tools import registry as _plugin_registry
+        from leapflow.plugins import get_registry
+        _plugin_registry = get_registry()
 
-        cache_key = (id(self._tool_bridge), len(_plugin_registry.tool_definitions))
+        dp = _plugin_registry.get_desktop_semantic_plugin()
+        dp_key = (id(dp), dp.version) if dp is not None else None
+        cache_key = (dp_key, len(_plugin_registry.tool_definitions))
         if self._unified_catalog_key != cache_key:
             self._unified_catalog = list(_plugin_registry.tool_definitions) + self._semantic_tool_schemas()
             self._unified_catalog_key = cache_key
@@ -4368,18 +4382,23 @@ class AgentEngine:
         return self._unified_catalog
 
     def _unified_tool_handlers(self) -> Dict[str, Any]:
-        """Per-turn handler table: static handlers plus bridge semantic handlers.
+        """Per-turn handler table: static handlers plus desktop semantic handlers.
 
-        Returns a fresh dict() copy of the plugin registry's handlers, giving each
-        turn an isolated snapshot. Plugin reloads during a turn do not affect the
-        turn in progress — it keeps using its own snapshot until completion.
-        New turns starting after a reload pick up the new handlers.
+        The desktop plugin is re-resolved from the tool registry on every read,
+        so a disabled or reloaded plugin swaps the semantic handler entries on
+        the very next call. Returns a fresh dict() copy of the plugin registry's
+        handlers, giving each turn an isolated snapshot. Plugin reloads during a
+        turn do not affect the turn in progress — it keeps using its own
+        snapshot until completion. New turns starting after a reload pick up
+        the new handlers.
         """
-        from leapflow.tools import registry as _plugin_registry
-        from leapflow.skills.semantic_schema import build_semantic_handlers
+        from leapflow.plugins import get_registry
+        _plugin_registry = get_registry()
 
         handlers: Dict[str, Any] = dict(_plugin_registry.tool_handlers)
-        handlers.update(build_semantic_handlers(self._tool_bridge))
+        dp = _plugin_registry.get_desktop_semantic_plugin()
+        if dp is not None and dp.active:
+            handlers.update(dp.get_semantic_handlers())
         return handlers
 
     async def _approve_desktop_action(self, name: str, args: Any) -> tuple[bool, str]:
@@ -4392,7 +4411,8 @@ class AgentEngine:
 
         if not semantic_requires_approval(name):
             return True, ""
-        from leapflow.tools import registry as _plugin_registry
+        from leapflow.plugins import get_registry
+        _plugin_registry = get_registry()
 
         gate = _plugin_registry.get_desktop_gate()
         if gate is None:
@@ -4820,18 +4840,16 @@ class AgentEngine:
     async def _execute_general_tool(
         self, tool_call: Dict[str, Any], handlers: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Execute a general-purpose tool via registry handlers (preferred) or ToolBridge fallback.
+        """Execute a general-purpose tool via registry handlers.
 
-        Routing priority (Landing A):
+        Routing priority (Landing C):
         0. Semantic desktop tools — admitted only when this turn's handler
            table carries them, gated by the desktop approval gate when mutating
         1. Registry-merged handlers dict (includes plugin + semantic handlers)
-        2. ToolBridge fallback (legacy path, emits debug warning when used)
 
         Security: untrusted tool results (MCP, web) are wrapped with delimiters.
         Secrets in error messages are redacted before returning to LLM.
         """
-        from leapflow.skills.tool_executor import ToolCall as TC
         from leapflow.security.redact import redact_sensitive_text
         from leapflow.skills.semantic_schema import SEMANTIC_TOOL_NAMES
 
@@ -4873,32 +4891,11 @@ class AgentEngine:
         t0 = time.perf_counter()
 
         try:
-            # Landing A: prefer registry-provided handlers (merged dict includes
-            # plugin handlers + semantic handlers via build_semantic_handlers)
             handler = handlers.get(name)
             if handler is not None:
                 result = await asyncio.wait_for(handler(args), timeout=timeout)
-            elif self._tool_bridge is not None:
-                # Fallback: ToolBridge dispatch (legacy path)
-                logger.debug(
-                    "Tool '%s' not in registry handlers; falling back to ToolBridge dispatch",
-                    name,
-                )
-                prefixed = f"gp_{name}"
-                result = await asyncio.wait_for(
-                    self._tool_bridge.dispatch(TC(name=prefixed, params=args)),
-                    timeout=timeout,
-                )
-                if isinstance(result, dict) and "unknown_tool" in str(result.get("error", "")):
-                    result = await asyncio.wait_for(
-                        self._tool_bridge.dispatch(TC(name=name, params=args)),
-                        timeout=timeout,
-                    )
-                    if isinstance(result, dict) and "unknown_tool" in str(result.get("error", "")):
-                        missing_resolution = registry.resolve(original_name, args)
-                        return registry.unknown_result(missing_resolution)
             else:
-                # No handler and no bridge — tool is truly unknown
+                # No handler — tool is truly unknown
                 missing_resolution = registry.resolve(original_name, args)
                 return registry.unknown_result(missing_resolution)
         except asyncio.TimeoutError:
@@ -5347,16 +5344,15 @@ class AgentEngine:
         if not self._settings.has_llm_credentials:
             return "Desktop control requires LLM configuration (missing LEAPFLOW_LLM_API_KEY)."
 
-        from leapflow.skills.bridge_factory import build_tool_bridge
-        from leapflow.skills.tool_executor import ToolUseSkillExecutor
+        from leapflow.skills.tool_executor import ToolUseSkillExecutor, build_execution_toolset
 
-        # Reuse pre-built bridge (with GP tools) or build a fresh one
-        bridge = self._tool_bridge if self._tool_bridge else build_tool_bridge(self._execution, self._perception)
+        # Build a fresh execution toolset for the skill executor's bounded ReAct loop
+        toolset = build_execution_toolset(self._execution, self._perception)
         from leapflow.engine.budget import BudgetConfig
 
         executor = ToolUseSkillExecutor(
             llm=self._llm,
-            bridge=bridge,
+            toolset=toolset,
             skill_content="",
             instructions=[user_text],
             vlm=self._vlm,

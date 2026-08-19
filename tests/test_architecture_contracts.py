@@ -9,6 +9,7 @@ so the guard keeps holding as the implementation moves.
 Covered contracts:
 - Platform-Neutral Gateway Core (core must not import platform packages)
 - Platform vs App Business Boundary (no vendor endpoints/error shapes in core)
+- Plugin core vs tool implementations (plugin core must not import a tool module)
 - Transport-Lifecycle Separation (one-shot actions vs long-lived observations)
 - Immutable Domain Types (frozen dataclasses for domain objects)
 - Protocol over ABC (extension points are runtime_checkable Protocols)
@@ -27,6 +28,7 @@ import typing
 import pytest
 
 GATEWAY_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "leapflow" / "gateway"
+PLUGINS_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "leapflow" / "plugins"
 
 # Sub-packages that own platform/vendor specifics. Gateway core may define the
 # contracts these implement, but must never depend on them.
@@ -48,6 +50,15 @@ def _imported_modules(path: pathlib.Path) -> list[tuple[str, int]]:
         elif isinstance(node, ast.Import):
             found.extend((alias.name, node.lineno) for alias in node.names)
     return found
+
+
+def _plugin_core_modules() -> list[pathlib.Path]:
+    """Return plugin core modules (contracts, registry, lifecycle).
+
+    ``tool_plugins/`` is excluded on purpose: those modules exist to wrap tool
+    implementations, so they are the one place allowed to import them.
+    """
+    return sorted(p for p in PLUGINS_DIR.glob("*.py"))
 
 
 # ── Platform-Neutral Gateway Core ────────────────────────────────────────
@@ -102,6 +113,30 @@ def test_gateway_core_has_no_vendor_endpoints_or_error_shapes() -> None:
                 violations.append(f"{path.name}:{lineno}")
 
     assert violations == [], "vendor endpoint hardcoded in gateway core: " + ", ".join(violations)
+
+
+# ── Plugin core vs tool implementations ──────────────────────────────────
+
+
+def test_plugin_core_does_not_import_tool_implementations() -> None:
+    """Plugin core owns contracts, discovery, and lifecycle — never behaviour.
+
+    ``leapflow.plugins`` publishes whatever a plugin declares; the moment core
+    reaches into ``leapflow.tools`` the dependency inverts and every new tool
+    becomes a core change. Tool wrappers live in ``tool_plugins/``, which is
+    exactly where that import belongs.
+    """
+    violations: list[str] = []
+    for path in _plugin_core_modules():
+        for module, lineno in _imported_modules(path):
+            if module.startswith("leapflow.tools"):
+                violations.append(f"{path.name}:{lineno} imports {module}")
+
+    assert violations == [], (
+        "plugin core must not depend on tool implementations; declare the tool "
+        "in a tool_plugins/ module or inject it through bind_runtime():\n  "
+        + "\n  ".join(violations)
+    )
 
 
 # ── Transport-Lifecycle Separation ───────────────────────────────────────
@@ -239,6 +274,13 @@ _STANDALONE_MODULES = [
     "leapflow.dashboard.service",
     "leapflow.daemon.session_registry",
     "leapflow.daemon.notifications",
+    "leapflow.plugins",
+    "leapflow.plugins.protocol",
+    "leapflow.plugins.registry",
+    "leapflow.plugins.scoped_registry",
+    "leapflow.plugins.tool_plugins",
+    "leapflow.plugins.marketplace",
+    "leapflow.plugins.sandbox",
 ]
 
 

@@ -1,6 +1,6 @@
 """Shell command execution with timeout, safety, and output redaction.
 
-All handlers follow the ToolBridge convention: receive params dict, return result dict.
+All handlers follow the unified tool convention: receive params dict, return result dict.
 Safety layers:
 1. Hardline block: always-blocked destructive patterns (rm -rf /, fork bomb, etc.)
 2. Dangerous detection: patterns requiring user confirmation (sudo, chmod, etc.)

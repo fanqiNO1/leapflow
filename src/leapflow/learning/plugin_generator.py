@@ -5,13 +5,21 @@ have the LLM generate its code, then validate it rigorously before any approval-
 gated installation. This closes the loop from 'observe a capability gap' to
 'safely acquire the capability'.
 
-Safety pipeline (ALL stages must pass before install is even offered):
-    1. Syntax validation (py_compile)
-    2. Import validation (module loads without error)
+Safety pipeline (validation runs at generate-time; the rest is gated later):
+    1. Syntax validation (py_compile)                     [generate-time]
+    2. Import validation (module loads in a throwaway namespace)  [generate-time]
     3. Protocol conformance (exposes a valid `plugin` satisfying ToolPlugin)
-    4. Sandbox smoke test (tools invoke without crashing in isolation)
-    5. Human approval (via ApprovalGate)
-    6. Install + reload
+                                                          [generate-time]
+    4. Sandbox smoke test (first tool invoked in an isolated subprocess)
+                                                          [INSTALL-time, owned
+                                                           by plugin_install]
+    5. Human approval (via ApprovalGate)                  [install-time]
+    6. Install + dynamic load into the profile plugins dir [install-time]
+
+Stages 1-3 are performed here by ``PluginValidator`` and NEVER invoke a tool
+handler in-process. The sandbox smoke test (stage 4) is deliberately deferred
+to install-time — it runs a real subprocess and is owned by the plugin_install
+tool, not by ``PluginValidator``.
 
 Nothing is auto-installed. Generated code is untrusted until validated AND approved.
 """
@@ -174,7 +182,7 @@ class PluginValidator:
                 )
 
             # Protocol conformance
-            from leapflow.tools.protocol import ToolPlugin
+            from leapflow.plugins.protocol import ToolPlugin
 
             if not isinstance(plugin_obj, ToolPlugin):
                 return PluginValidationResult(
@@ -253,14 +261,14 @@ The plugin MUST:
    - def bind_runtime(self, **deps) -> None
 2. Define a module-level `plugin = YourPluginClass()`
 3. Each tool is a ToolMetadata(name, description, parameters_schema, handler, x_leapflow, mutates_state)
-4. Import from: from leapflow.tools.protocol import ToolMetadata, ToolPlugin
+4. Import from: from leapflow.plugins.protocol import ToolMetadata, ToolPlugin
 5. NO dangerous operations (no eval/exec/os.system/file deletion at import time)
 6. All handlers are async functions taking **kwargs and returning a dict
 
 Example structure:
 ```python
 from typing import Any
-from leapflow.tools.protocol import ToolMetadata
+from leapflow.plugins.protocol import ToolMetadata
 
 class MyPlugin:
     @property

@@ -46,8 +46,9 @@ class PolicyContext:
     iteration: int = 0
     history: List[str] = field(default_factory=list)
     # Human-readable description of the call's resolved target (e.g. the
-    # clicked element's role + label), filled by ToolBridge before rule
-    # evaluation. Element-index params carry no semantics by themselves.
+    # clicked element's role + label), filled by the toolset's describer
+    # before rule evaluation. Element-index params carry no semantics by
+    # themselves.
     target_description: str = ""
 
 

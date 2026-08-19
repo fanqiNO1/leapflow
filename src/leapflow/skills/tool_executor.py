@@ -5,10 +5,15 @@ ExecutionPort. Each SKILL.md instruction is executed as a bounded
 observe → reason → act loop.
 
 Architecture:
-    ToolDefinition → describes available tools for LLM prompt
-    ToolCall       → parsed from LLM JSON output
-    ToolBridge     → dispatches ToolCalls to ExecutionPort (SRP: only routing)
+    ToolDefinition  → describes available tools for LLM prompt
+    ToolCall        → parsed from LLM JSON output
+    ExecutionToolset → dispatches ToolCalls to ExecutionPort (SRP: only routing)
     ToolUseSkillExecutor → orchestrates the ReAct loop per instruction
+
+``ExecutionToolset`` is the desktop execution tool container used exclusively
+by the bounded ReAct skill executor (SKILL.md instructions and the chat
+desktop-action fallback). It is NOT the unified agent dispatch surface —
+agent-level tools flow through ``ToolPluginRegistry`` handlers.
 """
 
 from __future__ import annotations
@@ -124,7 +129,7 @@ class ExecutionPort(Protocol):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# ToolBridge — dispatch layer
+# ExecutionToolset — desktop execution dispatch layer
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -146,8 +151,13 @@ class _ToolHandler:
         self.describer = describer
 
 
-class ToolBridge:
-    """Maps tool call names to ExecutionPort methods via a handler registry.
+class ExecutionToolset:
+    """Maps desktop tool names to ExecutionPort methods via a handler registry.
+
+    Serves the bounded ReAct skill executor: registers ExecutionPort-derived
+    defaults (file ops, shell, launch_app, ui_action, done) plus optional
+    semantic UI tools (via ``build_execution_toolset``). The unified agent
+    tool loop does NOT dispatch through this class.
 
     Open/Closed: new tools can be added via register() without modifying dispatch.
     """
@@ -331,6 +341,53 @@ class ToolBridge:
         return [h.definition for h in self._handlers.values()]
 
 
+def build_execution_toolset(
+    execution: ExecutionPort,
+    perception: Optional[Any] = None,
+    *,
+    policy: Optional["PolicyEngine"] = None,
+    io: Optional["IOProvider"] = None,
+) -> ExecutionToolset:
+    """Construct an ExecutionToolset, optionally enriched with semantic UI tools.
+
+    Args:
+        execution: ExecutionPort implementation.
+        perception: Optional PerceptionPort. When provided, the full semantic
+                    tool set (observe_ui, click, type_text, switch_app, ...)
+                    is registered via the SemanticAdapter translation layer.
+                    Tool entries come from the desktop_semantic plugin's
+                    registry, so this executor and the unified tool loop
+                    expose the same semantic tool set.
+        policy: Optional PolicyEngine for guarded dispatch.
+        io: Optional IOProvider for ASK-verdict confirmation prompts.
+
+    Returns:
+        A fully configured ExecutionToolset ready for ReAct execution.
+    """
+    toolset = ExecutionToolset(execution, policy=policy, io=io)
+
+    if perception is None:
+        return toolset
+
+    from leapflow.skills.semantic_adapter import SemanticAdapter
+    from leapflow.plugins.tool_plugins.desktop_semantic import build_semantic_tool_entries
+
+    adapter = SemanticAdapter(perception=perception, execution=execution)
+
+    for entry in build_semantic_tool_entries(adapter):
+        toolset.register(
+            entry.name,
+            entry.description,
+            entry.parameters,
+            entry.handler,
+            mutates_state=entry.mutates_state,
+            counts_as_progress=entry.counts_as_progress,
+            describer=entry.describer,
+        )
+
+    return toolset
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Early Stop — signal detection & budget enforcement
 # ═══════════════════════════════════════════════════════════════════════
@@ -442,7 +499,7 @@ class ToolUseSkillExecutor:
     def __init__(
         self,
         llm: Any,
-        bridge: ToolBridge,
+        toolset: ExecutionToolset,
         skill_content: str,
         instructions: List[str],
         *,
@@ -455,7 +512,7 @@ class ToolUseSkillExecutor:
     ) -> None:
         self._llm = llm
         self._vlm = vlm
-        self._bridge = bridge
+        self._toolset = toolset
         self._skill_content = skill_content
         self._instructions = instructions
         self._bundle_context = bundle_context
@@ -486,9 +543,9 @@ class ToolUseSkillExecutor:
             **params: Skill parameters (target_directory, etc.)
         """
         if _policy is not None:
-            self._bridge.policy = _policy
+            self._toolset.policy = _policy
         if _io is not None:
-            self._bridge.io = _io
+            self._toolset.io = _io
 
         if instruction_idx is not None:
             if 0 <= instruction_idx < len(self._instructions):
@@ -549,7 +606,7 @@ class ToolUseSkillExecutor:
         _DIM = "\033[2m"
         _RESET = "\033[0m"
 
-        tool_defs = self._bridge.tool_definitions()
+        tool_defs = self._toolset.tool_definitions()
         tool_defs_text = json.dumps(
             [{"name": t.name, "description": t.description, "parameters": t.parameters}
              for t in tool_defs],
@@ -705,8 +762,8 @@ class ToolUseSkillExecutor:
             if tool_call.name == "screenshot":
                 result = await self._process_screenshot(result)
 
-            _is_mut = self._bridge.is_mutating(tool_call.name)
-            _is_progress = self._bridge.is_progress(tool_call.name)
+            _is_mut = self._toolset.is_mutating(tool_call.name)
+            _is_progress = self._toolset.is_progress(tool_call.name)
 
             # P2: Cache result for duplicate detection
             if _is_mut:
@@ -789,7 +846,7 @@ class ToolUseSkillExecutor:
         """Dispatch a tool call with one retry on transient connection errors."""
         for attempt in range(max_attempts):
             try:
-                return await self._bridge.dispatch_guarded(call, ctx)
+                return await self._toolset.dispatch_guarded(call, ctx)
             except (asyncio.TimeoutError, OSError, ConnectionError) as e:
                 if attempt < max_attempts - 1:
                     logger.debug("tool_call_retry tool=%s attempt=%d error=%s", call.name, attempt + 1, e)
@@ -874,7 +931,7 @@ class ToolUseSkillExecutor:
             return
 
         try:
-            result = await self._bridge.dispatch(
+            result = await self._toolset.dispatch(
                 ToolCall(name="shell", params={"command": str(script)})
             )
             ok = result.get("ok", True)

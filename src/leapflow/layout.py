@@ -366,6 +366,14 @@ class ProfileLayout:
         return self.root / "skills"
 
     @property
+    def plugins_dir(self) -> Path:
+        # Profile-scoped directory where self-modification installs plugin code
+        # (via plugin_install) and loads it dynamically. Keeping it under the
+        # profile root — rather than the read-only Python package directory —
+        # means installed plugins are per-profile and never mutate site-packages.
+        return self.root / "plugins"
+
+    @property
     def gateway(self) -> GatewayLayout:
         return GatewayLayout(self.root / "gateway", self.gateway_config_path)
 
@@ -426,6 +434,7 @@ class ProfileLayout:
             self.memory_dir,
             self.global_memory_dir,
             self.skills_dir,
+            self.plugins_dir,
             self.audit_dir,
             self.history_dir,
             self.runtime_dir,

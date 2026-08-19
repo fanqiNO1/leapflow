@@ -725,6 +725,118 @@ For deployment environments, provision platform credentials through the same gat
 
 ---
 
+## Plugin Architecture
+
+LeapFlow extends itself through **structurally-typed plugins**. Every extension point is a `typing.Protocol` marked `@runtime_checkable` — implementers satisfy the contract by shape, with no base class to inherit. The same lifecycle machinery (reversible registration, hot-reload, trust gradient) applies uniformly across subsystems.
+
+The subsystem is a first-class package, `src/leapflow/plugins/`, and it is the only owner of plugin contracts, discovery, lifecycle, isolation, and distribution:
+
+```
+src/leapflow/plugins/
+├── __init__.py         # get_registry / get_scoped_registry / reload_plugin
+├── protocol.py         # ToolPlugin Protocol + ToolMetadata
+├── registry.py         # ToolPluginRegistry (discovery, DI, assembly, gates)
+├── scoped_registry.py  # PluginFiber lifecycle + hot-reload
+├── tool_plugins/       # built-in ToolPlugin declarations
+├── sandbox/            # subprocess isolation for untrusted plugins
+└── marketplace/        # manifest, client, HTTP source, prototype server
+```
+
+`src/leapflow/tools/` keeps what tools *do* plus the Tool Capability Contract. The dependency direction is one-way — plugin core never imports a tool module, and `tests/test_architecture_contracts.py` fails the build if it starts to.
+
+### Extension Protocols
+
+| Protocol | Module | Role |
+|----------|--------|------|
+| `ToolPlugin` | `plugins/protocol.py` | Expose callable tools to the LLM (`ToolMetadata` is the single source of truth; `to_openai_schema()` renders the wire schema) |
+| `GatewayAdapterPlugin` | `gateway/adapter_registry.py` | Connect an external IM/collaboration platform |
+| `LLMProviderPlugin` | `llm/provider_registry.py` | Provide an LLM inference backend |
+| `SignalSource` | `perception/signal_source.py` | Transform-only: `(event, payload, ctx) → Optional[Signal]`, stateless |
+| `ActiveSignalSource` | `perception/active_signal_source.py` | Lifecycle-bearing source with `start(emit)`/`stop()` |
+| `CVProcessor` | `perception/cv_processor.py` | Frame-pair computer-vision algorithm |
+
+`FrameStore` (`perception/storage/frame_store.py`) was upgraded from an ABC to a `@runtime_checkable` Protocol so storage backends compose the same way.
+
+### Registry & Lifecycle
+
+- **`ToolPluginRegistry`** (`plugins/registry.py`) — discovery, dependency injection (`bind_runtime`), one-shot `assemble()`, `publish_plugin_tools()` for plugins that arrive later (install / hot-reload), and monotonic **version / generation** counters that drive downstream cache invalidation.
+- **`EffectScope`** (`domain/effect_scope.py`) — hierarchical, LIFO, exception-safe cleanup collector (`ACTIVE → DISPOSING → DISPOSED`).
+- **`PluginFiber`** (`domain/plugin_fiber.py`) — per-instance state machine (`PENDING → ACTIVE → UNLOADING → DISPOSED`) carrying an `EffectScope` and a `generation` counter.
+- **`ScopedToolRegistry`** (`plugins/scoped_registry.py`) — wraps the registry so every registration is reversible; `adopt_existing_plugins()` fiberizes the built-in plugins at boot. Parallel `ScopedGatewayAdapterRegistry` and `ScopedLLMProviderRegistry` give the Gateway/LLM subsystems the same lifecycle.
+
+Plugin assembly is fully fiberized from startup; there is no bootstrap shim and no module-level tool globals.
+
+### Hot-Reload
+
+`reload_plugin(plugin_id)` (public API in `plugins/__init__.py`) disposes the old fiber, `importlib.reload`s the module, registers the fresh instance, re-binds runtime dependencies, and bumps the registry version so engine caches invalidate. In-flight turns are unaffected: the engine snapshots the handler table per turn, so a reload only takes effect on the **next** turn.
+
+### Self-Modification
+
+The `self_management` plugin exposes **seven** tools to the agent:
+
+| Tool | Kind | Effect |
+|------|------|--------|
+| `plugin_list` | read-only | List plugins across the Tool/Gateway/LLM subsystems |
+| `plugin_status` | read-only | Inspect one plugin (tools, deps, fiber state, trust level, advisor recommendation) |
+| `plugin_reload` | mutating | Hot-reload a plugin |
+| `plugin_disable` | mutating | Disable a plugin (takes effect immediately; tools re-resolved per read) |
+| `plugin_enable` | mutating | Re-enable a disabled plugin |
+| `plugin_generate` | mutating | Ask the LLM to synthesize + validate new plugin code |
+| `plugin_install` | mutating | Install from generated code or a marketplace entry |
+
+Every mutation routes through the `ApprovalGate` at **HIGH** risk with `allow_permanent=False` — `security/risk.py` forces HIGH for `platform == "plugin_management"`, so no permanent grant can be minted. `self_management` cannot disable or reload itself.
+
+`plugin_install` writes to a **profile-scoped** directory (`ProfileLayout.plugins_dir`) and loads the code dynamically — it is never injected into the installed Python package. A duplicate `plugin_id` is rejected cleanly, a real **sandbox smoke-test** gates the install, and `marketplace_name` installs are wired when a `MarketplaceClient` is configured.
+
+### Learning Loop (closed)
+
+```
+TurnUsageTracker → PluginUsageTracker → PluginTrustLedger → PluginAdvisor → PluginHealthProducer
+                                        DRAFT → CANDIDATE → VERIFIED → PRODUCTION
+```
+
+Trust progresses on consecutive successes (5 / 20 / 50), demotes after repeated failure, and freezes to DRAFT on a hard failure. Trust state now **persists to DuckDB** (`plugin_stats.duckdb` via `ProfileLayout`, wired in `engine/session_factory.py`): restored on startup, saved on each transition and at exit. Under **Progressive Trust**, reloading a PRODUCTION-level plugin is auto-approved; `disable`/`enable` always require human approval.
+
+### Self-Evolution Endgame
+
+- **Sandbox** (`plugins/sandbox/`) — subprocess JSON-RPC isolation (`SandboxHost` + `SandboxedToolPlugin`); a sandboxed plugin looks like any other `ToolPlugin` to the engine.
+- **Marketplace** (`plugins/marketplace/`) — `PluginManifest` with SHA-256 checksum **and** Ed25519 signing/verification, `LocalDirectorySource` + `HttpMarketplaceSource`, `MarketplaceClient`, and an asyncio HTTP `MarketplaceServer`.
+- **Generator** (`learning/plugin_generator.py`) — LLM code generation plus staged validation: syntax / import / Protocol conformance at generate-time, sandbox smoke-test at install-time. Gated by `plugin.generation_enabled` (**off by default**, opt-in via `/config`).
+
+### IM ActiveSignalSources
+
+Stdlib-only, platform-neutral sources with self-message filtering and loopback listeners (`perception/active_sources/`): `feishu_im` (webhook), `telegram_bot` (long-poll `getUpdates`), `slack_bot` (webhook), `discord_bot` (webhook).
+
+### ToolBridge Removed
+
+The legacy `ToolBridge` compatibility layer is fully gone — `bridge_adapter.py` and `bridge_factory.py` no longer exist. The 18 desktop semantic tools are now served by the `desktop_semantic` `ToolPlugin`, and the bounded ReAct skill executor uses a dedicated `ExecutionToolset`. Two **intentional narrowings** came with the removal:
+
+1. The bounded ReAct fallback no longer carries plugin-catalog tools (it is scoped to desktop execution).
+2. The `SemanticAdapter` "last observed window" state is no longer shared across surfaces/turns.
+
+### Configuration
+
+All keys are set via `leap config set …` (shell) or `/config set …` (TUI):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `plugin.generation_enabled` | `false` | Allow the LLM to synthesize plugin code (`plugin_generate`) |
+| `plugin.install_dir` | *(profile-derived)* | Override the profile-scoped install directory |
+| `plugin.marketplace_root` | *(none)* | Local directory acting as a marketplace source |
+| `plugin.marketplace_url` | *(none)* | HTTP(S) marketplace registry base URL (takes precedence over `root`) |
+| `plugin.marketplace_trusted_pubkeys` | *(empty)* | Hex Ed25519 public keys required to sign marketplace plugins (empty ⇒ checksum-only) |
+
+```bash
+leap config set plugin.generation_enabled true
+leap config set plugin.marketplace_url https://plugins.example.com
+```
+
+> **Slash commands:** any `/plugin` slash command (list/status/reload/disable/enable) still requires a **second human confirmation** per the engineering contract. A human should verify: `reload` reflects the new version on the next turn; `disable` removes the plugin's tools from the catalog/disclosure; `enable` restores them; `list`/`status` are read-only and need no approval.
+
+Full authoring walkthrough: see the [Plugin Developer Guide](temp/deepseek_harness/PLUGIN_DEVELOPER_GUIDE.md).
+
+---
+
 ## LeapBoard — Monitoring Dashboard
 
 > **Signals into insight.**
@@ -993,7 +1105,8 @@ leapflow/
 │   ├── platform/           # Platform adaptation (CuaDriver client, observers, event bus)
 │   ├── domain/             # Shared types & events
 │   ├── storage/            # DuckDB persistence
-│   ├── tools/              # Built-in tool registry
+│   ├── plugins/            # Plugin subsystem: contracts, registry, lifecycle, sandbox, marketplace
+│   ├── tools/              # Tool implementations + capability contract
 │   ├── prompts/            # LLM prompt templates
 │   └── utils/              # Shared utilities
 ├── tests/                  # Pytest suite
@@ -1138,7 +1251,8 @@ recorded request, so you can see which prompt drifted.
 | Platform | `src/leapflow/platform/` | cua_client, adapter, observers | Platform adaptation layer — CuaDriver MCP client, event normalization, observation daemon |
 | Domain | `src/leapflow/domain/` | events, perception, types | Shared domain types, event definitions, perception models |
 | Recording | `src/leapflow/recording/` | recorder, video, segmenter | Trajectory recording orchestration, segmentation, caching |
-| Tools | `src/leapflow/tools/` | registry, builtins | Built-in tool definitions for the ReAct loop |
+| Plugins | `src/leapflow/plugins/` | protocol, registry, scoped_registry, tool_plugins, sandbox, marketplace | Plugin contracts, discovery, PluginFiber lifecycle, isolation, distribution |
+| Tools | `src/leapflow/tools/` | file_operations, shell_tools, web_fetch, name_resolver | Tool behaviour + Tool Capability Contract for the ReAct loop |
 | CLI | `src/leapflow/cli/` | cli, commands/, banner | Argument parsing, subcommand dispatch, interactive REPL |
 | Storage | `src/leapflow/storage/` | duckdb, skill_library | DuckDB-backed persistent storage for skills, trajectories, audit |
 | Gateway | `src/leapflow/gateway/` | server, manifest, protocol, credential_vault | External platform integration — manifest discovery, adapter lifecycle, vault-backed credential refs |

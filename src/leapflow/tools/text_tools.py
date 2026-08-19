@@ -1,6 +1,6 @@
 """Text processing utilities — search, replace.
 
-All handlers follow the ToolBridge convention: receive params dict, return result dict.
+All handlers follow the unified tool convention: receive params dict, return result dict.
 """
 
 from __future__ import annotations

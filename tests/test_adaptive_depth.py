@@ -804,7 +804,8 @@ def test_research_note_tool_handler_roundtrip() -> None:
     import asyncio
 
     from leapflow.engine.research_ledger import ResearchLedger
-    from leapflow.tools import registry as _tool_reg
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
 
     led = ResearchLedger()
     _tool_reg.set_research_ledger(led)
@@ -821,7 +822,8 @@ def test_research_note_tool_handler_roundtrip() -> None:
 
 
 def test_research_note_is_disclosed_tool() -> None:
-    from leapflow.tools import registry as _tool_reg
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
     TOOL_DEFINITIONS = _tool_reg.tool_definitions
 
     names = {td.get("function", {}).get("name") for td in TOOL_DEFINITIONS}
@@ -1084,11 +1086,11 @@ def test_delegate_task_depth_gating_is_default_equivalent() -> None:
         build_subagent_tool_filter,
     )
 
-    tools = ["file_read", "delegate_task", "gp_delegate_task", "shell_run"]
+    tools = ["file_read", "delegate_task", "shell_run"]
     # default max_depth=2: a depth-1 subagent must NOT see delegate_task
     # (byte-equivalent to the previous hard-block => single-level delegation)
     depth1 = build_subagent_tool_filter(tools, SubagentConfig(goal="g", depth=1), max_depth=2)
-    assert "delegate_task" not in depth1 and "gp_delegate_task" not in depth1
+    assert "delegate_task" not in depth1
     assert "file_read" in depth1
     # max_depth=3 unlocks one more level: depth-1 keeps delegate_task, depth-2 drops it
     d1 = build_subagent_tool_filter(tools, SubagentConfig(goal="g", depth=1), max_depth=3)

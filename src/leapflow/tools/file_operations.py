@@ -1,6 +1,6 @@
 """File system operations — list, read, write.
 
-All handlers follow the ToolBridge convention: receive params dict, return result dict.
+All handlers follow the unified tool convention: receive params dict, return result dict.
 Safety layers:
 1. Sensitive path block: credential files, private keys, auth tokens
 2. System path block: OS system directories for writes
@@ -327,7 +327,8 @@ async def file_read(params: Dict[str, Any]) -> Dict[str, Any]:
 
     if sensitivity.requires_approval:
         try:
-            from leapflow.tools import registry as _tool_registry
+            from leapflow.plugins import get_registry
+            _tool_registry = get_registry()
             gate = _tool_registry.get_file_read_gate()
             if gate is None:
                 return {
@@ -437,7 +438,8 @@ async def file_write(params: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": _write_block_message(target, sensitivity)}
 
     try:
-        from leapflow.tools import registry as _tool_registry
+        from leapflow.plugins import get_registry
+        _tool_registry = get_registry()
         gate = _tool_registry.get_file_write_gate()
         if gate is not None:
             try:
@@ -922,7 +924,8 @@ async def edit_file(params: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     try:
-        from leapflow.tools import registry as _tool_registry
+        from leapflow.plugins import get_registry
+        _tool_registry = get_registry()
         gate = _tool_registry.get_file_write_gate()
         if gate is not None:
             try:

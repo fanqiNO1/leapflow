@@ -503,7 +503,6 @@ class Context:
         self._critical_llm_scorer: Optional[Any] = None
         self._critical_feedback_evaluator: Optional[Any] = None
         self._critical_activator: Optional[Any] = None
-        self._critical_tool_bridge: Optional[Any] = None
 
         # Unified approval gate is resource-free; create it in __init__ so all
         # initialize() wiring paths can safely reference the same session gate.
@@ -751,7 +750,8 @@ class Context:
 
     def _configure_mcp_manager(self, settings: Settings) -> None:
         """Rebuild MCP manager and global MCP tool registrations from layout config."""
-        from leapflow.tools import registry as _tool_registry
+        from leapflow.plugins import get_registry
+        _tool_registry = get_registry()
 
         previous_names = set(getattr(self, "_mcp_tool_names", ()))
         previous_manager = getattr(self, "_mcp_manager", None)
@@ -1026,16 +1026,14 @@ class Context:
         self._platform_execution = execution_adapter
 
         if self.engine is not None:
-            from leapflow.skills.bridge_factory import build_tool_bridge
-            from leapflow.tools import bootstrap_tools
+            from leapflow.plugins import get_registry
 
-            tool_bridge = build_tool_bridge(execution_adapter, perception)
-            bootstrap_tools(tool_bridge)
+            # Bind perception/execution to the desktop semantic plugin
+            get_registry().bind_runtime(perception=perception, execution=execution_adapter)
             self.engine.reconfigure_host_backend(
                 rpc=rpc,
                 perception=perception,
                 execution=execution_adapter,
-                tool_bridge=tool_bridge,
             )
 
     @property
@@ -1221,13 +1219,10 @@ class Context:
             self.registry, self.rpc, graph_planner=graph_planner,
         ) if graph_planner else None
 
-        # Build ToolBridge with general-purpose tools for unified execution
-        from leapflow.skills.bridge_factory import build_tool_bridge
-        from leapflow.tools import bootstrap_tools
-
-        tool_bridge = build_tool_bridge(execution_adapter, perception)
-        tool_count = bootstrap_tools(tool_bridge)
-        logger.info("Registered %d general-purpose tools", tool_count)
+        # Bind perception/execution to the desktop semantic plugin
+        from leapflow.plugins import get_registry as _get_tool_registry
+        _get_tool_registry().bind_runtime(perception=perception, execution=execution_adapter)
+        logger.info("Desktop semantic plugin bound (perception=%s)", perception is not None)
 
         # Initialize skill discovery (SkillIndex + SkillInjector)
         skills_dir = Path(settings.skills_dir).expanduser()
@@ -1261,7 +1256,8 @@ class Context:
         self.copilot_config = None
 
         # ── Wire memory tools into TOOL_HANDLERS (late binding) ──
-        from leapflow.tools import registry as _tool_registry
+        from leapflow.plugins import get_registry
+        _tool_registry = get_registry()
         _tool_registry.set_memory_manager(self.memory)
 
         # ── Config tools: bind this Context so a config write reloads the live
@@ -1438,7 +1434,8 @@ class Context:
                 return str(msg.get("content") or msg.get("text") or "")
             return ""
 
-        from leapflow.tools import registry as _tool_registry_gw
+        from leapflow.plugins import get_registry
+        _tool_registry_gw = get_registry()
 
         self._gateway_router = GatewayRouter(
             llm=self.llm,
@@ -1525,13 +1522,12 @@ class Context:
         except Exception:
             logger.debug("Shell approval gate setup skipped", exc_info=True)
         try:
-            from leapflow.tools import registry as _tool_reg_desktop
+            from leapflow.plugins import get_registry
+            _tool_reg_desktop = get_registry()
             _tool_reg_desktop.set_desktop_gate(self._approval_orchestrator)
             logger.debug("Desktop approval gate: action orchestrator mode")
         except Exception:
             logger.debug("Desktop approval gate setup skipped", exc_info=True)
-
-        self._critical_tool_bridge = tool_bridge
 
         self.engine = AgentEngine(
             settings, self.rpc, self.llm, self.wm, self.lt, self.imm,
@@ -1547,7 +1543,6 @@ class Context:
             vlm=self.vlm,
             memory_manager=self.memory,
             evolution=self._evolution,
-            tool_bridge=tool_bridge,
             skill_injector=skill_injector,
             skill_index=skill_index,
         )
@@ -1589,9 +1584,9 @@ class Context:
         # ── Wire SubagentManager + delegate_task tool ──
         try:
             from leapflow.engine.subagent import DefaultSubagentExecutor, SubagentManager
-            from leapflow.tools import registry as _tool_reg_sub
-            if not _tool_reg_sub._assembled:
-                _tool_reg_sub.assemble()
+            from leapflow.plugins import get_registry
+            _tool_reg_sub = get_registry()
+            _tool_reg_sub.assemble()  # idempotent: no-op once assembled
             _TD = _tool_reg_sub.tool_definitions
             _TH = _tool_reg_sub.tool_handlers
             if getattr(settings, "agent_subagent_full_loop", False):
@@ -1705,7 +1700,8 @@ class Context:
         # ── Wire File Read Approval Gate ──
         try:
             from leapflow.security.actions import ActionDescriptor
-            from leapflow.tools import registry as _tool_reg_fread
+            from leapflow.plugins import get_registry
+            _tool_reg_fread = get_registry()
 
             approval_orchestrator = self._approval_orchestrator
 
@@ -1735,7 +1731,8 @@ class Context:
         # ── Wire File Write Approval Gate ──
         try:
             from leapflow.security.actions import ActionDescriptor
-            from leapflow.tools import registry as _tool_reg_fwrite
+            from leapflow.plugins import get_registry
+            _tool_reg_fwrite = get_registry()
 
             approval_orchestrator = self._approval_orchestrator
 
@@ -1780,9 +1777,9 @@ class Context:
         if self._conversation_store:
             try:
                 from leapflow.daemon.session_coordinator import SessionCoordinator
-                from leapflow.tools import registry as _tool_reg_session
-                if not _tool_reg_session._assembled:
-                    _tool_reg_session.assemble()
+                from leapflow.plugins import get_registry
+                _tool_reg_session = get_registry()
+                _tool_reg_session.assemble()  # idempotent: no-op once assembled
                 conv_store = self._conversation_store
                 session_reader = SessionCoordinator()
                 fallback_workspace_cwd = str(Path(str(getattr(self.settings, "workspace_root", "") or os.getcwd())).expanduser().resolve())

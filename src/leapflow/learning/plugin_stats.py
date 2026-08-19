@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 from leapflow.learning.plugin_trust import PluginTrustLedger
 
@@ -117,7 +117,7 @@ class PluginUsageTracker:
     def _get_reverse_index(self) -> Dict[str, str]:
         """Build/cache reverse index from tool_name → plugin_id."""
         try:
-            from leapflow.tools import get_registry
+            from leapflow.plugins import get_registry
             reg = get_registry()
             version = getattr(reg, "_version", 0)
             if self._tool_to_plugin is not None and self._registry_version == version:

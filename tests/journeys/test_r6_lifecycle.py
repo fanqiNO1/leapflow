@@ -51,6 +51,14 @@ async def _turn(client: Any, message: str, workspace: str) -> list[Any]:
     return events
 
 
+async def _status_or_none(client: Any) -> dict[str, Any] | None:
+    """Return daemon.status, tolerating the short restart reconnect window."""
+    try:
+        return await client.status()
+    except DaemonUnavailableError:
+        return None
+
+
 @pytest.mark.asyncio
 async def test_r6_daemon_lifecycle(journeys: JourneyFactory) -> None:
     """The daemon starts, reports itself, serves work, stops, and recovers cleanly."""
@@ -71,7 +79,11 @@ async def test_r6_daemon_lifecycle(journeys: JourneyFactory) -> None:
         assert info.is_healthy, "the socket exists but is not answering"
         assert journey.daemon.sock_path.exists(), "no Unix socket on disk"
 
-        status = await client.status()
+        status = await await_for(
+            lambda: _status_or_none(client),
+            timeout_s=10.0,
+            what="daemon.status to respond after startup",
+        )
         assert status["pid"] == info.pid, (
             f"status() reports pid {status['pid']} but the pid file says {info.pid}"
         )
@@ -129,7 +141,11 @@ async def test_r6_daemon_lifecycle(journeys: JourneyFactory) -> None:
         try:
             assert restarted.info().is_healthy, "the replacement daemon never became healthy"
             fresh_client = restarted.client()
-            status = await fresh_client.status()
+            status = await await_for(
+                lambda: _status_or_none(fresh_client),
+                timeout_s=10.0,
+                what="daemon.status to respond after restart",
+            )
             assert status["pid"] != old_pid, (
                 "the replacement daemon reports the dead process' pid"
             )

@@ -7,7 +7,8 @@ from leapflow.engine.context_disclosure import (
     DisclosureRuntimeState,
     build_capability_manifests,
 )
-from leapflow.tools import registry as _tool_reg
+from leapflow.plugins import get_registry
+_tool_reg = get_registry()
 
 TOOL_DEFINITIONS = _tool_reg.tool_definitions
 
@@ -259,8 +260,9 @@ def test_desktop_tools_included_in_full_plan() -> None:
 def test_capability_expand_provider_exposes_desktop_category() -> None:
     import asyncio
 
-    from leapflow.tools import registry as _tool_reg
-    from leapflow.tools.plugins.orchestration import plugin as orch_plugin
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
+    from leapflow.plugins.tool_plugins.orchestration import plugin as orch_plugin
 
     desktop_defs = _desktop_definitions()
     _tool_reg.set_capability_catalog_provider(lambda: list(TOOL_DEFINITIONS) + desktop_defs)
@@ -287,8 +289,9 @@ def test_capability_expand_provider_exposes_desktop_category() -> None:
 def test_capability_expand_falls_back_to_static_catalog_without_provider() -> None:
     import asyncio
 
-    from leapflow.tools import registry as _tool_reg
-    from leapflow.tools.plugins.orchestration import plugin as orch_plugin
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
+    from leapflow.plugins.tool_plugins.orchestration import plugin as orch_plugin
 
     _tool_reg.set_capability_catalog_provider(None)
     result = asyncio.run(orch_plugin._capability_expand_handler({"category": "file"}))

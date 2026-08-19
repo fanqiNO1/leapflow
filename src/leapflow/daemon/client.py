@@ -151,10 +151,24 @@ class DaemonClient:
         client: without it the daemon has no way to know which of several live
         sessions to report, and any session identity it returned would belong to
         somebody else.
+
+        ``daemon.status`` is read-only and idempotent, so it tolerates the short
+        startup/restart window where a socket accept succeeds but the server
+        closes the connection before the control-plane request is handled.
         """
         params = {"session_id": session_id} if session_id else {}
-        result = await self.request("daemon.status", params)
-        return dict(result or {})
+        last_error: DaemonUnavailableError | None = None
+        for attempt in range(6):
+            try:
+                result = await self.request("daemon.status", params)
+                return dict(result or {})
+            except DaemonUnavailableError as exc:
+                last_error = exc
+                if "closed the connection unexpectedly" not in str(exc):
+                    raise
+                await asyncio.sleep(0.05 * (attempt + 1))
+        assert last_error is not None
+        raise last_error
 
     async def host_status(self) -> dict[str, Any]:
         """Return daemon-owned host backend status."""

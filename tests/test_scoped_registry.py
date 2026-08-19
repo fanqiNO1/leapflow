@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, List
-from unittest.mock import MagicMock, patch
+from typing import Any
 
 import pytest
 
-from leapflow.domain.effect_scope import EffectScope
-from leapflow.domain.plugin_fiber import FiberState, PluginFiber
-from leapflow.tools.protocol import ToolMetadata, ToolPlugin
-from leapflow.tools.plugin_registry import ToolPluginRegistry
-from leapflow.tools.scoped_registry import ScopedToolRegistry
+from leapflow.plugins.protocol import ToolMetadata
+from leapflow.plugins.registry import ToolPluginRegistry
+from leapflow.plugins.scoped_registry import ScopedToolRegistry
 from leapflow.gateway.scoped_adapter_registry import ScopedGatewayAdapterRegistry
 from leapflow.llm.scoped_provider_registry import ScopedLLMProviderRegistry
 
@@ -144,10 +141,7 @@ class TestScopedToolRegistryFullLifecycle:
         scoped.scoped_register(plugin, fiber)
 
         # Assemble to populate handler/definition structures
-        # Patch bridge adapter to avoid importing real bridge dependencies
-        with patch.object(fresh_tool_registry, "_get_bridge_adapter") as mock_bridge:
-            mock_bridge.return_value = MagicMock()
-            fresh_tool_registry.assemble()
+        fresh_tool_registry.assemble()
 
         # Verify tools are present after assembly
         assert "test_tool_alpha" in fresh_tool_registry._tool_handlers
@@ -165,10 +159,10 @@ class TestScopedToolRegistryFullLifecycle:
         assert "test-plugin" not in fresh_tool_registry._plugins
 
 
-class TestScopedToolRegistryGpAliases:
-    """gp_ prefixed aliases are also cleaned up."""
+class TestScopedToolRegistryNoGpAliases:
+    """After Landing B, no gp_ prefixed aliases are created in tool_handlers."""
 
-    def test_scoped_tool_registry_removes_gp_aliases(self, fresh_tool_registry: ToolPluginRegistry) -> None:
+    def test_scoped_tool_registry_no_gp_aliases_after_assemble(self, fresh_tool_registry: ToolPluginRegistry) -> None:
         plugin = FakeToolPlugin(
             _plugin_id="alias-plugin",
             _tools=[_make_tool_metadata("my_tool")],
@@ -178,12 +172,11 @@ class TestScopedToolRegistryGpAliases:
         fiber = scoped.create_fiber("alias-plugin")
         scoped.scoped_register(plugin, fiber)
 
-        with patch.object(fresh_tool_registry, "_get_bridge_adapter") as mock_bridge:
-            mock_bridge.return_value = MagicMock()
-            fresh_tool_registry.assemble()
+        fresh_tool_registry.assemble()
 
-        # Simulate gp_ alias being present (as bridge adapter would create)
-        fresh_tool_registry._tool_handlers["gp_my_tool"] = _noop_handler
+        # Verify no gp_ alias is created
+        assert "my_tool" in fresh_tool_registry._tool_handlers
+        assert "gp_my_tool" not in fresh_tool_registry._tool_handlers
 
         # Dispose
         fiber.activate()
@@ -191,7 +184,6 @@ class TestScopedToolRegistryGpAliases:
         fiber.dispose()
 
         assert "my_tool" not in fresh_tool_registry._tool_handlers
-        assert "gp_my_tool" not in fresh_tool_registry._tool_handlers
 
 
 class TestScopedToolRegistryAllStructures:
@@ -209,9 +201,7 @@ class TestScopedToolRegistryAllStructures:
         fiber = scoped.create_fiber("full-clean")
         scoped.scoped_register(plugin, fiber)
 
-        with patch.object(fresh_tool_registry, "_get_bridge_adapter") as mock_bridge:
-            mock_bridge.return_value = MagicMock()
-            fresh_tool_registry.assemble()
+        fresh_tool_registry.assemble()
 
         # Pre-conditions: everything present
         assert "full-clean" in fresh_tool_registry._plugins
@@ -258,9 +248,7 @@ class TestScopedToolRegistryMultiplePlugins:
         scoped.scoped_register(plugin_a, fiber_a)
         scoped.scoped_register(plugin_b, fiber_b)
 
-        with patch.object(fresh_tool_registry, "_get_bridge_adapter") as mock_bridge:
-            mock_bridge.return_value = MagicMock()
-            fresh_tool_registry.assemble()
+        fresh_tool_registry.assemble()
 
         # Dispose only plugin-a
         fiber_a.activate()
@@ -281,9 +269,7 @@ class TestScopedToolRegistryLateTool:
         self, fresh_tool_registry: ToolPluginRegistry
     ) -> None:
         # First assemble with an empty plugin set (or just leave assembled=False)
-        with patch.object(fresh_tool_registry, "_get_bridge_adapter") as mock_bridge:
-            mock_bridge.return_value = MagicMock()
-            fresh_tool_registry.assemble()
+        fresh_tool_registry.assemble()
 
         scoped = ScopedToolRegistry(fresh_tool_registry)
         fiber = scoped.create_fiber("late-plugin")
@@ -292,12 +278,9 @@ class TestScopedToolRegistryLateTool:
         # Register a late tool
         late_def = {"type": "function", "function": {"name": "late_tool", "parameters": {}}}
 
-        # Patch register_late_tool to avoid bridge adapter issues
-        with patch.object(fresh_tool_registry, "_get_bridge_adapter") as mock_bridge:
-            mock_bridge.return_value = MagicMock()
-            scoped.scoped_register_late_tool(late_def, _noop_handler, "late_tool", fiber)
+        scoped.scoped_register_late_tool(late_def, _noop_handler, "late_tool", fiber)
 
-        assert "late_tool" in fresh_tool_registry._tool_handlers
+        assert "late_tool" in fresh_tool_registry.tool_handlers
 
         # Dispose
         fiber.begin_unload()

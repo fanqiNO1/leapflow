@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 def build_tool_payload(ctx: "Context") -> dict[str, Any]:
     """Build a serializable tool summary for local or daemon rendering."""
     from leapflow.cli.banner import _categorize_tools
-    from leapflow.tools import registry as _tool_registry
+    from leapflow.plugins import get_registry
+    _tool_registry = get_registry()
 
     # Live catalog: static registry plus semantic desktop tools while
     # perception is online (falls back to the static list otherwise).
@@ -1109,7 +1110,7 @@ async def build_plugin_payload(ctx: "Context", args: str) -> dict[str, Any]:
     subcommand = parts[0] if parts else "list"
     sub_args = parts[1].strip() if len(parts) > 1 else ""
 
-    from leapflow.tools import get_registry, get_scoped_registry
+    from leapflow.plugins import get_registry, get_scoped_registry
 
     if subcommand == "list":
         try:

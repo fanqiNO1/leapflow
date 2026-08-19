@@ -25,15 +25,15 @@ class TestToolPluginFiberization:
     """Every built-in tool plugin gets an ACTIVE fiber after boot."""
 
     def test_all_builtin_tool_plugins_have_fibers(self) -> None:
-        # Rebuild the tool singletons for a clean, deterministic boot.
-        import leapflow.tools as tools_mod
+        # Rebuild the plugin singletons for a clean, deterministic boot.
+        import leapflow.plugins as plugins_mod
 
-        tools_mod._registry = None
-        tools_mod._scoped_registry = None
+        plugins_mod._registry = None
+        plugins_mod._scoped_registry = None
 
-        reg = tools_mod.get_registry()
+        reg = plugins_mod.get_registry()
         reg.assemble()
-        scoped = tools_mod.get_scoped_registry()
+        scoped = plugins_mod.get_scoped_registry()
 
         plugin_ids = set(reg.plugins.keys())
         fiber_ids = set(scoped.fibers.keys())
@@ -48,13 +48,13 @@ class TestToolPluginFiberization:
             )
 
     def test_adopt_does_not_double_register(self) -> None:
-        import leapflow.tools as tools_mod
+        import leapflow.plugins as plugins_mod
 
-        tools_mod._registry = None
-        tools_mod._scoped_registry = None
+        plugins_mod._registry = None
+        plugins_mod._scoped_registry = None
 
-        reg = tools_mod.get_registry()
-        scoped = tools_mod.get_scoped_registry()
+        reg = plugins_mod.get_registry()
+        scoped = plugins_mod.get_scoped_registry()
 
         plugin_count_before = len(reg.plugins)
         fiber_count_before = len(scoped.fibers)

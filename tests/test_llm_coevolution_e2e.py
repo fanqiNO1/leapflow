@@ -21,7 +21,7 @@ ECHO_PLUGIN_CODE = '''
 """Auto-generated echo plugin for E2E co-evolution test."""
 
 from typing import Any
-from leapflow.tools.protocol import ToolMetadata
+from leapflow.plugins.protocol import ToolMetadata
 
 
 class EchoE2EPlugin:
@@ -73,18 +73,23 @@ class _FakeLLM:
 
 
 @pytest.fixture
-def cleanup_installed_plugin():
-    """Ensure the installed plugin file is removed after the test."""
+def cleanup_installed_plugin(tmp_path):
+    """Provide a profile-scoped install dir and clean up registry/module state.
+
+    Installs now write into a profile-scoped plugins directory (injected via
+    bind_runtime), not the Python package dir, so the fixture yields that dir
+    and tears down the registry fiber and sys.modules entry afterwards.
+    """
+    import sys
+
     plugin_id = "echo_e2e"
-    import leapflow.tools.plugins as plugins_pkg
-    target = Path(plugins_pkg.__file__).parent / f"{plugin_id}.py"
-    yield target
-    # Cleanup
-    if target.exists():
-        target.unlink()
-    # Also remove from registry if present
+    install_dir = tmp_path / "plugins"
+    install_dir.mkdir(parents=True, exist_ok=True)
+    yield install_dir
+    # Cleanup dynamically-loaded module + registry state
+    sys.modules.pop(plugin_id, None)
     try:
-        from leapflow.tools import get_registry, get_scoped_registry
+        from leapflow.plugins import get_registry, get_scoped_registry
         reg = get_registry()
         scoped = get_scoped_registry()
         if plugin_id in reg.plugins:
@@ -103,7 +108,7 @@ def cleanup_installed_plugin():
 async def test_llm_coevolution_end_to_end(cleanup_installed_plugin):
     """Complete co-evolution loop: generate → validate → install → invoke."""
     from leapflow.learning.plugin_generator import PluginGenerator, PluginGenerationRequest
-    from leapflow.tools import get_registry
+    from leapflow.plugins import get_registry
     
     # === Step 1: Generate + validate ===
     generator = PluginGenerator(llm_provider=_FakeLLM())
@@ -133,6 +138,8 @@ async def test_llm_coevolution_end_to_end(cleanup_installed_plugin):
         async def evaluate(self, descriptor):
             return _ApprovedResult()
     self_mgmt._plugin_approval_gate = _ApprovingGate()
+    # Route installs into the profile-scoped tmp dir (not the package dir).
+    self_mgmt.bind_runtime(plugin_install_dir=str(cleanup_installed_plugin))
     
     try:
         install_result = await self_mgmt._plugin_install_handler(
@@ -142,6 +149,12 @@ async def test_llm_coevolution_end_to_end(cleanup_installed_plugin):
         assert install_result["ok"], f"Install failed: {install_result.get('error')}"
         assert "echo_e2e_test" in install_result["installed_tools"]
         print(f"[step 2] Installed plugin: {install_result}")
+        
+        # Install wrote into the injected profile dir, NOT the package dir.
+        assert (cleanup_installed_plugin / "echo_e2e.py").exists()
+        import leapflow.plugins.tool_plugins as _plugins_pkg
+        from pathlib import Path as _Path
+        assert not (_Path(_plugins_pkg.__file__).parent / "echo_e2e.py").exists()
         
         # === Step 3: Verify plugin is registered and invocable ===
         assert "echo_e2e" in reg.plugins, "Plugin not in registry after install"
@@ -156,13 +169,14 @@ async def test_llm_coevolution_end_to_end(cleanup_installed_plugin):
         
     finally:
         self_mgmt._plugin_approval_gate = None
+        self_mgmt._plugin_install_dir = None
 
 
 @pytest.mark.asyncio
 async def test_llm_coevolution_install_denied_without_approval(cleanup_installed_plugin):
     """Verify that plugin_install is blocked without approval."""
     from leapflow.learning.plugin_generator import PluginGenerator, PluginGenerationRequest
-    from leapflow.tools import get_registry
+    from leapflow.plugins import get_registry
     
     generator = PluginGenerator(llm_provider=_FakeLLM())
     request = PluginGenerationRequest(plugin_id="echo_e2e", description="echo")

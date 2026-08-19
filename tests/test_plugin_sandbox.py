@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from leapflow.tools.sandbox.protocol import SandboxRequest, SandboxResponse
+from leapflow.plugins.sandbox.protocol import SandboxRequest, SandboxResponse
 
 
 # ---------------------------------------------------------------------------
@@ -79,9 +79,9 @@ class TestSandboxProtocol:
 @pytest.mark.asyncio
 async def test_sandbox_host_start_stop() -> None:
     """Launch worker, ping it, then stop gracefully."""
-    from leapflow.tools.sandbox.sandbox_host import SandboxHost
+    from leapflow.plugins.sandbox.sandbox_host import SandboxHost
 
-    host = SandboxHost("leapflow.tools.plugins.text_utils")
+    host = SandboxHost("leapflow.plugins.tool_plugins.text_utils")
     await host.start()
     try:
         ok = await host.ping()
@@ -96,9 +96,9 @@ async def test_sandbox_host_start_stop() -> None:
 @pytest.mark.asyncio
 async def test_sandbox_invoke_tool() -> None:
     """Invoke text_search through the sandbox and verify the result."""
-    from leapflow.tools.sandbox.sandbox_host import SandboxHost
+    from leapflow.plugins.sandbox.sandbox_host import SandboxHost
 
-    host = SandboxHost("leapflow.tools.plugins.text_utils")
+    host = SandboxHost("leapflow.plugins.tool_plugins.text_utils")
     await host.start()
     try:
         resp = await host.invoke(
@@ -118,13 +118,13 @@ async def test_sandbox_invoke_timeout() -> None:
     import os
     import tempfile
 
-    from leapflow.tools.sandbox.sandbox_host import SandboxHost
+    from leapflow.plugins.sandbox.sandbox_host import SandboxHost
 
     # Create a temp plugin that has a hanging tool
     plugin_code = '''
 """Hanging plugin for timeout testing."""
 import asyncio
-from leapflow.tools.protocol import ToolMetadata
+from leapflow.plugins.protocol import ToolMetadata
 
 async def hang_forever(params):
     await asyncio.sleep(9999)
@@ -171,7 +171,7 @@ from hang_plugin import plugin
     host._proc = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
-        "leapflow.tools.sandbox.worker",
+        "leapflow.plugins.sandbox.worker",
         "hang_plugin",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
@@ -192,11 +192,11 @@ async def test_sandbox_invoke_error_isolated() -> None:
     import os
     import tempfile
 
-    from leapflow.tools.sandbox.sandbox_host import SandboxHost
+    from leapflow.plugins.sandbox.sandbox_host import SandboxHost
 
     plugin_code = '''
 """Plugin with a crashing tool."""
-from leapflow.tools.protocol import ToolMetadata
+from leapflow.plugins.protocol import ToolMetadata
 
 def crash_tool(params):
     raise ValueError("intentional test crash")
@@ -240,7 +240,7 @@ plugin = CrashPlugin()
     host._proc = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
-        "leapflow.tools.sandbox.worker",
+        "leapflow.plugins.sandbox.worker",
         "crash_plugin",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
@@ -265,9 +265,9 @@ plugin = CrashPlugin()
 @pytest.mark.asyncio
 async def test_sandbox_list_tools() -> None:
     """list_tools returns the tool names loaded in the sandbox."""
-    from leapflow.tools.sandbox.sandbox_host import SandboxHost
+    from leapflow.plugins.sandbox.sandbox_host import SandboxHost
 
-    host = SandboxHost("leapflow.tools.plugins.text_utils")
+    host = SandboxHost("leapflow.plugins.tool_plugins.text_utils")
     await host.start()
     try:
         tools = await host.list_tools()
@@ -285,10 +285,10 @@ async def test_sandbox_list_tools() -> None:
 @pytest.mark.asyncio
 async def test_sandboxed_plugin_protocol_conformance() -> None:
     """SandboxedToolPlugin satisfies the ToolPlugin Protocol."""
-    from leapflow.tools.protocol import ToolMetadata, ToolPlugin
-    from leapflow.tools.sandbox.sandbox_host import SandboxedToolPlugin, SandboxHost
+    from leapflow.plugins.protocol import ToolMetadata, ToolPlugin
+    from leapflow.plugins.sandbox.sandbox_host import SandboxedToolPlugin, SandboxHost
 
-    host = SandboxHost("leapflow.tools.plugins.text_utils")
+    host = SandboxHost("leapflow.plugins.tool_plugins.text_utils")
     metadatas = [
         ToolMetadata(
             name="test_tool",

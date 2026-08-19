@@ -35,9 +35,11 @@ from leapflow.perception.types import (
 __all__ = [
     "ActiveSignalSource",
     "ActiveSourceManager",
+    "DiscordBotSignalSource",
     "EmitCallback",
     "FeishuIMSignalSource",
     "FileWatchSignalSource",
+    "SlackBotSignalSource",
     "PerceptionConfig",
     "PerceptionSession",
     "SamplingConfig",
@@ -69,4 +71,10 @@ def __getattr__(name: str):  # noqa: N807
     if name == "TelegramBotSignalSource":
         from leapflow.perception.active_sources.telegram_bot import TelegramBotSignalSource
         return TelegramBotSignalSource
+    if name == "SlackBotSignalSource":
+        from leapflow.perception.active_sources.slack_bot import SlackBotSignalSource
+        return SlackBotSignalSource
+    if name == "DiscordBotSignalSource":
+        from leapflow.perception.active_sources.discord_bot import DiscordBotSignalSource
+        return DiscordBotSignalSource
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

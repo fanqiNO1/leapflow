@@ -300,7 +300,7 @@ class TestIntegration:
     @pytest.fixture
     def self_mgmt_plugin(self):
         """Get the self_management plugin from the global registry."""
-        from leapflow.tools import get_registry
+        from leapflow.plugins import get_registry
 
         reg = get_registry()
         reg.assemble()

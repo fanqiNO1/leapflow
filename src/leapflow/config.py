@@ -105,6 +105,28 @@ class Settings:
     watched_config_paths: tuple[Path, ...] = ()
     config_warnings: tuple[str, ...] = ()
     disabled_plugins: tuple[str, ...] = ()
+    # LLM-driven plugin generation (self_management.plugin_generate). Off by
+    # default: turning it on lets the agent produce new plugin code via the
+    # active LLM. Installation is still separately approval-gated by
+    # ApprovalOrchestrator; this switch guards the earlier code-generation step
+    # so an unattended profile cannot spend tokens synthesizing plugins.
+    plugin_generation_enabled: bool = False
+    # Profile-scoped directory where plugin_install writes plugin code and
+    # loads it dynamically. None -> derive from the active ProfileLayout
+    # (profiles/<profile>/plugins/). Set an absolute path to override.
+    plugin_install_dir: str | None = None
+    # Optional local directory acting as a plugin marketplace source. When set,
+    # plugin_install(marketplace_name=...) resolves plugins from this directory.
+    # Opt-in; default None (no local marketplace).
+    plugin_marketplace_root: str | None = None
+    # Optional HTTP(S) marketplace registry base URL. When both this and
+    # plugin_marketplace_root are set, the URL source takes precedence.
+    # Opt-in; default None (no remote marketplace).
+    plugin_marketplace_url: str | None = None
+    # Hex-encoded Ed25519 public keys trusted to sign marketplace plugins.
+    # When non-empty, marketplace installs MUST carry a valid signature from
+    # one of these keys; empty tuple -> checksum-only integrity verification.
+    plugin_marketplace_trusted_pubkeys: tuple[str, ...] = ()
     runtime_dir: Path = field(default_factory=lambda: _bootstrap_profile_layout().runtime_dir)
 
     # Audit

@@ -357,7 +357,8 @@ async def cmd_interactive(ctx: "Context", *, resume_id: Optional[str] = None) ->
     )
     from leapflow.utils.terminal_io import TerminalIOProvider
     from leapflow.engine.session import SessionMode
-    from leapflow.tools import registry as _tool_registry
+    from leapflow.plugins import get_registry
+    _tool_registry = get_registry()
 
     theme = detect_theme()
     console = LeapConsole(theme)
@@ -972,7 +973,8 @@ async def cmd_interactive_daemon(
     )
     from leapflow.cli.tui_app.status import StatusBar
     from leapflow.daemon.lease import ClientLease
-    from leapflow.tools import registry as _tool_registry
+    from leapflow.plugins import get_registry
+    _tool_registry = get_registry()
 
     theme = detect_theme()
     console = LeapConsole(theme)

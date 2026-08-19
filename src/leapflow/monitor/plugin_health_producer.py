@@ -63,7 +63,7 @@ class PluginHealthProducer:
 
         # Iterate all known plugins in the tool registry
         try:
-            from leapflow.tools import get_registry
+            from leapflow.plugins import get_registry
             reg = get_registry()
             plugin_ids = list(reg.plugins.keys())
         except (ImportError, RuntimeError, AttributeError):

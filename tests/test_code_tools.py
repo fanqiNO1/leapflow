@@ -265,15 +265,15 @@ def test_edit_file_single_edit_shorthand(tmp_path) -> None:
 # ── governance: registry classification ──────────────────────────────
 
 def test_new_tools_execution_policy_classification() -> None:
-    from leapflow.tools import registry as _tool_reg
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
     TOOL_DEFINITIONS = _tool_reg.tool_definitions
     TOOL_HANDLERS = _tool_reg.tool_handlers
-    _BRIDGE_TOOLS = _tool_reg.bridge_tools
     from leapflow.tools.name_resolver import ToolRegistry, TOOL_NAME_ALIASES
     from leapflow.engine.tool_execution import execution_policy_for
 
     reg = ToolRegistry.from_definitions(
-        TOOL_DEFINITIONS, TOOL_HANDLERS, bridge_tools=_BRIDGE_TOOLS, aliases=TOOL_NAME_ALIASES,
+        TOOL_DEFINITIONS, TOOL_HANDLERS, aliases=TOOL_NAME_ALIASES,
     )
     # Read-only search/find must NOT be side-effecting (else a failed search would
     # trip the batch-stop gate); edit_file mutates like file_write.

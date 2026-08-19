@@ -14,8 +14,6 @@ from __future__ import annotations
 import pytest
 from typing import Any
 
-from leapflow.tools.protocol import ToolMetadata
-
 
 # ════════════════════════════════════════════════════════════════
 # Testing infrastructure
@@ -58,6 +56,23 @@ class SpyApprovalGate:
         return FakeApprovalResult(approved=True, denial_message="")
 
 
+def _reset_tool_registry_state() -> None:
+    """Reset process-global plugin registries for test isolation.
+
+    plugin_disable / plugin_reload mutate process-global state by design, so a
+    test that exercises them would otherwise leak a disabled plugin into every
+    later test in the same process.
+    """
+    import leapflow.engine.engine as engine_module
+    import leapflow.plugins as plugins_module
+    import leapflow.plugins.tool_plugins as tool_plugins_module
+
+    plugins_module._registry = None
+    plugins_module._scoped_registry = None
+    tool_plugins_module._all_plugins = None
+    engine_module._registry_cache = None
+
+
 @pytest.fixture
 def self_mgmt_plugin():
     """Get the self_management plugin, resetting state between tests.
@@ -67,8 +82,9 @@ def self_mgmt_plugin():
     - Gets the plugin
     - Resets the approval gate to None (fail-closed default)
     """
-    from leapflow.tools import get_registry
-    
+    from leapflow.plugins import get_registry
+
+    _reset_tool_registry_state()
     reg = get_registry()
     reg.assemble()
     plugin = reg.get_plugin("self_management")
@@ -78,8 +94,9 @@ def self_mgmt_plugin():
     
     yield plugin
     
-    # Cleanup: ensure gate is reset after test
+    # Cleanup: ensure gate and process-global registry state are reset after test
     plugin._plugin_approval_gate = None
+    _reset_tool_registry_state()
 
 
 # ════════════════════════════════════════════════════════════════
@@ -310,7 +327,7 @@ class TestMutationWithApprovingGate:
     ) -> None:
         """Inject approving gate, disable a plugin, verify fiber is DISPOSED and tools removed from registry."""
         from leapflow.domain.plugin_fiber import FiberState
-        from leapflow.tools import get_scoped_registry, get_registry
+        from leapflow.plugins import get_scoped_registry, get_registry
         
         # First reload text_utils to ensure it's active
         approving_gate = FakeApprovalGate(approved=True)
@@ -410,7 +427,7 @@ class TestGateInjection:
         self, self_mgmt_plugin: Any
     ) -> None:
         """Call registry.bind_runtime(plugin_approval_gate=fake_gate), verify plugin._plugin_approval_gate is fake_gate."""
-        from leapflow.tools import get_registry
+        from leapflow.plugins import get_registry
         
         fake_gate = FakeApprovalGate(approved=True)
         
@@ -736,7 +753,7 @@ class TestDisableEdgeCases:
         self_mgmt_plugin._plugin_approval_gate = ApprovingGate()
 
         # Simulate a plugin without a fiber
-        from leapflow.tools import get_scoped_registry
+        from leapflow.plugins import get_scoped_registry
 
         scoped = get_scoped_registry()
         # Remove the fiber for text_utils to simulate the edge case
@@ -862,7 +879,6 @@ class TestP1Features:
         self, self_mgmt_plugin: Any
     ) -> None:
         """Inject approving gate, enable a disabled plugin, verify ok=True + new_generation."""
-        from leapflow.domain.plugin_fiber import FiberState
 
         # Use system_info which is stable and not touched by other tests
         target_plugin = "system_info"
@@ -1088,7 +1104,7 @@ class TestP1Features:
             set_default_advisor(advisor)
 
             # Use self_management tools (always available, never disabled by other tests)
-            from leapflow.tools import get_registry
+            from leapflow.plugins import get_registry
             reg = get_registry()
             reg.assemble()  # Ensure registry is fully populated
             plugin = reg.get_plugin("self_management")
@@ -1117,4 +1133,191 @@ class TestP1Features:
             assert "self_management" in finding.title
         finally:
             advisor_mod._default_advisor = original
+
+
+# ═══════════════════════════════════════════════════════════════
+# Section: plugin_install path (N1 profile dir, R1 duplicate id, D1 marketplace)
+# ═══════════════════════════════════════════════════════════════
+
+
+def _valid_plugin_src(plugin_id: str, tool_name: str) -> str:
+    """Return valid ToolPlugin source whose declared id matches ``plugin_id``."""
+    return (
+        '"""Test-installed plugin."""\n'
+        "from typing import Any\n"
+        "from leapflow.plugins.protocol import ToolMetadata\n\n\n"
+        "class _TestInstalledPlugin:\n"
+        "    @property\n"
+        f"    def plugin_id(self) -> str:\n        return {plugin_id!r}\n\n"
+        "    @property\n"
+        "    def category(self) -> str:\n        return 'custom'\n\n"
+        "    @property\n"
+        "    def dependencies(self) -> list:\n        return []\n\n"
+        "    def bind_runtime(self, **deps: Any) -> None:\n        pass\n\n"
+        "    @property\n"
+        "    def tools(self) -> list:\n"
+        "        return [ToolMetadata(\n"
+        f"            name={tool_name!r},\n"
+        "            description='A test-installed echo tool',\n"
+        "            parameters_schema={'type': 'object', 'properties': {'message': {'type': 'string'}}},\n"
+        "            handler=self._handler,\n"
+        "        )]\n\n"
+        "    async def _handler(self, message: str = '', **kwargs: Any) -> dict:\n"
+        "        return {'ok': True, 'echoed': message}\n\n\n"
+        "plugin = _TestInstalledPlugin()\n"
+    )
+
+
+def _cleanup_installed(plugin_id: str) -> None:
+    """Tear down a dynamically-installed plugin: sys.modules + registry + fiber."""
+    import sys
+
+    sys.modules.pop(plugin_id, None)
+    try:
+        from leapflow.plugins import get_registry, get_scoped_registry
+
+        reg = get_registry()
+        scoped = get_scoped_registry()
+        if plugin_id in reg.plugins:
+            reg.unregister_plugin(plugin_id)
+        if plugin_id in scoped._fibers:
+            fiber = scoped._fibers.pop(plugin_id)
+            try:
+                fiber.dispose()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _reset_install_deps(plugin: Any) -> None:
+    """Reset install-related runtime deps a fixture does not clear."""
+    plugin._plugin_approval_gate = None
+    plugin._plugin_install_dir = None
+    plugin._marketplace_client = None
+    plugin._trusted_pubkeys = set()
+
+
+class TestPluginInstallPath:
+    """Covers N1 (profile-scoped install dir), R1 (duplicate id), D1 (marketplace)."""
+
+    @pytest.mark.asyncio
+    async def test_install_writes_to_injected_profile_dir_not_package(
+        self, self_mgmt_plugin: Any, tmp_path: Any
+    ) -> None:
+        """N1: install writes into the injected profile dir, not the package dir."""
+        from pathlib import Path
+
+        import leapflow.plugins.tool_plugins as pkg
+        from leapflow.plugins import get_registry
+
+        plugin_id = "tst_inproc_plug"
+        install_dir = tmp_path / "plugins"
+        self_mgmt_plugin._plugin_approval_gate = FakeApprovalGate(approved=True)
+        self_mgmt_plugin.bind_runtime(plugin_install_dir=str(install_dir))
+        try:
+            result = await self_mgmt_plugin._plugin_install_handler(
+                plugin_id=plugin_id,
+                code=_valid_plugin_src(plugin_id, "tst_inproc_tool"),
+            )
+            assert result["ok"], result
+            # Written into the injected profile dir ...
+            assert (install_dir / f"{plugin_id}.py").exists()
+            # ... and NOT into the read-only Python package directory.
+            pkg_dir = Path(pkg.__file__).parent
+            assert not (pkg_dir / f"{plugin_id}.py").exists()
+            # Registered and invocable via the registry.
+            reg = get_registry()
+            assert reg.get_plugin(plugin_id) is not None
+            handler = reg.tool_handlers["tst_inproc_tool"]
+            invoked = await handler(message="hi")
+            assert invoked == {"ok": True, "echoed": "hi"}
+        finally:
+            _cleanup_installed(plugin_id)
+            _reset_install_deps(self_mgmt_plugin)
+
+    @pytest.mark.asyncio
+    async def test_install_rejects_duplicate_plugin_id(
+        self, self_mgmt_plugin: Any, tmp_path: Any
+    ) -> None:
+        """R1: installing over an already-registered id returns a clean error."""
+        self_mgmt_plugin._plugin_approval_gate = FakeApprovalGate(approved=True)
+        self_mgmt_plugin.bind_runtime(plugin_install_dir=str(tmp_path / "plugins"))
+        try:
+            # self_management is always registered by the fixture.
+            result = await self_mgmt_plugin._plugin_install_handler(
+                plugin_id="self_management",
+                code=_valid_plugin_src("self_management", "dup_tool"),
+            )
+            assert result["ok"] is False
+            assert "already registered" in result["error"]
+            # No file must have been written for the rejected duplicate.
+            assert not (tmp_path / "plugins" / "self_management.py").exists()
+        finally:
+            _reset_install_deps(self_mgmt_plugin)
+
+    @pytest.mark.asyncio
+    async def test_install_marketplace_unconfigured_returns_structured_error(
+        self, self_mgmt_plugin: Any
+    ) -> None:
+        """D1: marketplace_name branch with no client -> structured error, no crash."""
+        self_mgmt_plugin._plugin_approval_gate = FakeApprovalGate(approved=True)
+        self_mgmt_plugin._marketplace_client = None
+        try:
+            result = await self_mgmt_plugin._plugin_install_handler(
+                plugin_id="unconfigured_mp", marketplace_name="whatever"
+            )
+            assert result["ok"] is False
+            assert "marketplace not configured" in result["error"].lower()
+        finally:
+            _reset_install_deps(self_mgmt_plugin)
+
+    @pytest.mark.asyncio
+    async def test_install_from_local_marketplace_non_sandbox(
+        self, self_mgmt_plugin: Any, tmp_path: Any
+    ) -> None:
+        """D1: wired marketplace branch installs a non-sandbox plugin end to end."""
+        from leapflow.plugins import get_registry
+        from leapflow.plugins.marketplace import MarketplaceClient, PluginManifest
+        from leapflow.plugins.marketplace.client import LocalDirectorySource
+
+        plugin_id = "demo_mp_plug"
+        code = _valid_plugin_src(plugin_id, "demo_mp_tool").encode("utf-8")
+
+        market_root = tmp_path / "market"
+        pdir = market_root / plugin_id
+        pdir.mkdir(parents=True, exist_ok=True)
+        manifest = PluginManifest(
+            name=plugin_id,
+            version="1.0.0",
+            author="test",
+            description="demo marketplace plugin",
+            entry_point=plugin_id,
+            checksum_sha256=PluginManifest.compute_checksum(code),
+            requires_sandbox=False,
+        )
+        (pdir / "manifest.json").write_text(manifest.to_json())
+        (pdir / f"{plugin_id}.py").write_bytes(code)
+
+        install_dir = tmp_path / "plugins"
+        client = MarketplaceClient(LocalDirectorySource(market_root), install_dir=install_dir)
+        self_mgmt_plugin._plugin_approval_gate = FakeApprovalGate(approved=True)
+        self_mgmt_plugin.bind_runtime(
+            plugin_install_dir=str(install_dir), marketplace_client=client
+        )
+        try:
+            result = await self_mgmt_plugin._plugin_install_handler(
+                plugin_id=plugin_id, marketplace_name=plugin_id
+            )
+            assert result["ok"], result
+            assert result.get("sandboxed") is not True
+            assert (install_dir / f"{plugin_id}.py").exists()
+            reg = get_registry()
+            assert reg.get_plugin(plugin_id) is not None
+            handler = reg.tool_handlers["demo_mp_tool"]
+            invoked = await handler(message="yo")
+            assert invoked == {"ok": True, "echoed": "yo"}
+        finally:
+            _cleanup_installed(plugin_id)
+            _reset_install_deps(self_mgmt_plugin)
 
