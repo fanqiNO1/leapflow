@@ -71,6 +71,8 @@ class ToolMetadata:
     description: str
     parameters_schema: dict[str, Any]  # OpenAI JSON Schema format
     handler: Callable[..., Any]
+    # Runtime dispatch goes through leapflow.plugins.handler_invocation.invoke_tool_handler,
+    # which supports both generated-plugin **kwargs handlers and older params-dict handlers.
     x_leapflow: dict[str, Any] = field(default_factory=dict)
     mutates_state: bool = False
 

@@ -278,9 +278,10 @@ class ExecutionToolset:
     def handlers(self) -> Dict[str, Any]:
         """Snapshot of name → async handler for every registered tool.
 
-        Handlers follow the unified-loop convention ``await handler(args)``
-        and are the same callables ``dispatch`` uses, so merging them into an
-        external handler table preserves bridge behavior exactly.
+        Handlers are the same callables ``dispatch`` uses. When they are merged
+        into the engine's external handler table, the engine's ToolMetadata
+        invocation adapter supports both this legacy ``handler(params)`` shape
+        and generated-plugin ``handler(**kwargs)`` shape.
         """
         return {name: entry.handler for name, entry in self._handlers.items()}
 

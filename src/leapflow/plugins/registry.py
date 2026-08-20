@@ -387,8 +387,9 @@ class ToolPluginRegistry:
     def tool_pipeline(self) -> ToolExecutionPipeline:
         """The composable tool execution pipeline for interceptor registration.
 
-        Interceptors registered here wrap all tool executions when the engine
-        dispatches through the pipeline (engine integration is a follow-up).
+        Interceptors registered here wrap engine-dispatched tool executions through
+        ``invoke_tool_handler`` while preserving the existing approval and
+        resolution gates around the handler call.
         """
         return self._tool_pipeline
 

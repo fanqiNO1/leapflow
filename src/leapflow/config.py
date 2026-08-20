@@ -110,7 +110,7 @@ class Settings:
     # active LLM. Installation is still separately approval-gated by
     # ApprovalOrchestrator; this switch guards the earlier code-generation step
     # so an unattended profile cannot spend tokens synthesizing plugins.
-    plugin_generation_enabled: bool = False
+    plugin_generation_enabled: bool = True
     # Profile-scoped directory where plugin_install writes plugin code and
     # loads it dynamically. None -> derive from the active ProfileLayout
     # (profiles/<profile>/plugins/). Set an absolute path to override.

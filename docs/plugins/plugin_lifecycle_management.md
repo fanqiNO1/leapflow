@@ -68,8 +68,8 @@ A plugin's state is the **composition** of three independent axes: Runtime, Trus
 - Each fiber has a monotonically increasing `generation` (from `_next_generation()`).
 - Dispose is idempotent and exception-safe (each effect runs in try/except; failures are logged, not propagated).
 - Children scopes are disposed before parent effects (reverse creation order).
-- The `FAILED` state captures initialization errors and supports retry: when dependencies change or a manual retry is triggered, the fiber transitions `FAILED → LOADING → ACTIVE`.
-- Scope-bound EventBus subscriptions (`scope=fiber.scope`) are automatically cleaned up on dispose — no manual unsubscribe needed.
+- The `FAILED` state captures initialization errors and supports retry (`FAILED → LOADING → ACTIVE`) for async-init paths. Current built-in/profile ToolPlugin registration mostly uses the fast path `PENDING → ACTIVE`.
+- Cleanup is scope-based: any resource explicitly registered on `fiber.scope` is disposed automatically with the fiber. EventBus or interceptor cleanup must be wired through such an effect before it becomes scope-bound.
 
 **Concurrency model**: Single-threaded asyncio. The module-level `_generation_counter` and fiber state mutations have no explicit lock — correctness relies on the cooperative event loop. Comment in source: *"if multi-threaded plugin lifecycle management is added later, this counter must be guarded by a threading.Lock"*.
 
@@ -314,7 +314,7 @@ A plugin's state is the **composition** of three independent axes: Runtime, Trus
 
 | Resource | Mechanism | Default | Enforced? |
 |----------|-----------|---------|:---------:|
-| Tool execution timeout | `asyncio.wait_for(handler(args), timeout=timeout)` in `_execute_general_tool` | Engine-level timeout (configurable) | ✅ |
+| Tool execution timeout | `_execute_general_tool` wraps the shared `invoke_tool_handler(...)` call with `asyncio.wait_for` | Engine-level timeout (configurable) | ✅ |
 | Sandbox invoke timeout | `SandboxHost.invoke_timeout_s` | 30s | ✅ |
 | Sandbox subprocess lifecycle | `SandboxHost.stop()` kills worker process | — | ✅ |
 | Usage deque memory | `deque(maxlen=500)` per tool in `PluginUsageTracker` | 500 samples | ✅ |
@@ -379,7 +379,7 @@ A plugin's state is the **composition** of three independent axes: Runtime, Trus
 
 | Tool | Output | Requires approval? |
 |------|--------|:------------------:|
-| `plugin_list` | All plugins across Tool/Gateway/LLM subsystems: id, category, tool count, fiber state | No |
+| `plugin_list` | All plugins across Tool/Gateway/LLM subsystems plus a live `capability_report` covering plugin support, self-evolution readiness, runtime dependencies, and limitations | No |
 | `plugin_status(plugin_id)` | Detailed: tools list, dependencies, fiber state, generation, trust level, usage stats, advisor recommendation | No |
 | `/plugin` (TUI slash) | Human-readable list | No |
 | `/plugin status <id>` (TUI slash) | Human-readable detail | No |
@@ -513,7 +513,7 @@ These require human/product input and are not answerable from code alone:
 
 | Behavior | Status |
 |----------|--------|
-| Fiber state transitions (PENDING→LOADING→ACTIVE→UNLOADING→DISPOSED + FAILED retry path) | ✅ ENFORCED |
+| Fiber state transitions (`PENDING→ACTIVE` fast path; `LOADING`/`FAILED` retry primitives available) | ✅ ENFORCED |
 | EffectScope LIFO cleanup on dispose | ✅ ENFORCED |
 | Per-turn handler snapshot (in-flight safety) | ✅ ENFORCED |
 | Generation counter + cache invalidation on reload | ✅ ENFORCED |

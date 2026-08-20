@@ -165,6 +165,24 @@ class TestPluginListIntrospection:
         assert "plugin_count" in result
         assert result["plugin_count"] == len(result["plugins"])
 
+    @pytest.mark.asyncio
+    async def test_plugin_list_includes_live_capability_report(
+        self, self_mgmt_plugin: Any
+    ) -> None:
+        """plugin_list is the live evidence source for self-capability answers."""
+        result = await self_mgmt_plugin._plugin_list_handler()
+
+        assert result["ok"] is True
+        report = result["capability_report"]
+        assert report["source"] == "live_runtime_registry"
+        assert report["registry"]["tool_count"] >= len(report["plugins_supported"]["evidence_tools"])
+        assert report["plugins_supported"]["supported"] is True
+        assert "plugin_list" in report["plugins_supported"]["evidence_tools"]
+        assert report["plugins_supported"]["hot_reload"] is True
+        assert report["plugins_supported"]["versioning"] is True
+        assert "approval_gate_bound" in report["runtime_dependencies"]
+        assert report["answering_guidance"]
+
 
 class TestPluginStatusIntrospection:
     """Tests for plugin_status detailed introspection tool."""

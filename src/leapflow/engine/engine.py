@@ -4898,6 +4898,8 @@ class AgentEngine:
                 # without touching the surrounding approval/semantic gates.
                 # Fast path: no interceptors registered = direct call, zero overhead.
                 from leapflow.plugins import get_registry
+                from leapflow.plugins.handler_invocation import invoke_tool_handler
+
                 pipeline = get_registry().tool_pipeline
                 if pipeline.interceptor_count > 0:
                     from leapflow.domain.tool_pipeline import ToolCallContext
@@ -4919,12 +4921,12 @@ class AgentEngine:
                     )
 
                     async def _invoke_handler(ctx: ToolCallContext) -> Dict[str, Any]:
-                        """Bridge the pipeline's context-based call to the args handler."""
-                        return await handler(ctx.arguments)
+                        """Bridge the pipeline's context-based call to the ToolMetadata handler."""
+                        return await invoke_tool_handler(handler, ctx.arguments)
 
                     result = await pipeline.execute(call_ctx, _invoke_handler)
                 else:
-                    result = await asyncio.wait_for(handler(args), timeout=timeout)
+                    result = await asyncio.wait_for(invoke_tool_handler(handler, args), timeout=timeout)
             else:
                 # No handler — tool is truly unknown
                 missing_resolution = registry.resolve(original_name, args)

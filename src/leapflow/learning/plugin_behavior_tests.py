@@ -5,6 +5,7 @@ import asyncio
 from typing import Any
 
 from leapflow.domain.plugin_proposal import BehaviorTestCase
+from leapflow.plugins.handler_invocation import invoke_tool_handler
 
 
 async def run_plugin_behavior_tests(
@@ -29,7 +30,7 @@ async def run_plugin_behavior_tests(
         args = dict(case.arguments)
         expected = dict(case.expected_subset)
         try:
-            result = await asyncio.wait_for(tool.handler(**args), timeout=timeout_s)
+            result = await asyncio.wait_for(invoke_tool_handler(tool.handler, args), timeout=timeout_s)
         except Exception as exc:  # noqa: BLE001 - plugin behavior failure is test failure
             return False, f"behavior test {index}: handler raised {type(exc).__name__}: {exc}", observations
         observations.append({"tool_name": case.tool_name, "arguments": args, "result": result})

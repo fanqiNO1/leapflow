@@ -776,7 +776,7 @@ The `self_management` plugin exposes **twelve** tools to the agent:
 
 | Tool | Kind | Effect |
 |------|------|--------|
-| `plugin_list` | read-only | List plugins across the Tool/Gateway/LLM subsystems |
+| `plugin_list` | read-only | List plugins across the Tool/Gateway/LLM subsystems and return a live `capability_report` for self-capability answers |
 | `plugin_status` | read-only | Inspect one plugin (tools, deps, fiber state, trust level, advisor recommendation) |
 | `plugin_versions` | read-only | Inspect recorded source snapshots and the active version pointer for a profile plugin |
 | `plugin_propose` | read-only | Create a side-effect-free PluginProposal from explicit capability-gap evidence |
@@ -788,6 +788,8 @@ The `self_management` plugin exposes **twelve** tools to the agent:
 | `plugin_disable` | mutating | Disable a plugin (takes effect immediately; tools re-resolved per read) |
 | `plugin_remove` | mutating | Terminally remove a plugin, dispose its fiber, unregister tools, and optionally delete source |
 | `plugin_enable` | mutating | Re-enable a disabled plugin |
+
+For questions about LeapFlow's own capabilities (for example whether plugins, hot reload, generation, marketplace install, versioning, or rollback are available), the agent should use `plugin_list` as the live evidence source and report configuration-dependent limits from its `capability_report` instead of inferring from documentation alone.
 
 Every mutation routes through the `ApprovalGate` at **HIGH** risk with `allow_permanent=False` — `security/risk.py` forces HIGH for `platform == "plugin_management"`, so no permanent grant can be minted. `self_management` cannot disable or reload itself.
 

@@ -340,9 +340,9 @@ The following is the ordered sequence from plugin source to tool invocation:
 
 ### Step 4: PluginFiber Lifecycle
 
-5. **`ScopedToolRegistry.adopt_existing_plugins()`**: Called on first `leapflow.plugins.get_scoped_registry()` access. Creates a `PluginFiber` (state: PENDING → LOADING → ACTIVE, or fast path PENDING → ACTIVE for plugins with no async init) for every already-registered plugin. Registers a cleanup effect on the fiber's `EffectScope` that will `unregister_plugin()` on dispose.
+5. **`ScopedToolRegistry.adopt_existing_plugins()`**: Called on first `leapflow.plugins.get_scoped_registry()` access. It creates a `PluginFiber` for every already-registered plugin and uses the fast path `PENDING → ACTIVE` for the current built-in/profile ToolPlugin runtime. The `PluginFiber` domain type also supports `LOADING` and `FAILED` retry states for future async initialization paths, but the scoped registry does not yet run a dependency-driven async activation loop.
 
-Fiber state machine: `PENDING → LOADING → ACTIVE → UNLOADING → DISPOSED` (with `LOADING → FAILED → LOADING` retry path)
+Fiber domain state machine: `PENDING → LOADING → ACTIVE → UNLOADING → DISPOSED` (with `LOADING → FAILED → LOADING` retry path). Current ToolPlugin registration uses the fast path `PENDING → ACTIVE`; `LOADING`/`FAILED` are available primitives, not automatic dependency orchestration.
 
 ### Step 5: Per-Turn Engine Assembly
 
@@ -351,7 +351,7 @@ Fiber state machine: `PENDING → LOADING → ACTIVE → UNLOADING → DISPOSED`
 
 ### Step 6: Tool Dispatch
 
-8. **`_execute_general_tool(tool_call, handlers)`**: Resolves the tool name (fuzzy/normalized resolution via `ToolRegistry.resolve()`), looks up the handler in the per-turn snapshot, invokes with `asyncio.wait_for(handler(args), timeout=timeout)`.
+8. **`_execute_general_tool(tool_call, handlers)`**: Resolves the tool name (canonical/normalized resolution via `ToolRegistry.resolve()`), looks up the handler in the per-turn snapshot, and invokes it through the shared handler adapter (`invoke_tool_handler`). The adapter supports both generated `**kwargs` handlers and older `params: dict` handlers, so native function calls with `{}` work for no-argument tools such as `plugin_list`.
 9. **Approval gate**: If the tool's metadata declares `mutates_state=True` or requires approval, the engine checks the approval gate before execution.
 
 ### Step 7: Usage & Trust Recording
@@ -390,18 +390,16 @@ from leapflow.plugins import get_registry
 
 def bind_runtime(self, **deps: Any) -> None:
     registry = get_registry()
-    registry.tool_pipeline.register(self._my_interceptor, priority=50)
+    registry.tool_pipeline.register(self._my_interceptor)  # priority comes from interceptor.priority
 ```
 
-Interceptors are scope-bound: if registered through a fiber's `EffectScope`, they are automatically removed when the fiber is disposed.
+Interceptors are process-global once registered on `registry.tool_pipeline`. If a plugin registers one dynamically, it must also register an explicit cleanup effect on its `PluginFiber`/`EffectScope` (or unregister it during disposal); automatic scope-bound interceptor removal is a planned convenience, not current runtime behavior.
 
-Built-in interceptor use cases: approval gating, execution timeout, audit logging, result redaction.
+Typical interceptor use cases include audit logging, execution timeout, approval gating, rate limiting, and result redaction. The repository currently ships the pipeline primitives and example audit/timeout interceptors; production plugins must register and unregister any additional interceptor explicitly.
 
-### Dependency-Driven Activation
+### Dependency Binding and Activation
 
-If your plugin declares `dependencies`, activation is automatic. The `ScopedToolRegistry` monitors dependency satisfaction via a fixpoint loop: once all required deps are bound (non-`None`), the fiber transitions from `PENDING` through `LOADING` to `ACTIVE` without any manual orchestration. If a required dependency disappears at runtime, the fiber is deactivated.
-
-This means third-party plugins **never need to manually check** whether their dependencies are available — the runtime drives lifecycle transitions based on declared specs.
+Plugins declare `dependencies`, and `ToolPluginRegistry.bind_runtime()` distributes matching runtime dependencies in topological plugin order. Current ToolPlugin activation still uses the `ScopedToolRegistry` fast path (`PENDING → ACTIVE`) after registration; plugins that require a dependency should degrade gracefully in their handler when the dependency is not bound. A future async activation loop may use the `LOADING`/`FAILED` states for dependency-driven retries, but that is not yet automatic.
 
 ---
 
