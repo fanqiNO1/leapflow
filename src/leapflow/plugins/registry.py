@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from leapflow.domain.tool_pipeline import ToolExecutionPipeline
 from leapflow.plugins.protocol import ToolMetadata, ToolPlugin
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ class ToolPluginRegistry:
         self._assembled = False
         self._version: int = 0
         self._last_bound_deps: dict[str, Any] = {}  # Track last-injected deps for re-injection on reload
+        self._tool_pipeline = ToolExecutionPipeline()
 
         # ── Cross-cutting runtime gates ──
         self._file_read_gate: Any = None
@@ -380,6 +382,15 @@ class ToolPluginRegistry:
         (the desktop_semantic plugin is the semantic tool registration site).
         """
         return self._plugins.get("desktop_semantic")
+
+    @property
+    def tool_pipeline(self) -> ToolExecutionPipeline:
+        """The composable tool execution pipeline for interceptor registration.
+
+        Interceptors registered here wrap all tool executions when the engine
+        dispatches through the pipeline (engine integration is a follow-up).
+        """
+        return self._tool_pipeline
 
     @property
     def categories(self) -> set[str]:

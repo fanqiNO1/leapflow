@@ -3,11 +3,13 @@
 > **Date**: 2026-08-20  
 > **Scope**: Comprehensive comparison of the Cordis spatiotemporal composability paper's formal model against LeapFlow's current plugin/lifecycle implementation, identifying actionable upgrade opportunities.  
 > **Paper**: "A Programming Paradigm for Spatiotemporal Composability" — Yifan Shi, Wei Zhang, Tianyi Cui (Peking University, DeepSeek-AI)  
-> **LeapFlow baseline**: `leapflow.plugins` first-class module, PluginFiber 4-state machine, EffectScope LIFO cleanup, flat ScopedToolRegistry, EventBus pub/sub
+> **LeapFlow baseline**: `leapflow.plugins` first-class module, PluginFiber 6-state machine (PENDING/LOADING/ACTIVE/FAILED/UNLOADING/DISPOSED), EffectScope LIFO cleanup with async support, dependency-driven ScopedToolRegistry, scope-bound EventBus, waterfall ToolExecutionPipeline
 
 ---
 
 ## 1. Executive Summary
+
+> **Status: P0+P1+P2 ALL IMPLEMENTED** (commits 68df756, 6e77a83, pending). Delivered capabilities: scope-bound EventBus subscriptions, 6-state PluginFiber (LOADING/FAILED + retry), dependency-driven fiber activation (fixpoint loop), topological `bind_runtime` ordering (`graphlib.TopologicalSorter`), waterfall tool execution pipeline (`ToolInterceptor` Protocol), and async EffectScope cleanup (`async_effect` + `async_dispose`). All upgrades are cold-path only with zero per-turn hot-path impact.
 
 ### Core Paper Insight
 

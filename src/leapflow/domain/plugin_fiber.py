@@ -1,10 +1,23 @@
-"""Plugin lifecycle state machine.
+"""Plugin lifecycle state machine (PluginFiber).
 
-A PluginFiber tracks the lifecycle of a single plugin instance through
-its states: PENDING → ACTIVE → UNLOADING → DISPOSED.
+Manages the runtime lifecycle of a single plugin instance through a
+six-state finite automaton with generation tracking:
 
-Each fiber owns an EffectScope. When the fiber is disposed, its scope
-is automatically disposed, triggering all registered cleanup effects.
+    PENDING → LOADING → ACTIVE → UNLOADING → DISPOSED
+              LOADING → FAILED → LOADING (retry)
+    PENDING → ACTIVE (fast path for plugins with no async init)
+    PENDING/LOADING/FAILED → DISPOSED (early cleanup)
+
+Each fiber owns an EffectScope; dispose() always cascades scope cleanup.
+Generation counter provides identity across reload cycles.
+
+States:
+    PENDING   — created, awaiting activation or async init
+    LOADING   — async initialization in progress (dependency resolution)
+    ACTIVE    — fully operational, tools available
+    FAILED    — initialization failed, retryable via retry()/begin_loading()
+    UNLOADING — graceful teardown in progress
+    DISPOSED  — terminal, scope cleaned, no longer usable
 """
 
 from __future__ import annotations

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from leapflow.domain.effect_scope import EffectScope, ScopeState
@@ -427,3 +429,195 @@ class TestScopeBoundSubscription:
         scope.dispose()
         assert len(bus._subscribers) == 1
         assert id(cb3) in bus._subscribers
+
+
+# ════════════════════════════════════════════════════════════════
+# Async EffectScope tests
+# ════════════════════════════════════════════════════════════════
+
+
+class TestAsyncEffectRegistration:
+    """async_effect() registration behavior."""
+
+    def test_async_effect_registers(self) -> None:
+        scope = EffectScope("async-reg")
+        scope.async_effect(self._noop_async)
+        assert scope.async_effect_count == 1
+
+    def test_async_effect_on_disposed_scope_raises(self) -> None:
+        scope = EffectScope("closed")
+        scope.dispose()
+        with pytest.raises(RuntimeError, match="disposed"):
+            scope.async_effect(self._noop_async)
+
+    def test_async_effect_count_separate_from_sync(self) -> None:
+        scope = EffectScope("mixed")
+        scope.effect(lambda: None)
+        scope.async_effect(self._noop_async)
+        scope.async_effect(self._noop_async)
+        assert scope.effect_count == 1
+        assert scope.async_effect_count == 2
+
+    @staticmethod
+    async def _noop_async() -> None:
+        pass
+
+
+class TestAsyncDispose:
+    """async_dispose() awaits async effects + calls sync effects."""
+
+    @pytest.mark.asyncio
+    async def test_async_dispose_runs_async_effects_lifo(self) -> None:
+        scope = EffectScope("async-lifo")
+        order: list[int] = []
+
+        async def append(n: int) -> None:
+            order.append(n)
+
+        scope.async_effect(lambda: append(1))
+        scope.async_effect(lambda: append(2))
+        scope.async_effect(lambda: append(3))
+
+        await scope.async_dispose()
+        assert order == [3, 2, 1]
+
+    @pytest.mark.asyncio
+    async def test_async_dispose_runs_sync_effects_after_async(self) -> None:
+        scope = EffectScope("mixed-order")
+        order: list[str] = []
+
+        async def async_cleanup() -> None:
+            order.append("async")
+
+        scope.effect(lambda: order.append("sync"))
+        scope.async_effect(async_cleanup)
+
+        await scope.async_dispose()
+        # Async effects run before sync effects
+        assert order == ["async", "sync"]
+
+    @pytest.mark.asyncio
+    async def test_async_dispose_is_idempotent(self) -> None:
+        scope = EffectScope("idem")
+        count = [0]
+
+        async def inc() -> None:
+            count[0] += 1
+
+        scope.async_effect(inc)
+        await scope.async_dispose()
+        await scope.async_dispose()  # second call is no-op
+        assert count[0] == 1
+        assert scope.state == ScopeState.DISPOSED
+
+    @pytest.mark.asyncio
+    async def test_async_dispose_exception_safe(self) -> None:
+        scope = EffectScope("exc-safe")
+        executed: list[str] = []
+
+        async def good_first() -> None:
+            executed.append("first")
+
+        async def bad() -> None:
+            raise RuntimeError("boom")
+
+        async def good_last() -> None:
+            executed.append("last")
+
+        scope.async_effect(good_first)
+        scope.async_effect(bad)
+        scope.async_effect(good_last)
+
+        await scope.async_dispose()
+        # LIFO: good_last, bad (fails), good_first
+        assert "first" in executed
+        assert "last" in executed
+        assert scope.state == ScopeState.DISPOSED
+
+    @pytest.mark.asyncio
+    async def test_async_dispose_cascades_to_children(self) -> None:
+        parent = EffectScope("parent")
+        child = parent.child("child")
+        order: list[str] = []
+
+        async def parent_cleanup() -> None:
+            order.append("parent")
+
+        async def child_cleanup() -> None:
+            order.append("child")
+
+        parent.async_effect(parent_cleanup)
+        child.async_effect(child_cleanup)
+
+        await parent.async_dispose()
+        # Child disposes before parent's own effects
+        assert order.index("child") < order.index("parent")
+        assert child.state == ScopeState.DISPOSED
+        assert parent.state == ScopeState.DISPOSED
+
+    @pytest.mark.asyncio
+    async def test_async_dispose_nested_hierarchy(self) -> None:
+        """Multi-level async hierarchy disposes deepest first."""
+        root = EffectScope("root")
+        child = root.child("child")
+        grandchild = child.child("grandchild")
+        order: list[str] = []
+
+        async def mark(name: str) -> None:
+            order.append(name)
+
+        root.async_effect(lambda: mark("root"))
+        child.async_effect(lambda: mark("child"))
+        grandchild.async_effect(lambda: mark("grandchild"))
+
+        await root.async_dispose()
+        assert order.index("grandchild") < order.index("child")
+        assert order.index("child") < order.index("root")
+
+
+class TestSyncDisposeWithAsyncEffects:
+    """Sync dispose() gracefully handles async effects."""
+
+    def test_sync_dispose_runs_async_via_asyncio_run(self) -> None:
+        """When no event loop is running, asyncio.run() is used."""
+        scope = EffectScope("sync-async")
+        executed = [False]
+
+        async def async_cleanup() -> None:
+            executed[0] = True
+
+        scope.async_effect(async_cleanup)
+        scope.dispose()
+        assert executed[0]
+        assert scope.state == ScopeState.DISPOSED
+
+    def test_sync_dispose_with_failing_async_still_completes(self) -> None:
+        """Failing async effects don't block sync dispose."""
+        scope = EffectScope("fail-async")
+        sync_ran = [False]
+
+        async def bad_async() -> None:
+            raise RuntimeError("async boom")
+
+        scope.async_effect(bad_async)
+        scope.effect(lambda: sync_ran.__setitem__(0, True))
+        scope.dispose()
+        assert sync_ran[0]
+        assert scope.state == ScopeState.DISPOSED
+
+    @pytest.mark.asyncio
+    async def test_sync_dispose_inside_running_loop_schedules_tasks(self) -> None:
+        """When called from within a running loop, async effects become tasks."""
+        scope = EffectScope("in-loop")
+        executed = [False]
+
+        async def async_cleanup() -> None:
+            executed[0] = True
+
+        scope.async_effect(async_cleanup)
+        # We're inside an async test, so a loop IS running
+        scope.dispose()
+        # Give scheduled task time to run
+        await asyncio.sleep(0.05)
+        assert executed[0]
+        assert scope.state == ScopeState.DISPOSED

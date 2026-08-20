@@ -12,7 +12,7 @@
 
 | Term | Definition |
 |------|-----------|
-| **PluginFiber** | A per-plugin lifecycle state-machine instance (`domain/plugin_fiber.py`). Tracks runtime state transitions and owns an EffectScope for deterministic cleanup. |
+| **PluginFiber** | A per-plugin lifecycle state-machine instance (`domain/plugin_fiber.py`). Tracks runtime state transitions (PENDING/LOADING/ACTIVE/FAILED/UNLOADING/DISPOSED) and owns an EffectScope for deterministic cleanup. |
 | **EffectScope** | Hierarchical, LIFO-ordered cleanup collector (`domain/effect_scope.py`). Guarantees safe teardown on dispose. |
 | **Trust Level** | Progressive reliability gradient (DRAFT → CANDIDATE → VERIFIED → PRODUCTION) earned by consecutive successes, persisted in DuckDB. |
 | **Generation Counter** | Module-level monotonic integer; each new PluginFiber receives a unique generation. Engine caches key on `(id(plugin), generation)` to detect reloads. |
@@ -32,20 +32,44 @@ A plugin's state is the **composition** of three independent axes: Runtime, Trus
 ### 1.1 Runtime Lifecycle (PluginFiber)
 
 ```
-┌─────────┐  activate()  ┌────────┐  begin_unload()  ┌───────────┐  dispose()  ┌──────────┐
-│ PENDING │─────────────→│ ACTIVE │─────────────────→│ UNLOADING │───────────→│ DISPOSED │
-└─────────┘              └────────┘                  └───────────┘            └──────────┘
-                                                                                   │
-                                                                            EffectScope.dispose()
-                                                                            (LIFO cleanup of all
-                                                                             registered effects)
+┌─────────┐ begin_loading() ┌─────────┐  activate()  ┌────────┐ begin_unload() ┌───────────┐ dispose() ┌──────────┐
+│ PENDING │────────────────→│ LOADING │─────────────→│ ACTIVE │───────────────→│ UNLOADING │─────────→│ DISPOSED │
+└─────────┘                 └─────────┘              └────────┘                └───────────┘          └──────────┘
+    │                            │                                                                        ▲
+    │                            │ (init fails)                                                           │
+    │                            ▼                                                                        │
+    │                      ┌────────┐                                                                     │
+    │                      │ FAILED │─────────────── dispose() (early cleanup) ───────────────────────────→│
+    │                      └────────┘                                                                     │
+    │                         ▲  │                                                                        │
+    │                         │  │ retry()/begin_loading()                                                │
+    │                         │  ▼                                                                        │
+    │                      ┌─────────┐                                                                    │
+    │                      │ LOADING │ (retry path → ACTIVE)                                              │
+    │                      └─────────┘                                                                    │
+    │                                                                                                     │
+    └──── activate() (fast path: no async init) ──→ ACTIVE                                               │
+    └──── dispose() (early cleanup) ──────────────────────────────────────────────────────────────────────→┘
 ```
+
+**State table**:
+
+| State | Meaning | Transitions out |
+|-------|---------|----------------|
+| `PENDING` | Created, awaiting activation or async init | `LOADING`, `ACTIVE` (fast path), `DISPOSED` |
+| `LOADING` | Async initialization in progress (dependency resolution) | `ACTIVE`, `FAILED`, `UNLOADING` |
+| `ACTIVE` | Fully operational, tools registered and available | `UNLOADING` |
+| `FAILED` | Initialization failed; retryable via `retry()`/`begin_loading()` | `LOADING`, `DISPOSED` |
+| `UNLOADING` | Graceful teardown in progress | `DISPOSED` |
+| `DISPOSED` | Terminal; EffectScope cleaned, no longer usable | *(none)* |
 
 **Key properties**:
 - Transitions are enforced by `_VALID_TRANSITIONS` dict — illegal transitions raise `IllegalStateTransition`.
 - Each fiber has a monotonically increasing `generation` (from `_next_generation()`).
 - Dispose is idempotent and exception-safe (each effect runs in try/except; failures are logged, not propagated).
 - Children scopes are disposed before parent effects (reverse creation order).
+- The `FAILED` state captures initialization errors and supports retry: when dependencies change or a manual retry is triggered, the fiber transitions `FAILED → LOADING → ACTIVE`.
+- Scope-bound EventBus subscriptions (`scope=fiber.scope`) are automatically cleaned up on dispose — no manual unsubscribe needed.
 
 **Concurrency model**: Single-threaded asyncio. The module-level `_generation_counter` and fiber state mutations have no explicit lock — correctness relies on the cooperative event loop. Comment in source: *"if multi-threaded plugin lifecycle management is added later, this counter must be guarded by a threading.Lock"*.
 
@@ -488,7 +512,7 @@ These require human/product input and are not answerable from code alone:
 
 | Behavior | Status |
 |----------|--------|
-| Fiber state transitions (PENDING→ACTIVE→UNLOADING→DISPOSED) | ✅ ENFORCED |
+| Fiber state transitions (PENDING→LOADING→ACTIVE→UNLOADING→DISPOSED + FAILED retry path) | ✅ ENFORCED |
 | EffectScope LIFO cleanup on dispose | ✅ ENFORCED |
 | Per-turn handler snapshot (in-flight safety) | ✅ ENFORCED |
 | Generation counter + cache invalidation on reload | ✅ ENFORCED |

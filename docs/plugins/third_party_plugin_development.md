@@ -340,9 +340,9 @@ The following is the ordered sequence from plugin source to tool invocation:
 
 ### Step 4: PluginFiber Lifecycle
 
-5. **`ScopedToolRegistry.adopt_existing_plugins()`**: Called on first `leapflow.plugins.get_scoped_registry()` access. Creates a `PluginFiber` (state: PENDING → ACTIVE) for every already-registered plugin. Registers a cleanup effect on the fiber's `EffectScope` that will `unregister_plugin()` on dispose.
+5. **`ScopedToolRegistry.adopt_existing_plugins()`**: Called on first `leapflow.plugins.get_scoped_registry()` access. Creates a `PluginFiber` (state: PENDING → LOADING → ACTIVE, or fast path PENDING → ACTIVE for plugins with no async init) for every already-registered plugin. Registers a cleanup effect on the fiber's `EffectScope` that will `unregister_plugin()` on dispose.
 
-Fiber state machine: `PENDING → ACTIVE → UNLOADING → DISPOSED`
+Fiber state machine: `PENDING → LOADING → ACTIVE → UNLOADING → DISPOSED` (with `LOADING → FAILED → LOADING` retry path)
 
 ### Step 5: Per-Turn Engine Assembly
 
@@ -369,6 +369,39 @@ The engine calls `dict(registry.tool_handlers)` at the start of each turn, creat
 - Bumps `_version` → invalidates cache for future turns.
 
 But the currently-executing turn still holds its snapshot with the old handlers and finishes safely. LeapFlow's single-threaded asyncio model guarantees no pre-emption mid-turn.
+
+### Tool Execution Pipeline & Interceptors
+
+Tool dispatch is wrapped by a **`ToolExecutionPipeline`** that implements a waterfall (middleware) pattern. Before and after actual handler invocation, registered `ToolInterceptor` instances run composable pre/post hooks.
+
+```python
+from typing import Any, Protocol, runtime_checkable
+
+@runtime_checkable
+class ToolInterceptor(Protocol):
+    async def before(self, context: dict[str, Any]) -> dict[str, Any]: ...
+    async def after(self, context: dict[str, Any], result: Any) -> Any: ...
+```
+
+**Registering an interceptor from a third-party plugin:**
+
+```python
+from leapflow.plugins import get_registry
+
+def bind_runtime(self, **deps: Any) -> None:
+    registry = get_registry()
+    registry.tool_pipeline.register(self._my_interceptor, priority=50)
+```
+
+Interceptors are scope-bound: if registered through a fiber's `EffectScope`, they are automatically removed when the fiber is disposed.
+
+Built-in interceptor use cases: approval gating, execution timeout, audit logging, result redaction.
+
+### Dependency-Driven Activation
+
+If your plugin declares `dependencies`, activation is automatic. The `ScopedToolRegistry` monitors dependency satisfaction via a fixpoint loop: once all required deps are bound (non-`None`), the fiber transitions from `PENDING` through `LOADING` to `ACTIVE` without any manual orchestration. If a required dependency disappears at runtime, the fiber is deactivated.
+
+This means third-party plugins **never need to manually check** whether their dependencies are available — the runtime drives lifecycle transitions based on declared specs.
 
 ---
 

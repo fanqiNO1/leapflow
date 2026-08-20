@@ -761,7 +761,7 @@ src/leapflow/plugins/
 
 - **`ToolPluginRegistry`** (`plugins/registry.py`) — discovery, dependency injection (`bind_runtime`), one-shot `assemble()`, `publish_plugin_tools()` for plugins that arrive later (install / hot-reload), and monotonic **version / generation** counters that drive downstream cache invalidation.
 - **`EffectScope`** (`domain/effect_scope.py`) — hierarchical, LIFO, exception-safe cleanup collector (`ACTIVE → DISPOSING → DISPOSED`).
-- **`PluginFiber`** (`domain/plugin_fiber.py`) — per-instance state machine (`PENDING → ACTIVE → UNLOADING → DISPOSED`) carrying an `EffectScope` and a `generation` counter.
+- **`PluginFiber`** (`domain/plugin_fiber.py`) — per-instance state machine (`PENDING → LOADING → ACTIVE → UNLOADING → DISPOSED`, with `FAILED` branch and retry) carrying an `EffectScope` and a `generation` counter.
 - **`ScopedToolRegistry`** (`plugins/scoped_registry.py`) — wraps the registry so every registration is reversible; `adopt_existing_plugins()` fiberizes the built-in plugins at boot. Parallel `ScopedGatewayAdapterRegistry` and `ScopedLLMProviderRegistry` give the Gateway/LLM subsystems the same lifecycle.
 
 Plugin assembly is fully fiberized from startup; there is no bootstrap shim and no module-level tool globals.
@@ -818,6 +818,19 @@ The legacy `ToolBridge` compatibility layer is fully gone — `bridge_adapter.py
 
 1. The bounded ReAct fallback no longer carries plugin-catalog tools (it is scoped to desktop execution).
 2. The `SemanticAdapter` "last observed window" state is no longer shared across surfaces/turns.
+
+### Lifecycle & Composability (Cordis-inspired)
+
+The plugin subsystem incorporates design principles from the Cordis spatiotemporal composability model, delivering production-grade lifecycle and composition primitives:
+
+- **6-state fiber machine** — `PluginFiber` implements a full `PENDING → LOADING → ACTIVE → UNLOADING → DISPOSED` automaton with a `FAILED` branch and retry semantics (`FAILED → LOADING → ACTIVE`). Plugins with no async init use the fast path (`PENDING → ACTIVE`).
+- **Scope-bound EventBus subscriptions** — `event_bus.subscribe(event, handler, scope=fiber.scope)` ties subscriptions to the fiber's `EffectScope`. Dispose cascades unsubscription automatically — O(1) unsubscribe, zero registration leaks.
+- **Dependency-driven fiber activation** — fibers stay `PENDING` until all declared dependencies are satisfied. A fixpoint loop in `ScopedToolRegistry` re-evaluates satisfaction after every `bind_runtime()` update, activating providers before consumers.
+- **Topological `bind_runtime` ordering** — when multiple plugins declare interdependencies, `graphlib.TopologicalSorter` determines a safe injection order, guaranteeing that providers are initialized before consumers.
+- **Waterfall tool execution pipeline** — `ToolExecutionPipeline` (backed by a `ToolInterceptor` Protocol) wraps tool dispatch with composable pre/post hooks (audit, timeout, approval, custom logic). Interceptors are scope-bound and auto-removed on fiber dispose.
+- **Async EffectScope cleanup** — `async_effect()` + `async_dispose()` support non-blocking teardown for plugins with network connections or background tasks. Each async cleanup is bounded by a configurable timeout.
+
+> **Performance note:** All Cordis-inspired upgrades are cold-path only (boot, reload, dispose). The per-turn hot path — handler snapshot, tool dispatch, result recording — remains unchanged with zero additional overhead.
 
 ### Compatibility Assessment
 
