@@ -425,6 +425,37 @@ Installation is performed by the `plugin_install` tool (part of the `self_manage
 
 **Install flow**: Validated code → write to profile plugins dir → sandbox smoke test → dynamic import → register in live registry → activate fiber.
 
+### 5.2a Generating plugins via slash command (`/plugin generate`)
+
+For a zero-boilerplate path, the TUI/CLI exposes `/plugin generate <description>`,
+which synthesizes, validates, and installs a plugin directly from a natural-language
+description:
+
+```text
+/plugin generate a tool that fetches the current weather for a city
+```
+
+- **Zero-prompt happy path** — the description is sent to the configured LLM, the
+  generated code is run through the staged validators (syntax → import → Protocol
+  conformance → sandbox smoke test), and on success the plugin is installed into the
+  profile plugins dir and hot-loaded. A single bounded refinement retry runs on a
+  refinable validation failure (syntax/protocol/structure).
+- **`--preview`** — generate and validate only, then return the code for inspection
+  without installing. Use this to review before committing.
+- **`--dry-run`** — validate the generated code without writing it to disk.
+- **`--id <plugin_id>`** — override the auto-derived plugin id (a slug of the
+  description). A colliding id is rejected cleanly.
+
+Generation is gated by `plugin.generation_enabled` (off by default; enable via
+`/config set plugin.generation_enabled true`) and requires an LLM provider.
+
+**Difference from the `plugin_generate` agent tool**: `/plugin generate` is a
+*user-initiated* control-plane command — the user's invocation is the consent, so it
+runs without an approval gate and produces a DRAFT-trust plugin. The `plugin_generate`
+tool is *agent-initiated*: the agent proposes generation from capability-gap evidence,
+and every mutation routes through the `ApprovalGate` at HIGH risk. Both share the same
+generator, validators, and install path.
+
 ### 5.3 LLM Provider Entry Points
 
 Only `LLMProviderPlugin` supports setuptools entry_point discovery:

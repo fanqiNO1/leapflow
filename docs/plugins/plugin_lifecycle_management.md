@@ -150,6 +150,7 @@ A plugin's state is the **composition** of three independent axes: Runtime, Trus
 | **plugin_propose** | Agent tool | None | Always (proposal only, no LLM/file/runtime mutation) | `ProfileLayout.plugin_proposals_path` | No (proposal store write only) |
 | **assess_compatibility** | Agent tool | None | Always (read-only manifest assessment; no file/runtime mutation) | — | No (read-only) |
 | **plugin_generate** | Agent tool | None | Always (code generation only, no filesystem write) | `plugin_generation_enabled` must be `True`; needs `llm_provider` bound | No (ephemeral output) |
+| **/plugin generate** | User (slash command) | None (user invocation = consent) | Always auto-approved (user-initiated); installs at DRAFT trust level | `plugin_generation_enabled` must be `True`; needs an LLM provider | Yes — install action descriptor recorded |
 | **plugin_install** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Never (always requires human) | `plugin_install_dir`, proposal/version stores, `plugin_marketplace_root/url`, `plugin_marketplace_trusted_pubkeys` | Yes — action descriptor metadata recorded |
 | **plugin_rollback** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Never (always requires human) | `ProfileLayout.plugin_versions_dir` | Yes |
 | **plugin_reload** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Trust == PRODUCTION (auto-approved) | proposal/version stores when behavior tests or version labels are used | Yes |

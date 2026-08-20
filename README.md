@@ -877,6 +877,8 @@ leap config set plugin.marketplace_url https://plugins.example.com
 ```
 
 > **Slash commands:** any `/plugin` slash command (list/status/reload/disable/enable) still requires a **second human confirmation** per the engineering contract. A human should verify: `reload` reflects the new version on the next turn; `disable` removes the plugin's tools from the catalog/disclosure; `enable` restores them; `list`/`status` are read-only and need no approval.
+>
+> - `/plugin generate <description>` — generate + validate + install a plugin from natural language (flags: `--preview`, `--dry-run`, `--id`).
 
 Full authoring walkthrough: see the [Plugin Developer Guide](temp/deepseek_harness/PLUGIN_DEVELOPER_GUIDE.md).
 

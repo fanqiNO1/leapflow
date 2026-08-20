@@ -136,6 +136,7 @@ COMMAND_REGISTRY: Tuple[CommandDef, ...] = (
     CommandDef("plugin reload", "Hot-reload a plugin (daemon mode, approval required)", "Skills & Tools", args_hint="<id>", requires_host=True, effect=CommandEffect.SESSION, execution=CommandExecution.SHORT_OPERATION),
     CommandDef("plugin disable", "Disable a plugin (daemon mode, approval required)", "Skills & Tools", args_hint="<id>", requires_host=True, effect=CommandEffect.DESTRUCTIVE, execution=CommandExecution.SHORT_OPERATION),
     CommandDef("plugin enable", "Re-enable a disabled plugin (daemon mode, approval required)", "Skills & Tools", args_hint="<id>", requires_host=True, effect=CommandEffect.SESSION, execution=CommandExecution.SHORT_OPERATION),
+    CommandDef("plugin generate", "Generate and install a plugin from a natural-language description", "Skills & Tools", args_hint="[--preview|--dry-run|--id <id>] <description>", requires_host=True, effect=CommandEffect.SESSION, execution=CommandExecution.LONG_RUNNING),
 
     # Scheduler
     CommandDef("arm", "Schedule a skill for timed execution", "Scheduler", args_hint="<skill> <cron>"),
