@@ -83,6 +83,11 @@ class ScopedToolRegistry:
         fiber.scope.effect(_cleanup)
         logger.debug("Scoped-registered plugin '%s' with %d tools", plugin_id, len(tool_names))
 
+        # A newly registered plugin may satisfy a dependency that other fibers
+        # are waiting on (LOADING). Re-run the activation check so those fibers
+        # can transition LOADING → ACTIVE now that their provider is present.
+        self._check_pending_activations()
+
     def scoped_register_late_tool(
         self,
         definition: dict[str, Any],
@@ -118,6 +123,13 @@ class ScopedToolRegistry:
 
         Used during boot to bring all built-in plugins under fiber lifecycle management
         WITHOUT re-registering them (which would raise Duplicate plugin_id).
+
+        Activation is dependency-driven: a plugin declaring no dependencies is
+        activated immediately (PENDING → ACTIVE), while a plugin with declared
+        dependencies enters LOADING (PENDING → LOADING) and is only promoted to
+        ACTIVE once its dependencies are satisfiable. After every fiber has been
+        seeded, ``_check_pending_activations()`` resolves the LOADING set to a
+        fixpoint, and any straggler is force-activated for graceful degradation.
         """
         for plugin_id, plugin in self._registry.plugins.items():
             if plugin_id in self._fibers:
@@ -133,7 +145,129 @@ class ScopedToolRegistry:
                 self._unregister_tools(pid, names)
 
             fiber.scope.effect(_cleanup)
-            fiber.activate()
+            # Backward-compatible fast path: no declared dependencies means the
+            # plugin can activate right away, exactly as before P1.
+            if plugin.dependencies:
+                fiber.begin_loading()
+            else:
+                fiber.activate()
+
+        # Promote every LOADING fiber whose dependencies are now satisfiable.
+        self._check_pending_activations()
+        # Any fiber still LOADING has unsatisfiable or late-bound dependencies;
+        # force-activate it so a missing runtime dep never blocks boot.
+        self._force_activate_stragglers()
+
+    # ── Dependency-driven activation ──
+
+    def _dependencies_satisfied(self, plugin: ToolPlugin) -> bool:
+        """Return True when every declared dependency of *plugin* is available.
+
+        A dependency name is satisfied when it is either present in the
+        registry's last-bound runtime deps (injected via ``bind_runtime``) or
+        provided by another plugin whose fiber is already ACTIVE (the provider's
+        ``plugin_id`` equals the dependency name). Requiring the provider to be
+        ACTIVE — not merely registered — is what lets a genuine dependency cycle
+        deadlock cleanly instead of activating members out of order.
+        """
+        bound = self._registry.last_bound_deps
+        for dep in plugin.dependencies:
+            if dep in bound:
+                continue
+            provider = self._fibers.get(dep)
+            if provider is not None and provider.state == FiberState.ACTIVE:
+                continue
+            return False
+        return True
+
+    def _check_pending_activations(self) -> None:
+        """Activate LOADING fibers whose dependencies have become satisfiable.
+
+        Runs to a fixpoint: activating one provider may satisfy a consumer that
+        depends on it, so the scan repeats until no further fiber transitions.
+        This makes activation order-independent — an arbitrary registration or
+        discovery order still resolves a full provider → consumer chain.
+        """
+        progressed = True
+        while progressed:
+            progressed = False
+            for plugin_id, fiber in self._fibers.items():
+                if fiber.state != FiberState.LOADING:
+                    continue
+                plugin = self._registry.get_plugin(plugin_id)
+                if plugin is None:
+                    continue
+                if self._dependencies_satisfied(plugin):
+                    self._activate_fiber(plugin_id, fiber)
+                    progressed = True
+
+    def _activate_fiber(self, plugin_id: str, fiber: PluginFiber) -> None:
+        """Transition a fiber to ACTIVE and bind its satisfied runtime deps.
+
+        The transition tolerates both PENDING → ACTIVE and LOADING → ACTIVE.
+        After activation the plugin receives any last-bound deps it declared, so
+        a fiber promoted after ``bind_runtime`` still gets its injections.
+        """
+        if fiber.state == FiberState.ACTIVE:
+            return
+        fiber.activate()
+        plugin = self._registry.get_plugin(plugin_id)
+        if plugin is None:
+            return
+        relevant = {
+            k: v
+            for k, v in self._registry.last_bound_deps.items()
+            if k in plugin.dependencies
+        }
+        if relevant:
+            plugin.bind_runtime(**relevant)
+
+    def _has_unsatisfied_plugin_dep(self, plugin_id: str) -> bool:
+        """Return True if the plugin waits on another *plugin* that is not ACTIVE.
+
+        Distinguishes a genuine inter-plugin dependency problem (a cycle or a
+        provider that never activates) from an ordinary late-bound runtime dep
+        (e.g. ``file_read_gate``) that is injected after boot via
+        ``bind_runtime`` and legitimately absent at adoption time.
+        """
+        plugin = self._registry.get_plugin(plugin_id)
+        if plugin is None:
+            return False
+        for dep in plugin.dependencies:
+            provider = self._fibers.get(dep)
+            if provider is not None and provider.state != FiberState.ACTIVE:
+                return True
+        return False
+
+    def _force_activate_stragglers(self) -> None:
+        """Force-activate any fiber still LOADING (graceful degradation).
+
+        A straggler blocked on another plugin (cycle / never-activating provider)
+        is force-activated with a warning; one merely awaiting a late-bound
+        runtime dependency is force-activated quietly, since that dep arrives
+        later through ``bind_runtime`` and the plugin already tolerates its
+        temporary absence.
+        """
+        stragglers = [
+            pid for pid, fiber in self._fibers.items()
+            if fiber.state == FiberState.LOADING
+        ]
+        if not stragglers:
+            return
+        blocked = [pid for pid in stragglers if self._has_unsatisfied_plugin_dep(pid)]
+        for plugin_id in stragglers:
+            self._activate_fiber(plugin_id, self._fibers[plugin_id])
+        if blocked:
+            logger.warning(
+                "Force-activated plugin fiber(s) with unresolved inter-plugin "
+                "dependencies (possible cycle): %s",
+                blocked,
+            )
+        else:
+            logger.debug(
+                "Activated plugin fiber(s) awaiting late-bound runtime deps: %s",
+                stragglers,
+            )
 
     @property
     def fibers(self) -> dict[str, PluginFiber]:

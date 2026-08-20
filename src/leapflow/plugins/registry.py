@@ -158,13 +158,49 @@ class ToolPluginRegistry:
 
         Only distributes deps that a plugin has declared in its dependencies.
         Can be called multiple times (incremental binding).
+
+        Plugins are visited in provider → consumer (topological) order derived
+        from their declared inter-plugin dependencies, so a provider is always
+        bound before any plugin that depends on it. Ordering is independent of
+        registration/discovery order; see ``_topological_plugin_order``.
         """
-        for plugin in self._plugins.values():
+        for plugin_id in self._topological_plugin_order():
+            plugin = self._plugins.get(plugin_id)
+            if plugin is None:
+                continue
             relevant = {k: v for k, v in deps.items() if k in plugin.dependencies}
             if relevant:
                 plugin.bind_runtime(**relevant)
         # Track last-bound deps for potential re-injection on plugin reload
         self._last_bound_deps.update(deps)
+
+    def _topological_plugin_order(self) -> List[str]:
+        """Return plugin ids ordered so providers precede their consumers.
+
+        The dependency graph is built from ``{plugin_id: plugin.dependencies}``,
+        keeping only dependency names that name another registered plugin —
+        external runtime deps (e.g. ``file_read_gate``) are not plugins and do
+        not constrain ordering. ``graphlib.TopologicalSorter`` yields providers
+        before dependents while preserving registration order among independent
+        plugins. A dependency cycle cannot be ordered, so the original
+        registration order is used for all plugins as a safe fallback.
+        """
+        from graphlib import CycleError, TopologicalSorter
+
+        plugin_ids = list(self._plugins.keys())
+        registered = set(plugin_ids)
+        graph: dict[str, set[str]] = {
+            pid: {dep for dep in self._plugins[pid].dependencies if dep in registered}
+            for pid in plugin_ids
+        }
+        try:
+            return list(TopologicalSorter(graph).static_order())
+        except CycleError:
+            logger.warning(
+                "Circular inter-plugin dependency detected; falling back to "
+                "registration order for bind_runtime distribution"
+            )
+            return plugin_ids
 
     # ── Assembly ──
 
