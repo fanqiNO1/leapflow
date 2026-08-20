@@ -1,12 +1,13 @@
 """Self-Management plugin — lets the Agent introspect and manage its own plugin composition.
 
-This is the Phase 2.4 Self-Modification MVP. It exposes eleven tools:
+This is the Phase 2.4 Self-Modification MVP. It exposes twelve tools:
 
 Read-only governance (no approval needed):
     - plugin_list     : list all registered plugins across Tool/Gateway/LLM subsystems
     - plugin_status   : detailed info about one plugin (tools, deps, fiber state, generation)
     - plugin_versions : inspect recorded profile plugin versions and the active pointer
     - plugin_propose  : create a side-effect-free proposal from capability-gap evidence
+    - assess_compatibility : assess foreign plugin manifest compatibility with LeapFlow
 
 Generation (no approval needed — produces validated code without installing):
     - plugin_generate : describe a capability need; the LLM produces conformant
@@ -379,6 +380,49 @@ class SelfManagementPlugin:
         except (AttributeError, RuntimeError) as exc:
             return {"ok": False, "error": f"Generation failed: {exc}"}
 
+    # ── Compatibility assessment (read-only) ─────────────────
+
+    async def _assess_compatibility_handler(self, manifest: dict = None, **kwargs: Any) -> Dict[str, Any]:
+        """Assess whether a foreign plugin manifest is compatible with LeapFlow."""
+        if manifest is None:
+            manifest = kwargs.get("manifest")
+        if not manifest or not isinstance(manifest, dict):
+            return {"ok": False, "error": "manifest parameter is required (dict)"}
+
+        try:
+            from leapflow.learning.compatibility import assess_plugin
+
+            report = assess_plugin(manifest)
+            return {
+                "ok": True,
+                "final_verdict": report.final_verdict.value,
+                "is_installable": report.is_installable(),
+                "target_protocol": report.target_protocol,
+                "rejection_reason": report.rejection_reason,
+                "adaptation_notes": report.adaptation_notes,
+                "adapter_spec": {
+                    "source_interface": report.adapter_spec.source_interface,
+                    "target_protocol": report.adapter_spec.target_protocol,
+                    "bridge_type": report.adapter_spec.bridge_type,
+                    "shim_methods": report.adapter_spec.shim_methods,
+                    "estimated_complexity": report.adapter_spec.estimated_complexity,
+                } if report.adapter_spec else None,
+                "stages": [
+                    {
+                        "stage_name": s.stage_name,
+                        "passed": s.passed,
+                        "verdict": s.verdict.value if s.verdict else None,
+                        "details": s.details,
+                    }
+                    for s in report.stages
+                ],
+                "manifest_name": report.manifest.name,
+                "manifest_version": report.manifest.version,
+            }
+        except (ImportError, AttributeError, TypeError, ValueError) as exc:
+            logger.warning("assess_compatibility failed: %s", exc, exc_info=True)
+            return {"ok": False, "error": f"Assessment failed: {exc}"}
+
     # ── State-mutating (requires approval) ─────────────────
 
     async def _plugin_install_handler(
@@ -429,7 +473,8 @@ class SelfManagementPlugin:
             if code:
                 result = await self._install_from_code(plugin_id, code, proposal=proposal, version_label=version_label)
             elif marketplace_name:
-                result = await self._install_from_marketplace(plugin_id, marketplace_name)
+                # Run compatibility gate for marketplace installs (BLOCKING)
+                result = await self._install_from_marketplace_with_gate(plugin_id, marketplace_name)
             else:
                 return {"ok": False, "error": "Must provide either code or marketplace_name"}
             if proposal_id:
@@ -541,6 +586,59 @@ class SelfManagementPlugin:
             result["version"] = version_info.get("version", "")
         except (RuntimeError, OSError, ValueError, AttributeError) as exc:
             logger.debug("plugin version recording skipped for %s: %s", plugin_id, exc, exc_info=True)
+        return result
+
+    async def _install_from_marketplace_with_gate(
+        self, plugin_id: str, marketplace_name: str
+    ) -> Dict[str, Any]:
+        """Install from marketplace with compatibility gate pre-check.
+
+        Runs assess_plugin() on the resolved manifest before attempting install.
+        If verdict is INCOMPATIBLE → returns structured error without install.
+        If ADAPTABLE → includes adaptation_notes alongside the install result.
+        """
+        from pathlib import Path
+
+        client = self._marketplace_client
+        if client is None:
+            return {
+                "ok": False,
+                "error": (
+                    "Marketplace not configured "
+                    "(set plugin_marketplace_root or plugin_marketplace_url)"
+                ),
+            }
+
+        # Resolve manifest for compatibility check
+        try:
+            manifest_data = client.resolve_manifest(marketplace_name)
+        except (OSError, ValueError, RuntimeError, AttributeError):
+            manifest_data = None
+
+        compatibility_notes: list[str] = []
+        if manifest_data and isinstance(manifest_data, dict):
+            try:
+                from leapflow.learning.compatibility import assess_plugin
+
+                report = assess_plugin(manifest_data)
+                if not report.is_installable():
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"Compatibility gate: plugin '{marketplace_name}' is INCOMPATIBLE "
+                            f"with LeapFlow. Reason: {report.rejection_reason}"
+                        ),
+                        "verdict": report.final_verdict.value,
+                        "rejection_reason": report.rejection_reason,
+                    }
+                if report.adaptation_notes:
+                    compatibility_notes = list(report.adaptation_notes)
+            except (ImportError, AttributeError, TypeError, ValueError):
+                pass  # Degrade gracefully — proceed without gate
+
+        result = await self._install_from_marketplace(plugin_id, marketplace_name)
+        if compatibility_notes and result.get("ok"):
+            result["compatibility_notes"] = compatibility_notes
         return result
 
     async def _install_from_marketplace(self, plugin_id: str, marketplace_name: str) -> Dict[str, Any]:
@@ -1294,6 +1392,35 @@ class SelfManagementPlugin:
                     "idempotency_scope": "turn",
                     "summary": "create a reviewable plugin proposal without side effects",
                 },
+            ),
+            ToolMetadata(
+                name="assess_compatibility",
+                description=(
+                    "Assess whether a foreign plugin manifest is compatible with "
+                    "LeapFlow's plugin architecture. Returns a structured compatibility "
+                    "report with verdict (COMPATIBLE/ADAPTABLE/PARTIAL/INCOMPATIBLE), "
+                    "target protocol mapping, and adaptation notes."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "manifest": {
+                            "type": "object",
+                            "description": "The plugin manifest to assess (LeapFlow or DSH format).",
+                        },
+                    },
+                    "required": ["manifest"],
+                },
+                handler=self._assess_compatibility_handler,
+                x_leapflow={
+                    "category": "plugin_management",
+                    "risk_level": "none",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                    "effect": "read",
+                    "summary": "assess foreign plugin manifest compatibility",
+                },
+                mutates_state=False,
             ),
             ToolMetadata(
                 name="plugin_generate",

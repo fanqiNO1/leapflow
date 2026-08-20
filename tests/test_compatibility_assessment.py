@@ -319,7 +319,7 @@ class TestPipelineE2E:
     """End-to-end tests for the assess_plugin() pipeline."""
 
     def test_dsh_tools_plugin_compatible(self) -> None:
-        """DSH tools plugin produces CompatibilityReport(final_verdict=COMPATIBLE)."""
+        """DSH tools plugin produces CompatibilityReport(final_verdict=COMPATIBLE or ADAPTABLE)."""
         raw = {
             "name": "@deepseek-ai/dsh-web-search",
             "version": "0.1.0-rc.7",
@@ -330,7 +330,8 @@ class TestPipelineE2E:
         report = assess_plugin(raw)
 
         assert isinstance(report, CompatibilityReport)
-        assert report.final_verdict == Verdict.COMPATIBLE
+        # TypeScript source triggers ADAPTABLE (needs JSON-RPC bridge)
+        assert report.final_verdict in (Verdict.COMPATIBLE, Verdict.ADAPTABLE)
         assert report.target_protocol == "ToolPlugin"
         assert report.rejection_reason is None
         assert report.manifest.name == "@deepseek-ai/dsh-web-search"
@@ -418,7 +419,7 @@ class TestPipelineE2E:
         assert report.manifest.name == "pre_parsed_plugin"
 
     def test_dsh_tools_category_plugin_compatible(self) -> None:
-        """DSH tools-category plugin produces COMPATIBLE verdict."""
+        """DSH tools-category plugin produces installable verdict."""
         raw = {
             "name": "@deepseek-ai/dsh-tools-fs",
             "version": "0.1.0",
@@ -427,7 +428,8 @@ class TestPipelineE2E:
             "dsh": {"category": "tools", "interfaces": ["fs_read", "fs_write"]},
         }
         report = assess_plugin(raw)
-        assert report.final_verdict == Verdict.COMPATIBLE
+        # TypeScript triggers ADAPTABLE (bridge needed)
+        assert report.final_verdict in (Verdict.COMPATIBLE, Verdict.ADAPTABLE)
         assert report.target_protocol == "ToolPlugin"
         assert report.rejection_reason is None
         assert report.manifest.category == "tools"
@@ -520,3 +522,726 @@ class TestPipelinePublicAPI:
         )
         with pytest.raises((AttributeError, TypeError)):
             spec.bridge_type = "other"  # type: ignore[misc]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# P1: Stage 3 — Interface Analyzer Tests
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestInterfaceAnalyzer:
+    """Tests for Stage 3: Interface Analyzer."""
+
+    def test_compatible_interfaces_tool_plugin(self) -> None:
+        """Plugin declaring 'execute' matches ToolPlugin requirements."""
+        from leapflow.learning.compatibility.stages.interface_analyzer import InterfaceAnalyzer
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            declared_interfaces=["execute", "describe"],
+        )
+        prior = [StageResult(
+            stage_name="category_resolver", passed=True,
+            evidence={"target_protocol": "ToolPlugin"},
+        )]
+        result = InterfaceAnalyzer().assess(manifest, prior)
+        assert result.passed is True
+        assert result.verdict != Verdict.INCOMPATIBLE
+        assert result.evidence["match_type"] in ("exact", "fuzzy")
+
+    def test_compatible_interfaces_llm_plugin(self) -> None:
+        """Plugin declaring 'generate' matches LLMProviderPlugin."""
+        from leapflow.learning.compatibility.stages.interface_analyzer import InterfaceAnalyzer
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="llm",
+            declared_interfaces=["generate", "stream"],
+        )
+        prior = [StageResult(
+            stage_name="category_resolver", passed=True,
+            evidence={"target_protocol": "LLMProviderPlugin"},
+        )]
+        result = InterfaceAnalyzer().assess(manifest, prior)
+        assert result.passed is True
+        assert result.evidence["match_type"] == "exact"
+
+    def test_missing_interfaces_incompatible(self) -> None:
+        """Plugin declaring completely unrelated interfaces → INCOMPATIBLE."""
+        from leapflow.learning.compatibility.stages.interface_analyzer import InterfaceAnalyzer
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            declared_interfaces=["paint_canvas", "render_3d"],
+        )
+        prior = [StageResult(
+            stage_name="category_resolver", passed=True,
+            evidence={"target_protocol": "ToolPlugin"},
+        )]
+        result = InterfaceAnalyzer().assess(manifest, prior)
+        assert result.passed is False
+        assert result.verdict == Verdict.INCOMPATIBLE
+
+    def test_empty_interfaces_assumed_compatible(self) -> None:
+        """Plugin with no declared interfaces assumed compatible (benefit of doubt)."""
+        from leapflow.learning.compatibility.stages.interface_analyzer import InterfaceAnalyzer
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            declared_interfaces=[],
+        )
+        prior = [StageResult(
+            stage_name="category_resolver", passed=True,
+            evidence={"target_protocol": "ToolPlugin"},
+        )]
+        result = InterfaceAnalyzer().assess(manifest, prior)
+        assert result.passed is True
+        assert result.evidence["match_type"] == "assumed"
+
+    def test_fuzzy_match_tool_interface(self) -> None:
+        """Fuzzy substring matching catches tool-like interfaces."""
+        from leapflow.learning.compatibility.stages.interface_analyzer import InterfaceAnalyzer
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            declared_interfaces=["my_custom_tool_execute"],
+        )
+        prior = [StageResult(
+            stage_name="category_resolver", passed=True,
+            evidence={"target_protocol": "ToolPlugin"},
+        )]
+        result = InterfaceAnalyzer().assess(manifest, prior)
+        assert result.passed is True
+        assert result.evidence["match_type"] == "fuzzy"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# P1: Stage 4 — Dependency Checker Tests
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestDependencyChecker:
+    """Tests for Stage 4: Dependency Checker."""
+
+    def test_all_satisfiable(self) -> None:
+        """All known LeapFlow-satisfiable dependencies pass cleanly."""
+        from leapflow.learning.compatibility.stages.dependency_checker import DependencyChecker
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            declared_dependencies=["config", "event_bus", "registry"],
+        )
+        result = DependencyChecker().assess(manifest, [])
+        assert result.passed is True
+        assert result.verdict is None or result.verdict == Verdict.COMPATIBLE
+
+    def test_some_shimmable(self) -> None:
+        """Shimmable deps produce ADAPTABLE verdict."""
+        from leapflow.learning.compatibility.stages.dependency_checker import DependencyChecker
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            declared_dependencies=["config", "cordis", "dsh-logger"],
+        )
+        result = DependencyChecker().assess(manifest, [])
+        assert result.passed is True
+        assert result.verdict == Verdict.ADAPTABLE
+        assert len(result.evidence["shimmable"]) >= 2
+
+    def test_blocking_deps(self) -> None:
+        """Blocking dependencies produce INCOMPATIBLE verdict."""
+        from leapflow.learning.compatibility.stages.dependency_checker import DependencyChecker
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            declared_dependencies=["config", "dsh-scope-service"],
+        )
+        result = DependencyChecker().assess(manifest, [])
+        assert result.passed is False
+        assert result.verdict == Verdict.INCOMPATIBLE
+        assert "dsh-scope-service" in result.evidence["blocking"]
+
+    def test_no_deps(self) -> None:
+        """No declared dependencies passes cleanly."""
+        from leapflow.learning.compatibility.stages.dependency_checker import DependencyChecker
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            declared_dependencies=[],
+        )
+        result = DependencyChecker().assess(manifest, [])
+        assert result.passed is True
+
+    def test_unknown_deps_satisfiable(self) -> None:
+        """Unknown external packages default to satisfiable."""
+        from leapflow.learning.compatibility.stages.dependency_checker import DependencyChecker
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            declared_dependencies=["lodash", "moment"],
+        )
+        result = DependencyChecker().assess(manifest, [])
+        assert result.passed is True
+        assert result.verdict is None  # All satisfiable
+
+
+# ═══════════════════════════════════════════════════════════════════
+# P1: Stage 5 — Execution Model Tests
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestExecutionModel:
+    """Tests for Stage 5: Execution Model Analyzer."""
+
+    def test_async_python_compatible(self) -> None:
+        """Async Python plugin is natively compatible."""
+        from leapflow.learning.compatibility.stages.execution_model import ExecutionModelAnalyzer
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            execution_model="async", source_language="python",
+        )
+        result = ExecutionModelAnalyzer().assess(manifest, [])
+        assert result.passed is True
+        assert result.verdict is None  # Fully compatible
+        assert result.evidence["requires_bridge"] is False
+
+    def test_sync_python_compatible(self) -> None:
+        """Sync Python plugin is compatible (wrapped in executor)."""
+        from leapflow.learning.compatibility.stages.execution_model import ExecutionModelAnalyzer
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            execution_model="sync", source_language="python",
+        )
+        result = ExecutionModelAnalyzer().assess(manifest, [])
+        assert result.passed is True
+        assert result.verdict is None
+
+    def test_worker_model_adaptable(self) -> None:
+        """Worker execution model maps to subprocess (ADAPTABLE)."""
+        from leapflow.learning.compatibility.stages.execution_model import ExecutionModelAnalyzer
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            execution_model="worker", source_language="python",
+        )
+        result = ExecutionModelAnalyzer().assess(manifest, [])
+        assert result.passed is True
+        assert result.verdict == Verdict.ADAPTABLE
+
+    def test_streaming_model_adaptable(self) -> None:
+        """Streaming model maps to async generator (ADAPTABLE)."""
+        from leapflow.learning.compatibility.stages.execution_model import ExecutionModelAnalyzer
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            execution_model="streaming", source_language="python",
+        )
+        result = ExecutionModelAnalyzer().assess(manifest, [])
+        assert result.passed is True
+        assert result.verdict == Verdict.ADAPTABLE
+
+    def test_typescript_requires_bridge(self) -> None:
+        """TypeScript source requires JSON-RPC bridge (ADAPTABLE)."""
+        from leapflow.learning.compatibility.stages.execution_model import ExecutionModelAnalyzer
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            execution_model="async", source_language="typescript",
+        )
+        result = ExecutionModelAnalyzer().assess(manifest, [])
+        assert result.passed is True
+        assert result.verdict == Verdict.ADAPTABLE
+        assert result.evidence["requires_bridge"] is True
+
+    def test_unknown_language_partial(self) -> None:
+        """Unknown source language produces PARTIAL verdict."""
+        from leapflow.learning.compatibility.stages.execution_model import ExecutionModelAnalyzer
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            execution_model="async", source_language="elixir",
+        )
+        result = ExecutionModelAnalyzer().assess(manifest, [])
+        assert result.passed is True
+        assert result.verdict == Verdict.PARTIAL
+
+
+# ═══════════════════════════════════════════════════════════════════
+# P1: Stage 6 — Security Classifier Tests
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestSecurityClassifier:
+    """Tests for Stage 6: Security Classifier."""
+
+    def test_no_permissions_low_risk(self) -> None:
+        """No permissions declared → LOW risk."""
+        from leapflow.learning.compatibility.stages.security_classifier import SecurityClassifier
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            permissions=[],
+        )
+        result = SecurityClassifier().assess(manifest, [])
+        assert result.passed is True
+        assert result.verdict is None
+        assert result.evidence["risk_level"] == "low"
+
+    def test_read_only_low_risk(self) -> None:
+        """Read-only permissions → LOW risk."""
+        from leapflow.learning.compatibility.stages.security_classifier import SecurityClassifier
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            permissions=["fs.read", "config.read"],
+        )
+        result = SecurityClassifier().assess(manifest, [])
+        assert result.passed is True
+        assert result.evidence["risk_level"] == "low"
+
+    def test_network_medium_risk(self) -> None:
+        """Network outbound → MEDIUM risk."""
+        from leapflow.learning.compatibility.stages.security_classifier import SecurityClassifier
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            permissions=["network.outbound"],
+        )
+        result = SecurityClassifier().assess(manifest, [])
+        assert result.passed is True
+        assert result.evidence["risk_level"] == "medium"
+
+    def test_shell_high_risk_sandbox(self) -> None:
+        """Shell execute → HIGH risk, recommend sandbox."""
+        from leapflow.learning.compatibility.stages.security_classifier import SecurityClassifier
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            permissions=["shell.execute"],
+            source_format="leapflow",
+        )
+        result = SecurityClassifier().assess(manifest, [])
+        assert result.passed is True
+        assert result.verdict == Verdict.ADAPTABLE
+        assert result.evidence["risk_level"] == "high"
+        assert result.evidence.get("recommendation") == "sandbox"
+
+    def test_critical_untrusted_rejected(self) -> None:
+        """CRITICAL permissions from untrusted DSH source → INCOMPATIBLE."""
+        from leapflow.learning.compatibility.stages.security_classifier import SecurityClassifier
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            permissions=["credential_access", "system_modify"],
+            source_format="dsh",
+        )
+        result = SecurityClassifier().assess(manifest, [])
+        assert result.passed is False
+        assert result.verdict == Verdict.INCOMPATIBLE
+        assert "reject" in result.evidence.get("recommendation", "")
+
+    def test_critical_trusted_sandbox(self) -> None:
+        """CRITICAL permissions from trusted source → sandbox recommendation."""
+        from leapflow.learning.compatibility.stages.security_classifier import SecurityClassifier
+
+        manifest = PluginManifestInput(
+            name="test", version="1.0.0", category="tools",
+            permissions=["credential_access"],
+            source_format="leapflow",
+        )
+        result = SecurityClassifier().assess(manifest, [])
+        assert result.passed is True
+        assert result.verdict == Verdict.ADAPTABLE
+        assert result.evidence["risk_level"] == "critical"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# P1: Verdict Synthesizer Tests
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestVerdictSynthesizer:
+    """Tests for the verdict synthesizer."""
+
+    def test_all_pass_compatible(self) -> None:
+        """All stages pass without adaptation → COMPATIBLE."""
+        from leapflow.learning.compatibility.verdict import synthesize_verdict
+
+        manifest = PluginManifestInput(name="t", version="1", category="tools")
+        stages = [
+            StageResult(stage_name="manifest_parser", passed=True),
+            StageResult(stage_name="category_resolver", passed=True, verdict=Verdict.COMPATIBLE,
+                        evidence={"target_protocol": "ToolPlugin"}),
+            StageResult(stage_name="interface_analyzer", passed=True),
+            StageResult(stage_name="dependency_checker", passed=True),
+            StageResult(stage_name="execution_model_analyzer", passed=True),
+            StageResult(stage_name="security_classifier", passed=True),
+        ]
+        report = synthesize_verdict(manifest, stages)
+        assert report.final_verdict == Verdict.COMPATIBLE
+        assert report.target_protocol == "ToolPlugin"
+
+    def test_one_adaptable(self) -> None:
+        """One stage ADAPTABLE → final ADAPTABLE."""
+        from leapflow.learning.compatibility.verdict import synthesize_verdict
+
+        manifest = PluginManifestInput(name="t", version="1", category="llm", source_language="typescript")
+        stages = [
+            StageResult(stage_name="manifest_parser", passed=True),
+            StageResult(stage_name="category_resolver", passed=True, verdict=Verdict.ADAPTABLE,
+                        evidence={"target_protocol": "LLMProviderPlugin"}, details="needs adapter"),
+            StageResult(stage_name="interface_analyzer", passed=True),
+            StageResult(stage_name="dependency_checker", passed=True),
+            StageResult(stage_name="execution_model_analyzer", passed=True, verdict=Verdict.ADAPTABLE,
+                        details="requires bridge"),
+            StageResult(stage_name="security_classifier", passed=True),
+        ]
+        report = synthesize_verdict(manifest, stages)
+        assert report.final_verdict == Verdict.ADAPTABLE
+        assert report.adapter_spec is not None
+        assert len(report.adaptation_notes) >= 1
+
+    def test_one_incompatible(self) -> None:
+        """One stage INCOMPATIBLE → final INCOMPATIBLE."""
+        from leapflow.learning.compatibility.verdict import synthesize_verdict
+
+        manifest = PluginManifestInput(name="t", version="1", category="tools")
+        stages = [
+            StageResult(stage_name="manifest_parser", passed=True),
+            StageResult(stage_name="category_resolver", passed=True, evidence={"target_protocol": "ToolPlugin"}),
+            StageResult(stage_name="interface_analyzer", passed=False, verdict=Verdict.INCOMPATIBLE,
+                        details="No matching interfaces"),
+            StageResult(stage_name="dependency_checker", passed=True),
+        ]
+        report = synthesize_verdict(manifest, stages)
+        assert report.final_verdict == Verdict.INCOMPATIBLE
+        assert report.rejection_reason == "No matching interfaces"
+
+    def test_partial_verdict(self) -> None:
+        """Stage with PARTIAL → final PARTIAL."""
+        from leapflow.learning.compatibility.verdict import synthesize_verdict
+
+        manifest = PluginManifestInput(name="t", version="1", category="guard")
+        stages = [
+            StageResult(stage_name="manifest_parser", passed=True),
+            StageResult(stage_name="category_resolver", passed=True, verdict=Verdict.PARTIAL,
+                        evidence={"target_protocol": "ToolPlugin"}, details="subset usable"),
+            StageResult(stage_name="interface_analyzer", passed=True),
+            StageResult(stage_name="dependency_checker", passed=True),
+            StageResult(stage_name="execution_model_analyzer", passed=True),
+            StageResult(stage_name="security_classifier", passed=True),
+        ]
+        report = synthesize_verdict(manifest, stages)
+        assert report.final_verdict == Verdict.PARTIAL
+
+    def test_mixed_adaptable_partial_yields_adaptable(self) -> None:
+        """ADAPTABLE takes precedence over PARTIAL."""
+        from leapflow.learning.compatibility.verdict import synthesize_verdict
+
+        manifest = PluginManifestInput(name="t", version="1", category="tools", source_language="typescript")
+        stages = [
+            StageResult(stage_name="manifest_parser", passed=True),
+            StageResult(stage_name="category_resolver", passed=True,
+                        evidence={"target_protocol": "ToolPlugin"}),
+            StageResult(stage_name="interface_analyzer", passed=True, verdict=Verdict.ADAPTABLE,
+                        details="fuzzy match"),
+            StageResult(stage_name="dependency_checker", passed=True),
+            StageResult(stage_name="execution_model_analyzer", passed=True, verdict=Verdict.PARTIAL,
+                        details="unknown model"),
+            StageResult(stage_name="security_classifier", passed=True),
+        ]
+        report = synthesize_verdict(manifest, stages)
+        assert report.final_verdict == Verdict.ADAPTABLE
+
+
+# ═══════════════════════════════════════════════════════════════════
+# P1: Full Pipeline Tests (6 Stages)
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestFullPipelineP1:
+    """Full pipeline tests exercising all 6 stages."""
+
+    def test_dsh_web_tool_all_6_stages(self) -> None:
+        """DSH web tool passes all 6 stages → COMPATIBLE."""
+        raw = {
+            "name": "@deepseek-ai/dsh-web-search",
+            "version": "0.1.0",
+            "main": "dist/index.js",
+            "keywords": ["web"],
+            "dsh": {
+                "category": "web",
+                "interfaces": ["web_search", "web_fetch"],
+                "permissions": ["network.outbound"],
+                "execution_model": "async",
+            },
+            "dependencies": {"node-fetch": "^3.0.0"},
+        }
+        report = assess_plugin(raw)
+        # Web tool with network perm and typescript: should be ADAPTABLE
+        # (typescript bridge + medium risk is acceptable)
+        assert report.final_verdict in (Verdict.COMPATIBLE, Verdict.ADAPTABLE)
+        assert report.is_installable() is True
+        assert len(report.stages) == 6
+
+    def test_dsh_llm_plugin_all_stages(self) -> None:
+        """DSH LLM plugin runs all 6 stages and produces ADAPTABLE."""
+        raw = {
+            "name": "@deepseek-ai/dsh-llm-openai",
+            "version": "0.2.0",
+            "main": "dist/index.js",
+            "keywords": ["llm"],
+            "dsh": {
+                "category": "llm",
+                "interfaces": ["complete", "stream"],
+                "permissions": ["network.outbound"],
+                "execution_model": "async",
+            },
+            "dependencies": {"node-fetch": "^3.0.0"},
+        }
+        report = assess_plugin(raw)
+        assert report.final_verdict == Verdict.ADAPTABLE
+        assert report.target_protocol == "LLMProviderPlugin"
+        assert report.adapter_spec is not None
+        assert len(report.stages) == 6
+
+    def test_blocking_deps_short_circuits_at_stage4(self) -> None:
+        """Plugin with blocking deps short-circuits at stage 4."""
+        manifest = PluginManifestInput(
+            name="blocked", version="1.0.0", category="tools",
+            declared_interfaces=["execute"],
+            declared_dependencies=["dsh-scope-service"],
+            source_language="python", execution_model="async",
+        )
+        report = assess_plugin(manifest)
+        assert report.final_verdict == Verdict.INCOMPATIBLE
+        # Should have stages 1-4 (short-circuit at 4)
+        assert len(report.stages) == 4
+        assert report.stages[3].stage_name == "dependency_checker"
+
+    def test_incompatible_interfaces_short_circuits_at_stage3(self) -> None:
+        """Plugin with completely wrong interfaces stops at stage 3."""
+        manifest = PluginManifestInput(
+            name="wrong_iface", version="1.0.0", category="tools",
+            declared_interfaces=["paint_canvas", "render_3d"],
+            source_language="python", execution_model="async",
+        )
+        report = assess_plugin(manifest)
+        assert report.final_verdict == Verdict.INCOMPATIBLE
+        assert len(report.stages) == 3
+        assert report.stages[2].stage_name == "interface_analyzer"
+
+    def test_critical_perms_untrusted_rejected_at_stage6(self) -> None:
+        """DSH plugin with critical permissions rejected at stage 6."""
+        raw = {
+            "name": "@malicious/dsh-rootkit",
+            "version": "0.0.1",
+            "main": "dist/index.js",
+            "keywords": ["tools"],
+            "dsh": {
+                "category": "tools",
+                "interfaces": ["execute"],
+                "permissions": ["credential_access", "system_modify"],
+                "execution_model": "async",
+            },
+        }
+        report = assess_plugin(raw)
+        assert report.final_verdict == Verdict.INCOMPATIBLE
+        assert len(report.stages) == 6
+        assert report.stages[5].stage_name == "security_classifier"
+
+    def test_python_async_tool_fully_compatible(self) -> None:
+        """Native Python async tool passes all stages cleanly."""
+        manifest = PluginManifestInput(
+            name="my_native_tool", version="2.0.0", category="tools",
+            declared_interfaces=["execute", "describe"],
+            declared_dependencies=["config", "event_bus"],
+            permissions=["fs.read"],
+            execution_model="async", source_language="python",
+            source_format="leapflow",
+        )
+        report = assess_plugin(manifest)
+        assert report.final_verdict == Verdict.COMPATIBLE
+        assert report.is_installable() is True
+        assert len(report.stages) == 6
+        assert report.adapter_spec is None
+
+    def test_typescript_worker_tool_adaptable(self) -> None:
+        """TypeScript worker tool needs bridge and model adaptation."""
+        raw = {
+            "name": "dsh-code-runner",
+            "version": "1.0.0",
+            "main": "dist/index.js",
+            "keywords": ["code-runtime"],
+            "dsh": {
+                "category": "code-runtime",
+                "interfaces": ["run", "exec_code"],
+                "permissions": ["shell.execute"],
+                "execution_model": "worker",
+            },
+            "dependencies": {"dsh-sdk": "^1.0.0"},
+        }
+        report = assess_plugin(raw)
+        assert report.final_verdict == Verdict.ADAPTABLE
+        assert report.is_installable() is True
+        assert report.adapter_spec is not None
+        assert len(report.stages) == 6
+
+
+# ═══════════════════════════════════════════════════════════════════
+# P1: assess_compatibility Tool Tests
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestAssessCompatibilityTool:
+    """Tests for the assess_compatibility tool handler."""
+
+    @pytest.mark.asyncio
+    async def test_assess_tool_returns_report(self) -> None:
+        """assess_compatibility returns structured report for valid manifest."""
+        from leapflow.plugins.tool_plugins.self_management import SelfManagementPlugin
+
+        plugin = SelfManagementPlugin()
+        manifest = {
+            "name": "test_plugin",
+            "version": "1.0.0",
+            "entry_point": "test.main",
+            "metadata": {"category": "tools"},
+            "declared_interfaces": ["execute"],
+        }
+        result = await plugin._assess_compatibility_handler(manifest=manifest)
+        assert result["ok"] is True
+        assert result["final_verdict"] in ("compatible", "adaptable", "partial", "incompatible")
+        assert result["is_installable"] is True
+        assert "stages" in result
+        assert len(result["stages"]) == 6
+
+    @pytest.mark.asyncio
+    async def test_assess_tool_incompatible_manifest(self) -> None:
+        """assess_compatibility returns INCOMPATIBLE for agent-loop category."""
+        from leapflow.plugins.tool_plugins.self_management import SelfManagementPlugin
+
+        plugin = SelfManagementPlugin()
+        manifest = {
+            "name": "@dsh/agent-loop",
+            "version": "1.0.0",
+            "main": "dist/index.js",
+            "keywords": ["agent-loop"],
+            "dsh": {"category": "agent-loop"},
+        }
+        result = await plugin._assess_compatibility_handler(manifest=manifest)
+        assert result["ok"] is True
+        assert result["final_verdict"] == "incompatible"
+        assert result["is_installable"] is False
+        assert result["rejection_reason"] is not None
+
+    @pytest.mark.asyncio
+    async def test_assess_tool_missing_manifest(self) -> None:
+        """assess_compatibility returns error when manifest is missing."""
+        from leapflow.plugins.tool_plugins.self_management import SelfManagementPlugin
+
+        plugin = SelfManagementPlugin()
+        result = await plugin._assess_compatibility_handler()
+        assert result["ok"] is False
+        assert "manifest" in result["error"].lower()
+
+    def test_assess_tool_is_registered(self) -> None:
+        """assess_compatibility tool is present in the plugin's tools list."""
+        from leapflow.plugins.tool_plugins.self_management import SelfManagementPlugin
+
+        plugin = SelfManagementPlugin()
+        tool_names = [t.name for t in plugin.tools]
+        assert "assess_compatibility" in tool_names
+        # Verify metadata
+        tool = next(t for t in plugin.tools if t.name == "assess_compatibility")
+        assert tool.mutates_state is False
+        assert tool.x_leapflow["risk_level"] == "none"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# P1: Install Gate Tests
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestInstallGate:
+    """Tests for the compatibility install gate."""
+
+    @pytest.mark.asyncio
+    async def test_marketplace_incompatible_blocked(self) -> None:
+        """Marketplace install with INCOMPATIBLE manifest is blocked."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leapflow.plugins.tool_plugins.self_management import SelfManagementPlugin
+
+        plugin = SelfManagementPlugin()
+        # Mock approval gate
+        plugin._plugin_approval_gate = MagicMock()
+        plugin._plugin_approval_gate.check = AsyncMock(return_value=(True, None))
+
+        # Mock marketplace client that returns an incompatible manifest
+        mock_client = MagicMock()
+        mock_client.resolve_manifest = MagicMock(return_value={
+            "name": "@dsh/agent-loop",
+            "version": "1.0.0",
+            "main": "dist/index.js",
+            "keywords": ["agent-loop"],
+            "dsh": {"category": "agent-loop"},
+        })
+        plugin._marketplace_client = mock_client
+
+        result = await plugin._install_from_marketplace_with_gate("test_plugin", "agent-loop-pkg")
+        assert result["ok"] is False
+        assert "INCOMPATIBLE" in result["error"]
+        assert result.get("verdict") == "incompatible"
+
+    @pytest.mark.asyncio
+    async def test_marketplace_compatible_proceeds(self) -> None:
+        """Marketplace install with compatible manifest proceeds to install."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from leapflow.plugins.tool_plugins.self_management import SelfManagementPlugin
+
+        plugin = SelfManagementPlugin()
+
+        # Mock marketplace client with compatible manifest
+        mock_client = MagicMock()
+        mock_client.resolve_manifest = MagicMock(return_value={
+            "name": "my-tool",
+            "version": "1.0.0",
+            "entry_point": "my_tool.main",
+            "metadata": {"category": "tools"},
+        })
+        mock_client.install = MagicMock(return_value={
+            "ok": True,
+            "installed_path": "/tmp/test_plugin.py",
+        })
+        plugin._marketplace_client = mock_client
+
+        # Mock the actual install to avoid file system operations
+        with patch.object(plugin, "_install_from_marketplace", new_callable=AsyncMock) as mock_install:
+            mock_install.return_value = {"ok": True, "action": "install"}
+            result = await plugin._install_from_marketplace_with_gate("test_plugin", "my-tool-pkg")
+
+        assert result["ok"] is True
+
+    @pytest.mark.asyncio
+    async def test_marketplace_no_manifest_still_proceeds(self) -> None:
+        """If resolve_manifest fails, gate degrades gracefully and proceeds."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from leapflow.plugins.tool_plugins.self_management import SelfManagementPlugin
+
+        plugin = SelfManagementPlugin()
+
+        # Mock marketplace client where resolve_manifest raises
+        mock_client = MagicMock()
+        mock_client.resolve_manifest = MagicMock(side_effect=RuntimeError("not found"))
+        plugin._marketplace_client = mock_client
+
+        with patch.object(plugin, "_install_from_marketplace", new_callable=AsyncMock) as mock_install:
+            mock_install.return_value = {"ok": True, "action": "install"}
+            result = await plugin._install_from_marketplace_with_gate("test_plugin", "some-pkg")
+
+        # Should proceed to install despite gate failure
+        assert result["ok"] is True

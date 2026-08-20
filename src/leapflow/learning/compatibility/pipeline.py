@@ -1,8 +1,16 @@
 """Assessment pipeline orchestrator.
 
-Entry point for the Plugin Compatibility Assessment Engine (P0).
-Runs stages 1 (ManifestParser) and 2 (CategoryResolver) sequentially,
-short-circuits on INCOMPATIBLE, and synthesizes a CompatibilityReport.
+Entry point for the Plugin Compatibility Assessment Engine.
+Runs stages 1-6 sequentially, short-circuits on INCOMPATIBLE,
+and synthesizes a final CompatibilityReport via the verdict module.
+
+Stages:
+  1. ManifestParser — parse and normalize raw manifest
+  2. CategoryResolver — look up category in pluggability taxonomy
+  3. InterfaceAnalyzer — check declared interfaces against protocol requirements
+  4. DependencyChecker — classify dependencies for satisfiability
+  5. ExecutionModelAnalyzer — check execution model and language compatibility
+  6. SecurityClassifier — assess permissions and recommend isolation
 """
 
 from __future__ import annotations
@@ -11,7 +19,6 @@ from pathlib import Path
 from typing import Union
 
 from leapflow.learning.compatibility.protocol import (
-    AdapterSpec,
     CompatibilityReport,
     PluginManifestInput,
     StageResult,
@@ -69,7 +76,6 @@ def assess_plugin(
         parsed_manifest = parse_result.evidence["manifest"]
     elif isinstance(manifest, (str, Path)):
         # File path support — P0 only reads JSON/dict manifests
-        # For P0, treat string as a path that should be a dict
         return CompatibilityReport(
             manifest=PluginManifestInput(
                 name="<unknown>",
@@ -122,31 +128,70 @@ def assess_plugin(
             rejection_reason=category_result.details,
         )
 
-    # ── Synthesize report from stage results ─────────────────────────
-    target_protocol = category_result.evidence.get("target_protocol")
-    final_verdict = category_result.verdict or Verdict.COMPATIBLE
+    # ── Stages 3-6: Deep analysis ───────────────────────────────────
+    # Lazy imports to avoid circular deps and keep module importable standalone
+    from leapflow.learning.compatibility.stages.dependency_checker import (
+        DependencyChecker,
+    )
+    from leapflow.learning.compatibility.stages.execution_model import (
+        ExecutionModelAnalyzer,
+    )
+    from leapflow.learning.compatibility.stages.interface_analyzer import (
+        InterfaceAnalyzer,
+    )
+    from leapflow.learning.compatibility.stages.security_classifier import (
+        SecurityClassifier,
+    )
+    from leapflow.learning.compatibility.verdict import synthesize_verdict
 
-    # Build adaptation notes
-    adaptation_notes: list[str] = []
-    if final_verdict == Verdict.ADAPTABLE:
-        adaptation_notes.append(category_result.details)
-
-    # Generate adapter spec for ADAPTABLE verdicts
-    adapter_spec: AdapterSpec | None = None
-    if final_verdict == Verdict.ADAPTABLE and target_protocol:
-        adapter_spec = AdapterSpec(
-            source_interface=parsed_manifest.category,
-            target_protocol=target_protocol,
-            bridge_type="json_rpc_bridge" if parsed_manifest.source_language == "typescript" else "protocol_wrapper",
-            shim_methods=[],
-            estimated_complexity="low",
+    # Stage 3: Interface analysis
+    interface_result = InterfaceAnalyzer().assess(parsed_manifest, stages)
+    stages.append(interface_result)
+    if interface_result.verdict == Verdict.INCOMPATIBLE:
+        return CompatibilityReport(
+            manifest=parsed_manifest,
+            stages=stages,
+            final_verdict=Verdict.INCOMPATIBLE,
+            target_protocol=category_result.evidence.get("target_protocol"),
+            rejection_reason=interface_result.details,
         )
 
-    return CompatibilityReport(
-        manifest=parsed_manifest,
-        stages=stages,
-        final_verdict=final_verdict,
-        target_protocol=target_protocol,
-        adaptation_notes=adaptation_notes,
-        adapter_spec=adapter_spec,
-    )
+    # Stage 4: Dependency check
+    dep_result = DependencyChecker().assess(parsed_manifest, stages)
+    stages.append(dep_result)
+    if dep_result.verdict == Verdict.INCOMPATIBLE:
+        return CompatibilityReport(
+            manifest=parsed_manifest,
+            stages=stages,
+            final_verdict=Verdict.INCOMPATIBLE,
+            target_protocol=category_result.evidence.get("target_protocol"),
+            rejection_reason=dep_result.details,
+        )
+
+    # Stage 5: Execution model analysis
+    exec_result = ExecutionModelAnalyzer().assess(parsed_manifest, stages)
+    stages.append(exec_result)
+    # Execution model never produces INCOMPATIBLE, but defensive check
+    if exec_result.verdict == Verdict.INCOMPATIBLE:
+        return CompatibilityReport(
+            manifest=parsed_manifest,
+            stages=stages,
+            final_verdict=Verdict.INCOMPATIBLE,
+            target_protocol=category_result.evidence.get("target_protocol"),
+            rejection_reason=exec_result.details,
+        )
+
+    # Stage 6: Security classification
+    security_result = SecurityClassifier().assess(parsed_manifest, stages)
+    stages.append(security_result)
+    if security_result.verdict == Verdict.INCOMPATIBLE:
+        return CompatibilityReport(
+            manifest=parsed_manifest,
+            stages=stages,
+            final_verdict=Verdict.INCOMPATIBLE,
+            target_protocol=category_result.evidence.get("target_protocol"),
+            rejection_reason=security_result.details,
+        )
+
+    # ── Final verdict synthesis ──────────────────────────────────────
+    return synthesize_verdict(parsed_manifest, stages)
