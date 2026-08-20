@@ -1245,3 +1245,555 @@ class TestInstallGate:
 
         # Should proceed to install despite gate failure
         assert result["ok"] is True
+
+# ═══════════════════════════════════════════════════════════════════
+# P2: File-Path Manifest Loading Tests
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestFilePathManifestLoading:
+    """Tests for assess_plugin() accepting a file path (str or Path)."""
+
+    def test_load_from_json_path_string(self, tmp_path) -> None:
+        """A path-like string ending in .json is read and assessed."""
+        import json
+
+        manifest_file = tmp_path / "plugin.json"
+        manifest_file.write_text(
+            json.dumps(
+                {
+                    "name": "my_file_tool",
+                    "version": "1.0.0",
+                    "entry_point": "my_file_tool.main",
+                    "metadata": {"category": "tools"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        report = assess_plugin(str(manifest_file))
+
+        assert isinstance(report, CompatibilityReport)
+        assert report.final_verdict == Verdict.COMPATIBLE
+        assert report.manifest.name == "my_file_tool"
+
+    def test_load_from_path_object(self, tmp_path) -> None:
+        """A pathlib.Path object is read and assessed."""
+        import json
+        from pathlib import Path
+
+        manifest_file = tmp_path / "dsh_plugin.json"
+        manifest_file.write_text(
+            json.dumps(
+                {
+                    "name": "@deepseek-ai/dsh-web-search",
+                    "version": "0.1.0",
+                    "main": "dist/index.js",
+                    "keywords": ["web"],
+                    "dsh": {"category": "web", "interfaces": ["web_search"]},
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert isinstance(manifest_file, Path)
+        report = assess_plugin(manifest_file)
+
+        assert report.is_installable() is True
+        assert report.manifest.name == "@deepseek-ai/dsh-web-search"
+
+    def test_nonexistent_file_incompatible(self, tmp_path) -> None:
+        """A missing file path resolves to INCOMPATIBLE with a clear reason."""
+        missing = tmp_path / "does_not_exist.json"
+        report = assess_plugin(str(missing))
+
+        assert report.final_verdict == Verdict.INCOMPATIBLE
+        assert report.rejection_reason is not None
+        assert "not found" in report.rejection_reason.lower()
+
+    def test_nonexistent_path_object_incompatible(self, tmp_path) -> None:
+        """A missing Path object resolves to INCOMPATIBLE."""
+        missing = tmp_path / "nope.json"
+        report = assess_plugin(missing)
+
+        assert report.final_verdict == Verdict.INCOMPATIBLE
+        assert report.is_installable() is False
+
+    def test_invalid_json_incompatible(self, tmp_path) -> None:
+        """A file with invalid JSON resolves to INCOMPATIBLE with details."""
+        bad = tmp_path / "broken.json"
+        bad.write_text("{ this is : not valid json ,", encoding="utf-8")
+        report = assess_plugin(str(bad))
+
+        assert report.final_verdict == Verdict.INCOMPATIBLE
+        assert report.rejection_reason is not None
+        assert "json" in report.rejection_reason.lower()
+
+    def test_json_file_not_object_incompatible(self, tmp_path) -> None:
+        """A JSON file containing a non-object (list) is INCOMPATIBLE."""
+        arr = tmp_path / "arr.json"
+        arr.write_text("[1, 2, 3]", encoding="utf-8")
+        report = assess_plugin(str(arr))
+
+        assert report.final_verdict == Verdict.INCOMPATIBLE
+        assert "object" in (report.rejection_reason or "").lower()
+
+    def test_non_path_string_unsupported(self) -> None:
+        """A string that is not path-like is an unsupported manifest format."""
+        report = assess_plugin("just some random text")
+
+        assert report.final_verdict == Verdict.INCOMPATIBLE
+        assert "unsupported manifest format" in (report.rejection_reason or "").lower()
+
+    def test_relative_dot_path_recognized(self, tmp_path, monkeypatch) -> None:
+        """A './'-prefixed relative path is recognized as a file path."""
+        import json
+
+        manifest_file = tmp_path / "rel.json"
+        manifest_file.write_text(
+            json.dumps(
+                {
+                    "name": "rel_tool",
+                    "version": "1.0.0",
+                    "entry_point": "rel_tool.main",
+                    "metadata": {"category": "tools"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        report = assess_plugin("./rel.json")
+
+        assert report.final_verdict == Verdict.COMPATIBLE
+        assert report.manifest.name == "rel_tool"
+
+    def test_dict_input_still_supported(self) -> None:
+        """Normalizing file paths does not regress plain dict input."""
+        report = assess_plugin(
+            {
+                "name": "dict_tool",
+                "version": "1.0.0",
+                "entry_point": "dict_tool.main",
+                "metadata": {"category": "tools"},
+            }
+        )
+        assert report.final_verdict == Verdict.COMPATIBLE
+
+
+# ═══════════════════════════════════════════════════════════════════
+# P2: DSH → LeapFlow Manifest Converter Tests
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestManifestConverter:
+    """Tests for convert_dsh_to_leapflow()."""
+
+    def test_full_mapping(self) -> None:
+        """Full DSH manifest maps every field correctly."""
+        from leapflow.learning.compatibility.manifest_converter import (
+            convert_dsh_to_leapflow,
+        )
+
+        dsh = {
+            "name": "@deepseek-ai/dsh-web-search",
+            "version": "0.1.0-rc.7",
+            "main": "dist/index.js",
+            "description": "Web search for DSH",
+            "keywords": ["web"],
+            "dependencies": {"node-fetch": "^3.0.0"},
+            "dsh": {"category": "web"},
+        }
+        result = convert_dsh_to_leapflow(dsh)
+
+        assert result["name"] == "web_search"
+        assert result["version"] == "0.1.0-rc.7"
+        assert result["entry_point"] == "dist/index.js"
+        assert result["description"] == "Web search for DSH"
+        assert result["requires_sandbox"] is True
+        assert result["checksum_sha256"] is None
+        assert result["plugin_type"] == "tool"
+        assert result["dependencies"] == ["node-fetch"]
+        assert result["x_dsh_category"] == "web"
+        assert result["x_dsh_original"] == dsh
+
+    def test_name_prefix_stripping(self) -> None:
+        """Org scope and dsh- prefix are stripped; hyphens become underscores."""
+        from leapflow.learning.compatibility.manifest_converter import (
+            convert_dsh_to_leapflow,
+        )
+
+        result = convert_dsh_to_leapflow(
+            {"name": "@org/dsh-shell-exec", "version": "1.0.0"}
+        )
+        assert result["name"] == "shell_exec"
+
+    def test_name_without_prefix(self) -> None:
+        """A plain hyphenated name just gets hyphens converted."""
+        from leapflow.learning.compatibility.manifest_converter import (
+            convert_dsh_to_leapflow,
+        )
+
+        result = convert_dsh_to_leapflow({"name": "code-runner", "version": "1.0.0"})
+        assert result["name"] == "code_runner"
+
+    def test_empty_name_fallback(self) -> None:
+        """Missing name falls back to a placeholder."""
+        from leapflow.learning.compatibility.manifest_converter import (
+            convert_dsh_to_leapflow,
+        )
+
+        result = convert_dsh_to_leapflow({"version": "1.0.0"})
+        assert result["name"] == "unknown_plugin"
+
+    def test_no_description_defaults_empty(self) -> None:
+        """A DSH manifest with no description yields an empty string."""
+        from leapflow.learning.compatibility.manifest_converter import (
+            convert_dsh_to_leapflow,
+        )
+
+        result = convert_dsh_to_leapflow(
+            {"name": "dsh-fs", "version": "1.0.0", "main": "index.js"}
+        )
+        assert result["description"] == ""
+
+    def test_no_dsh_section_category_from_keywords(self) -> None:
+        """With no dsh section, category is inferred from keywords."""
+        from leapflow.learning.compatibility.manifest_converter import (
+            convert_dsh_to_leapflow,
+        )
+
+        result = convert_dsh_to_leapflow(
+            {
+                "name": "dsh-fs-read",
+                "version": "1.0.0",
+                "keywords": ["filesystem", "read"],
+            }
+        )
+        assert result["x_dsh_category"] == "filesystem"
+
+    def test_no_dsh_no_keywords_category_empty(self) -> None:
+        """No dsh section and no keywords → empty category."""
+        from leapflow.learning.compatibility.manifest_converter import (
+            convert_dsh_to_leapflow,
+        )
+
+        result = convert_dsh_to_leapflow({"name": "dsh-x", "version": "1.0.0"})
+        assert result["x_dsh_category"] == ""
+
+    def test_missing_version_defaults(self) -> None:
+        """Missing version defaults to 0.0.0."""
+        from leapflow.learning.compatibility.manifest_converter import (
+            convert_dsh_to_leapflow,
+        )
+
+        result = convert_dsh_to_leapflow({"name": "dsh-x", "main": "index.js"})
+        assert result["version"] == "0.0.0"
+
+    def test_dependencies_as_list(self) -> None:
+        """A list-form dependencies field is preserved (string items only)."""
+        from leapflow.learning.compatibility.manifest_converter import (
+            convert_dsh_to_leapflow,
+        )
+
+        result = convert_dsh_to_leapflow(
+            {"name": "dsh-x", "version": "1.0.0", "dependencies": ["a", "b", 3]}
+        )
+        assert result["dependencies"] == ["a", "b"]
+
+    def test_original_is_copied_not_referenced(self) -> None:
+        """x_dsh_original is a copy so mutating the source does not leak in."""
+        from leapflow.learning.compatibility.manifest_converter import (
+            convert_dsh_to_leapflow,
+        )
+
+        dsh = {"name": "dsh-x", "version": "1.0.0"}
+        result = convert_dsh_to_leapflow(dsh)
+        dsh["name"] = "mutated"
+        assert result["x_dsh_original"]["name"] == "dsh-x"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# P2: Adapter Generator Tests
+# ═══════════════════════════════════════════════════════════════════
+
+
+def _sample_adapter_inputs():
+    """Build a representative (AdapterSpec, PluginManifestInput) pair."""
+    spec = AdapterSpec(
+        source_interface="web",
+        target_protocol="ToolPlugin",
+        bridge_type="json_rpc_bridge",
+        shim_methods=["config"],
+        estimated_complexity="low",
+    )
+    manifest = PluginManifestInput(
+        name="@deepseek-ai/dsh-web-search",
+        version="0.1.0",
+        category="web",
+        declared_interfaces=["web_search", "web_fetch"],
+        source_language="typescript",
+        raw_manifest={"main": "dist/index.js"},
+        source_format="dsh",
+    )
+    return spec, manifest
+
+
+class TestAdapterGeneratorTemplate:
+    """Tests for generate_adapter_template() (no LLM)."""
+
+    def test_template_produces_valid_python(self, tmp_path) -> None:
+        """The generated template is syntactically valid Python (py_compile)."""
+        import py_compile
+
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_template,
+        )
+
+        spec, manifest = _sample_adapter_inputs()
+        code = generate_adapter_template(spec, manifest)
+
+        out = tmp_path / "generated_adapter.py"
+        out.write_text(code, encoding="utf-8")
+        # Raises PyCompileError if the output is not valid Python.
+        py_compile.compile(str(out), doraise=True)
+
+    def test_template_compiles_with_compile_builtin(self) -> None:
+        """The generated template compiles via the compile() builtin."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_template,
+        )
+
+        spec, manifest = _sample_adapter_inputs()
+        code = generate_adapter_template(spec, manifest)
+        # Should not raise
+        compile(code, "<generated>", "exec")
+
+    def test_template_class_name_and_plugin_id(self) -> None:
+        """Output contains the correct class name and plugin_id."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_template,
+        )
+
+        spec, manifest = _sample_adapter_inputs()
+        code = generate_adapter_template(spec, manifest)
+
+        assert "class DshWebSearchBridgePlugin:" in code
+        assert 'return "dsh_web_search_bridge"' in code
+
+    def test_template_declares_handler_per_interface(self) -> None:
+        """Each declared interface has a ToolMetadata entry and handler."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_template,
+        )
+
+        spec, manifest = _sample_adapter_inputs()
+        code = generate_adapter_template(spec, manifest)
+
+        assert 'name="web_search"' in code
+        assert 'name="web_fetch"' in code
+        assert "async def _handle_web_search(" in code
+        assert "async def _handle_web_fetch(" in code
+
+    def test_template_notes_auto_generated_and_source(self) -> None:
+        """Docstring notes it is auto-generated and names the wrapped plugin."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_template,
+        )
+
+        spec, manifest = _sample_adapter_inputs()
+        code = generate_adapter_template(spec, manifest)
+
+        assert "auto-generated" in code.lower()
+        assert "@deepseek-ai/dsh-web-search" in code
+
+    def test_template_uses_sandbox_host_bridge(self) -> None:
+        """Handlers delegate to a SandboxHost subprocess bridge."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_template,
+        )
+
+        spec, manifest = _sample_adapter_inputs()
+        code = generate_adapter_template(spec, manifest)
+
+        assert "from leapflow.plugins.sandbox.sandbox_host import SandboxHost" in code
+        assert "self._invoke_bridge(" in code
+
+    def test_template_no_interfaces_falls_back_to_invoke(self) -> None:
+        """With no declared interfaces, a single 'invoke' tool is generated."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_template,
+        )
+
+        spec = AdapterSpec(
+            source_interface="tools",
+            target_protocol="ToolPlugin",
+            bridge_type="json_rpc_bridge",
+        )
+        manifest = PluginManifestInput(
+            name="dsh-empty",
+            version="1.0.0",
+            category="tools",
+            declared_interfaces=[],
+            source_language="typescript",
+        )
+        code = generate_adapter_template(spec, manifest)
+        compile(code, "<generated>", "exec")
+        assert 'name="invoke"' in code
+        assert "async def _handle_invoke(" in code
+
+    def test_template_sanitizes_interface_names(self) -> None:
+        """Interface names with dots/dashes become valid handler identifiers."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_template,
+        )
+
+        spec = AdapterSpec(
+            source_interface="tools",
+            target_protocol="ToolPlugin",
+            bridge_type="json_rpc_bridge",
+        )
+        manifest = PluginManifestInput(
+            name="dsh-weird",
+            version="1.0.0",
+            category="tools",
+            declared_interfaces=["fs.read-file"],
+            source_language="typescript",
+        )
+        code = generate_adapter_template(spec, manifest)
+        compile(code, "<generated>", "exec")
+        assert "async def _handle_fs_read_file(" in code
+        # The declared tool name is preserved verbatim on the ToolMetadata.
+        assert 'name="fs.read-file"' in code
+
+    def test_template_instantiable_and_conforms(self) -> None:
+        """The generated class can be exec'd, instantiated, and conforms."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_template,
+        )
+        from leapflow.plugins.protocol import ToolPlugin
+
+        spec, manifest = _sample_adapter_inputs()
+        code = generate_adapter_template(spec, manifest)
+
+        namespace: dict = {}
+        exec(compile(code, "<generated>", "exec"), namespace)
+        cls = namespace["DshWebSearchBridgePlugin"]
+        instance = cls()
+        assert instance.plugin_id == "dsh_web_search_bridge"
+        assert instance.category == "bridge"
+        assert len(instance.tools) == 2
+        assert isinstance(instance, ToolPlugin)
+
+
+class TestAdapterGeneratorLLM:
+    """Tests for generate_adapter_with_llm() (optional enhancement)."""
+
+    def test_no_provider_returns_template(self) -> None:
+        """When llm_provider is None, output equals the template."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_template,
+            generate_adapter_with_llm,
+        )
+
+        spec, manifest = _sample_adapter_inputs()
+        template = generate_adapter_template(spec, manifest)
+        result = generate_adapter_with_llm(spec, manifest, None)
+        assert result == template
+
+    def test_llm_provider_refines_template(self) -> None:
+        """A fake provider returning valid code is used over the template."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_with_llm,
+        )
+
+        refined = (
+            "# refined by llm\n"
+            "class RefinedAdapter:\n"
+            "    pass\n"
+        )
+
+        class FakeProvider:
+            def generate(self, prompt: str) -> str:
+                return "```python\n" + refined + "```"
+
+        spec, manifest = _sample_adapter_inputs()
+        result = generate_adapter_with_llm(spec, manifest, FakeProvider())
+        assert "RefinedAdapter" in result
+        assert "```" not in result
+
+    def test_llm_invalid_code_falls_back(self) -> None:
+        """A provider returning code that does not compile falls back."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_template,
+            generate_adapter_with_llm,
+        )
+
+        class BrokenProvider:
+            def generate(self, prompt: str) -> str:
+                return "def broken( : this is not python"
+
+        spec, manifest = _sample_adapter_inputs()
+        template = generate_adapter_template(spec, manifest)
+        result = generate_adapter_with_llm(spec, manifest, BrokenProvider())
+        assert result == template
+
+    def test_llm_empty_output_falls_back(self) -> None:
+        """A provider returning empty output falls back to template."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_template,
+            generate_adapter_with_llm,
+        )
+
+        class EmptyProvider:
+            def generate(self, prompt: str) -> str:
+                return "   "
+
+        spec, manifest = _sample_adapter_inputs()
+        template = generate_adapter_template(spec, manifest)
+        result = generate_adapter_with_llm(spec, manifest, EmptyProvider())
+        assert result == template
+
+    def test_llm_provider_raises_falls_back(self) -> None:
+        """A provider that raises degrades gracefully to the template."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_template,
+            generate_adapter_with_llm,
+        )
+
+        class RaisingProvider:
+            def generate(self, prompt: str) -> str:
+                raise RuntimeError("provider down")
+
+        spec, manifest = _sample_adapter_inputs()
+        template = generate_adapter_template(spec, manifest)
+        result = generate_adapter_with_llm(spec, manifest, RaisingProvider())
+        assert result == template
+
+    def test_llm_unsupported_provider_falls_back(self) -> None:
+        """A provider with no supported generation method falls back."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_template,
+            generate_adapter_with_llm,
+        )
+
+        class NoMethodProvider:
+            pass
+
+        spec, manifest = _sample_adapter_inputs()
+        template = generate_adapter_template(spec, manifest)
+        result = generate_adapter_with_llm(spec, manifest, NoMethodProvider())
+        assert result == template
+
+    def test_llm_async_achat_provider(self) -> None:
+        """An async achat-style provider is supported."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_with_llm,
+        )
+
+        refined = "class AsyncRefined:\n    pass\n"
+
+        class AsyncProvider:
+            async def achat(self, messages, stream=False):
+                return refined
+
+        spec, manifest = _sample_adapter_inputs()
+        result = generate_adapter_with_llm(spec, manifest, AsyncProvider())
+        assert "AsyncRefined" in result

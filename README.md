@@ -772,7 +772,7 @@ Plugin assembly is fully fiberized from startup; there is no bootstrap shim and 
 
 ### Self-Modification
 
-The `self_management` plugin exposes **eleven** tools to the agent:
+The `self_management` plugin exposes **twelve** tools to the agent:
 
 | Tool | Kind | Effect |
 |------|------|--------|
@@ -780,6 +780,7 @@ The `self_management` plugin exposes **eleven** tools to the agent:
 | `plugin_status` | read-only | Inspect one plugin (tools, deps, fiber state, trust level, advisor recommendation) |
 | `plugin_versions` | read-only | Inspect recorded source snapshots and the active version pointer for a profile plugin |
 | `plugin_propose` | read-only | Create a side-effect-free PluginProposal from explicit capability-gap evidence |
+| `assess_compatibility` | read-only | Assess a foreign plugin manifest for LeapFlow compatibility (no approval) |
 | `plugin_generate` | mutating | Ask the LLM to synthesize + validate new plugin code |
 | `plugin_install` | mutating | Install from generated code or a marketplace entry, optionally linked to a proposal and version label |
 | `plugin_rollback` | mutating | Restore a recorded profile plugin source snapshot and hot-reload it |
@@ -817,6 +818,33 @@ The legacy `ToolBridge` compatibility layer is fully gone — `bridge_adapter.py
 
 1. The bounded ReAct fallback no longer carries plugin-catalog tools (it is scoped to desktop execution).
 2. The `SemanticAdapter` "last observed window" state is no longer shared across surfaces/turns.
+
+### Compatibility Assessment
+
+Before a foreign plugin is hosted, LeapFlow evaluates it through the **Compatibility Assessment Engine** (`learning/compatibility/`). The public entry point is `assess_plugin()`, which drives a **six-stage pipeline** and short-circuits on the first blocking finding:
+
+1. **Manifest parsing** — normalize a raw LeapFlow or DSH manifest into a common `PluginManifestInput`.
+2. **Category resolution** — look the declared category up in the pluggability taxonomy.
+3. **Interface analysis** — check declared interfaces against the target protocol's requirements.
+4. **Dependency checking** — classify each dependency as satisfiable / shimmable / blocking.
+5. **Execution model** — check the execution model and source language for bridge requirements.
+6. **Security classification** — assess declared permissions and recommend isolation (or rejection).
+
+The synthesized `CompatibilityReport` carries one of four verdicts:
+
+| Verdict | Meaning |
+|---------|---------|
+| `COMPATIBLE` | Direct install; no modification needed |
+| `ADAPTABLE` | Needs a thin, auto-generatable bridge/shim |
+| `PARTIAL` | Only a subset of features is usable; limitations documented |
+| `INCOMPATIBLE` | Targets a system layer LeapFlow does not expose |
+
+The verdict is decided by a **30+ entry pluggability taxonomy** (`taxonomy.py`) that maps deepseek-harness (DSH) plugin categories to LeapFlow protocols — from directly mappable tool types (`tools`, `web`, `filesystem`, `shell`, …) through adaptable surfaces (`llm`, `mcp`, `lsp`, `signal`, …) and partial ones (`guard`, `scheduler`, `skill`) to non-pluggable system layers (`agent-loop`, `session`, `context`, `storage`, `credentials`, …). Unknown categories fall back to `INCOMPATIBLE`.
+
+- **Tool** — `assess_compatibility` (read-only, no approval) runs the pipeline on a manifest dict and returns the verdict, target protocol, adaptation notes, adapter spec, and per-stage results.
+- **Install gate** — marketplace installs run the assessment as a **pre-gate**: an `INCOMPATIBLE` verdict is rejected with a structured error before any file is written; `ADAPTABLE` verdicts surface their adaptation notes alongside the install result.
+- **Adapter generation** — `adapter_generator.generate_adapter_template()` emits a template-based Python bridge wrapper (a `ToolPlugin` skeleton delegating to a SandboxHost subprocess) for `ADAPTABLE` plugins; an optional LLM-enhanced mode refines it and degrades gracefully back to the template.
+- **Manifest converter** — `convert_dsh_to_leapflow()` translates a DSH `package.json`-style manifest into a LeapFlow `PluginManifest`-compatible dict for ecosystem interop.
 
 ### Configuration
 

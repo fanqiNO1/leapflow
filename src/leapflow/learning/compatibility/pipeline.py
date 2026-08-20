@@ -15,6 +15,7 @@ Stages:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Union
 
@@ -45,6 +46,16 @@ def assess_plugin(
     parser = ManifestParser()
     resolver = CategoryResolver()
 
+    # ── Stage 0: Normalize file-path inputs into a raw manifest dict ──
+    # A Path object or a path-like string is read from disk as JSON,
+    # then flows through the standard dict path below. A string that is
+    # not path-like is an unsupported input format.
+    if isinstance(manifest, (str, Path)):
+        loaded = _load_manifest_from_path(manifest)
+        if isinstance(loaded, CompatibilityReport):
+            return loaded
+        manifest = loaded
+
     # ── Stage 1: Parse manifest ──────────────────────────────────────
     if isinstance(manifest, PluginManifestInput):
         parsed_manifest = manifest
@@ -74,25 +85,6 @@ def assess_plugin(
                 rejection_reason=parse_result.details,
             )
         parsed_manifest = parse_result.evidence["manifest"]
-    elif isinstance(manifest, (str, Path)):
-        # File path support — P0 only reads JSON/dict manifests
-        return CompatibilityReport(
-            manifest=PluginManifestInput(
-                name="<unknown>",
-                version="0.0.0",
-                category="",
-                raw_manifest={},
-            ),
-            stages=[
-                StageResult(
-                    stage_name="manifest_parser",
-                    passed=False,
-                    details="File path manifest loading not yet implemented (P0 accepts dict or PluginManifestInput only)",
-                )
-            ],
-            final_verdict=Verdict.INCOMPATIBLE,
-            rejection_reason="File path manifest loading not yet implemented",
-        )
     else:
         return CompatibilityReport(
             manifest=PluginManifestInput(
@@ -195,3 +187,84 @@ def assess_plugin(
 
     # ── Final verdict synthesis ──────────────────────────────────────
     return synthesize_verdict(parsed_manifest, stages)
+
+
+def _incompatible_report(reason: str) -> CompatibilityReport:
+    """Build an INCOMPATIBLE report for a manifest-loading failure.
+
+    Used before Stage 1 when a file-path input cannot be resolved into a
+    usable manifest dict (bad format, missing file, invalid JSON).
+    """
+    return CompatibilityReport(
+        manifest=PluginManifestInput(
+            name="<unknown>",
+            version="0.0.0",
+            category="",
+            raw_manifest={},
+        ),
+        stages=[
+            StageResult(
+                stage_name="manifest_parser",
+                passed=False,
+                details=reason,
+            )
+        ],
+        final_verdict=Verdict.INCOMPATIBLE,
+        rejection_reason=reason,
+    )
+
+
+def _load_manifest_from_path(
+    source: Union[str, Path],
+) -> Union[dict, CompatibilityReport]:
+    """Resolve a file-path input into a raw manifest dict.
+
+    Args:
+        source: A ``Path`` object, or a path-like string (ends with ``.json``
+                or starts with ``/`` or ``./``). Non-path-like strings are
+                treated as an unsupported input format.
+
+    Returns:
+        The parsed manifest dict on success, or an INCOMPATIBLE
+        CompatibilityReport describing why the file could not be loaded.
+    """
+    if isinstance(source, str):
+        looks_like_path = (
+            source.endswith(".json")
+            or source.startswith("/")
+            or source.startswith("./")
+        )
+        if not looks_like_path:
+            preview = source if len(source) <= 64 else source[:64] + "..."
+            return _incompatible_report(
+                f"unsupported manifest format: expected a dict, a "
+                f"PluginManifestInput, or a path-like string, got string "
+                f"'{preview}'"
+            )
+        path = Path(source)
+    else:
+        path = source
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return _incompatible_report(f"Manifest file not found: {path}")
+    except (OSError, UnicodeDecodeError) as exc:
+        return _incompatible_report(
+            f"Failed to read manifest file {path}: {exc}"
+        )
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return _incompatible_report(
+            f"Invalid JSON in manifest file {path}: {exc}"
+        )
+
+    if not isinstance(data, dict):
+        return _incompatible_report(
+            f"Manifest file {path} must contain a JSON object, got "
+            f"{type(data).__name__}"
+        )
+
+    return data

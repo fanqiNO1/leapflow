@@ -124,6 +124,7 @@ A plugin's state is the **composition** of three independent axes: Runtime, Trus
 | **plugin_status** | Agent tool | None | Always | — | No (read-only) |
 | **plugin_versions** | Agent tool | None | Always | `ProfileLayout.plugin_versions_dir` | No (read-only) |
 | **plugin_propose** | Agent tool | None | Always (proposal only, no LLM/file/runtime mutation) | `ProfileLayout.plugin_proposals_path` | No (proposal store write only) |
+| **assess_compatibility** | Agent tool | None | Always (read-only manifest assessment; no file/runtime mutation) | — | No (read-only) |
 | **plugin_generate** | Agent tool | None | Always (code generation only, no filesystem write) | `plugin_generation_enabled` must be `True`; needs `llm_provider` bound | No (ephemeral output) |
 | **plugin_install** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Never (always requires human) | `plugin_install_dir`, proposal/version stores, `plugin_marketplace_root/url`, `plugin_marketplace_trusted_pubkeys` | Yes — action descriptor metadata recorded |
 | **plugin_rollback** | Agent tool | `ApprovalGate` → HIGH, `allow_permanent=False` | Never (always requires human) | `ProfileLayout.plugin_versions_dir` | Yes |
@@ -150,6 +151,7 @@ A plugin's state is the **composition** of three independent axes: Runtime, Trus
 **Sequence**:
 1. **Generate** (optional): `plugin_generate(description="...")` → LLM produces code → `PluginValidator` multi-stage check (syntax → structure → runtime protocol conformance). Returns validated code blob. No filesystem write.
 2. **Install request**: `plugin_install(code=<blob>)` or `plugin_install(marketplace_name="...")`.
+   - **Compatibility pre-gate (marketplace path only)**: the resolved manifest is run through `assess_plugin()` (the Compatibility Assessment Engine) *before* anything else. An `INCOMPATIBLE` verdict is **rejected here with a structured error, before any file write**; an `ADAPTABLE` verdict proceeds and its adaptation notes are attached to the install result.
 3. **Approval gate**: `ActionDescriptor.platform_action("plugin_management", "install", {...})` → `gate.evaluate()` → user prompted (HIGH risk, one-time).
 4. **Duplicate check**: If `plugin_id` already exists in registry → immediate rejection with error.
 5. **Validation**: `PluginValidator.validate()` re-runs (defense-in-depth, even for marketplace code).
@@ -462,7 +464,7 @@ These require human/product input and are not answerable from code alone:
 | Plugin contracts (ToolPlugin / ToolMetadata) | `src/leapflow/plugins/protocol.py` |
 | Plugin subsystem public API | `src/leapflow/plugins/__init__.py` |
 | Plugin discovery (built-in) | `src/leapflow/plugins/tool_plugins/__init__.py` |
-| Self-management tools (11 tools) | `src/leapflow/plugins/tool_plugins/self_management.py` |
+| Self-management tools (12 tools) | `src/leapflow/plugins/tool_plugins/self_management.py` |
 | Proposal domain records | `src/leapflow/domain/plugin_proposal.py` |
 | Proposal persistence | `src/leapflow/storage/plugin_proposal_store.py` |
 | Behavior test execution | `src/leapflow/learning/plugin_behavior_tests.py` |

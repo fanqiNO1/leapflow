@@ -487,6 +487,43 @@ result = client.install("plugin_name", verify=True, trusted_pubkeys={"..."})
 
 Mutating operations (install, rollback, reload, disable, remove, enable) are only available through the self-management tools in daemon mode, and require explicit approval. Read-only governance tools such as `plugin_versions` can inspect recorded profile-scoped source snapshots without approval.
 
+### 5.7 Compatibility Assessment (Pre-Install Gate)
+
+Before a marketplace install writes any file, LeapFlow runs the **Compatibility Assessment Engine** (`leapflow.learning.compatibility`) against the resolved manifest. The engine is a six-stage pipeline (manifest parsing → category resolution → interface analysis → dependency checking → execution model → security classification) that produces a `CompatibilityReport` with a final verdict. Marketplace installs are gated on it: an `INCOMPATIBLE` verdict is **rejected before file write** with a structured error; an `ADAPTABLE` verdict proceeds and surfaces its `adaptation_notes` alongside the install result.
+
+**Verdict meaning for developers:**
+
+| Verdict | What it means for you |
+|---------|-----------------------|
+| `COMPATIBLE` | Direct install; no modification needed. |
+| `ADAPTABLE` | A thin bridge/shim is needed and is **auto-generated** (see `adapter_generator`). |
+| `PARTIAL` | Only a subset of the plugin's features is usable; the unusable surfaces are documented in the report. |
+| `INCOMPATIBLE` | The plugin targets a system layer LeapFlow does not expose (e.g. `agent-loop`, `session`, `context`, `storage`); LeapFlow **cannot host** it. |
+
+**Pre-check a manifest manually** with the `assess_compatibility` tool (read-only, no approval). It accepts a manifest dict in LeapFlow or DSH format and returns the verdict, target protocol, adaptation notes, adapter spec, and per-stage results:
+
+```python
+from leapflow.learning.compatibility import assess_plugin
+
+report = assess_plugin(manifest_dict)          # dict, LeapFlow or DSH format
+print(report.final_verdict.value)               # "compatible" | "adaptable" | "partial" | "incompatible"
+print(report.is_installable())                  # True unless INCOMPATIBLE
+```
+
+**File-path loading:** `assess_plugin()` also accepts a path (string or `Path`) to a manifest JSON file; it is read from disk and flows through the same pipeline:
+
+```python
+report = assess_plugin("/path/to/manifest.json")
+```
+
+**DSH → LeapFlow interop:** `convert_dsh_to_leapflow()` translates a deepseek-harness `package.json`-style manifest into a LeapFlow `PluginManifest`-compatible dict (name normalization, `main` → `entry_point`, `requires_sandbox=True`, original manifest preserved under `x_dsh_original`):
+
+```python
+from leapflow.learning.compatibility.manifest_converter import convert_dsh_to_leapflow
+
+leapflow_manifest = convert_dsh_to_leapflow(dsh_package_json)
+```
+
 ---
 
 ## 6. Security Model

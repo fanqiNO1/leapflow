@@ -1,0 +1,112 @@
+"""DSH package.json → LeapFlow PluginManifest converter.
+
+Translates a DSH-format manifest dict (as parsed by Stage 1) into a
+LeapFlow PluginManifest-compatible dict that could be handed to
+``MarketplaceClient.install()``.
+
+This is a pure, side-effect-free transformation: no file I/O and no
+checksum computation. The checksum is intentionally left as ``None`` because
+integrity is verified against the actual downloaded source at install time,
+not against the manifest at conversion time.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+def convert_dsh_to_leapflow(dsh_manifest: dict) -> dict:
+    """Convert a DSH manifest dict into a LeapFlow PluginManifest-compatible dict.
+
+    Field mapping:
+        - ``name``        → stripped of ``@org/`` and ``dsh-`` prefixes, hyphens
+                            replaced with underscores → LeapFlow ``name``
+        - ``version``     → passed through (defaults to ``"0.0.0"``)
+        - ``main``        → ``entry_point`` (the JS entry, for bridge reference)
+        - ``description`` → passed through (defaults to ``""``)
+        - ``dsh.category`` / ``keywords[0]`` → informs ``requires_sandbox``
+                            (always ``True`` for TS plugins)
+        - ``checksum_sha256`` → ``None`` (computed at install time)
+        - ``x_dsh_original`` → the full original manifest, preserved for audit
+
+    Args:
+        dsh_manifest: A DSH package.json-like manifest dict.
+
+    Returns:
+        A LeapFlow PluginManifest-compatible dict.
+    """
+    raw_name = dsh_manifest.get("name", "")
+    leapflow_name = _normalize_name(raw_name)
+
+    version = dsh_manifest.get("version", "0.0.0")
+    entry_point = dsh_manifest.get("main", "")
+    description = dsh_manifest.get("description", "")
+
+    category = _infer_category(dsh_manifest)
+
+    # DSH plugins are TypeScript/JavaScript and always run through a subprocess
+    # bridge, so they are always treated as untrusted and require sandboxing.
+    requires_sandbox = True
+
+    dependencies = _extract_dependencies(dsh_manifest)
+
+    return {
+        "name": leapflow_name,
+        "version": version,
+        "entry_point": entry_point,
+        "description": description,
+        "plugin_type": "tool",
+        "requires_sandbox": requires_sandbox,
+        "dependencies": dependencies,
+        "checksum_sha256": None,  # computed at install time, not conversion
+        "x_dsh_category": category,
+        "x_dsh_original": dict(dsh_manifest),
+    }
+
+
+def _normalize_name(raw_name: str) -> str:
+    """Normalize a DSH package name into a LeapFlow plugin name.
+
+    Strips a leading ``@org/`` scope, a ``dsh-`` prefix, then replaces
+    hyphens with underscores. Returns ``"unknown_plugin"`` for empty input.
+    """
+    if not isinstance(raw_name, str) or not raw_name:
+        return "unknown_plugin"
+
+    name = raw_name
+    # Strip org scope like "@deepseek-ai/"
+    if "/" in name:
+        name = name.split("/", 1)[1]
+    # Strip a leading "dsh-" prefix
+    if name.startswith("dsh-"):
+        name = name[len("dsh-"):]
+    # LeapFlow plugin names are snake_case identifiers
+    name = name.replace("-", "_")
+    return name or "unknown_plugin"
+
+
+def _infer_category(dsh_manifest: dict) -> str:
+    """Infer a category label from the ``dsh``/``leapflow`` section or keywords."""
+    metadata = dsh_manifest.get("dsh", dsh_manifest.get("leapflow", {}))
+    if isinstance(metadata, dict):
+        category = metadata.get("category")
+        if isinstance(category, str) and category:
+            return category
+
+    keywords = dsh_manifest.get("keywords", [])
+    if isinstance(keywords, list):
+        for kw in keywords:
+            if isinstance(kw, str) and kw:
+                return kw
+
+    return ""
+
+
+def _extract_dependencies(dsh_manifest: dict) -> list[str]:
+    """Extract dependency names from a DSH ``dependencies`` mapping."""
+    deps_raw: Any = dsh_manifest.get("dependencies", {})
+    if isinstance(deps_raw, dict):
+        return list(deps_raw.keys())
+    if isinstance(deps_raw, list):
+        return [d for d in deps_raw if isinstance(d, str)]
+    return []
