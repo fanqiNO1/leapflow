@@ -18,6 +18,7 @@ from leapflow.platform.protocol import EventTypes
 from leapflow.platform.reorder_buffer import EventReorderBuffer
 
 if TYPE_CHECKING:
+    from leapflow.domain.effect_scope import EffectScope
     from leapflow.learning.event_consumer import EventConsumer
     from leapflow.privacy.policy import EventPrivacyFilter
 
@@ -49,7 +50,7 @@ class EventBus:
         self._working = working
         self._normalizer = normalizer
         self._privacy_filter = privacy_filter
-        self._subscribers: List[EventCallback] = []
+        self._subscribers: Dict[int, EventCallback] = {}
         self._recent_sources: Dict[str, float] = {}
         self._reorder_buffer: Optional[EventReorderBuffer] = None
         self._consumers: list["EventConsumer"] = []
@@ -66,13 +67,19 @@ class EventBus:
         """Late-bind privacy filter for event ingestion control."""
         self._privacy_filter = privacy_filter
 
-    def subscribe(self, callback: EventCallback) -> None:
-        """Register a callback that receives every normalized SystemEvent."""
-        self._subscribers.append(callback)
+    def subscribe(self, callback: EventCallback, *, scope: Optional[Any] = None) -> None:
+        """Register a callback that receives every normalized SystemEvent.
+
+        If *scope* is provided and active, an effect is registered so that
+        disposing the scope automatically unsubscribes the callback.
+        """
+        self._subscribers[id(callback)] = callback
+        if scope is not None and getattr(scope, 'is_active', False):
+            scope.effect(lambda: self.unsubscribe(callback))
 
     def unsubscribe(self, callback: EventCallback) -> None:
-        """Remove a previously registered callback if present."""
-        self._subscribers = [item for item in self._subscribers if item != callback]
+        """Remove a previously registered callback if present (O(1))."""
+        self._subscribers.pop(id(callback), None)
 
     def enable_reorder(self, settle_s: float = 0.05) -> None:
         """Activate the reorder buffer (call at recording start)."""
@@ -203,7 +210,7 @@ class EventBus:
         self._working.remember_event(event.event_type, content, payload)
 
     def _notify_subscribers(self, event: SystemEvent) -> None:
-        for cb in self._subscribers:
+        for cb in list(self._subscribers.values()):
             t0 = time.monotonic()
             try:
                 cb(event)

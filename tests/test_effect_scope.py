@@ -205,11 +205,12 @@ class TestFiberLifecycle:
 class TestFiberIllegalTransitions:
     """Invalid state transitions raise IllegalStateTransition."""
 
-    def test_fiber_illegal_transition_pending_to_disposed(self) -> None:
-        scope = EffectScope("bad-transition")
+    def test_fiber_pending_to_disposed_allowed(self) -> None:
+        scope = EffectScope("direct-dispose")
         fiber = PluginFiber(plugin_id="test", scope=scope)
-        with pytest.raises(IllegalStateTransition):
-            fiber.dispose()  # PENDING → DISPOSED is invalid
+        fiber.dispose()  # PENDING → DISPOSED is now valid
+        assert fiber.state == FiberState.DISPOSED
+        assert scope.is_disposed
 
     def test_fiber_illegal_transition_active_to_disposed(self) -> None:
         scope = EffectScope("bad-transition-2")
@@ -279,3 +280,150 @@ class TestFiberScopeEffects:
         fiber.dispose()
 
         assert effects_log == ["effect-2", "effect-1"], "Effects must run LIFO on fiber dispose"
+
+
+# ════════════════════════════════════════════════════════════════
+# Extended FiberState (LOADING/FAILED) tests
+# ════════════════════════════════════════════════════════════════
+
+
+class TestFiberLoadingState:
+    """Tests for the new LOADING/FAILED fiber states."""
+
+    def test_pending_to_loading_to_active(self) -> None:
+        """Standard async-init path: PENDING → LOADING → ACTIVE."""
+        scope = EffectScope("test")
+        fiber = PluginFiber("test_plugin", scope)
+        assert fiber.state == FiberState.PENDING
+        fiber.begin_loading()
+        assert fiber.state == FiberState.LOADING
+        assert fiber.is_loading
+        fiber.activate()
+        assert fiber.state == FiberState.ACTIVE
+        assert fiber.is_active
+
+    def test_loading_to_failed(self) -> None:
+        """Init failure: LOADING → FAILED with error stored."""
+        scope = EffectScope("test")
+        fiber = PluginFiber("test_plugin", scope)
+        fiber.begin_loading()
+        err = RuntimeError("init failed")
+        fiber.fail(err)
+        assert fiber.state == FiberState.FAILED
+        assert fiber.is_failed
+        assert fiber.error is err
+
+    def test_failed_to_loading_retry(self) -> None:
+        """Retry from FAILED: FAILED → LOADING clears error."""
+        scope = EffectScope("test")
+        fiber = PluginFiber("test_plugin", scope)
+        fiber.begin_loading()
+        fiber.fail(RuntimeError("oops"))
+        fiber.retry()
+        assert fiber.state == FiberState.LOADING
+        assert fiber.error is None
+
+    def test_loading_to_disposed(self) -> None:
+        """Abort during loading: LOADING → DISPOSED via scope dispose."""
+        scope = EffectScope("test")
+        fiber = PluginFiber("test_plugin", scope)
+        fiber.begin_loading()
+        fiber.dispose()
+        assert fiber.state == FiberState.DISPOSED
+
+    def test_failed_to_disposed(self) -> None:
+        """Give up after failure: FAILED → DISPOSED."""
+        scope = EffectScope("test")
+        fiber = PluginFiber("test_plugin", scope)
+        fiber.begin_loading()
+        fiber.fail(RuntimeError("fatal"))
+        fiber.dispose()
+        assert fiber.state == FiberState.DISPOSED
+        assert fiber.error is None  # cleared on dispose
+
+    def test_illegal_transitions_from_loading(self) -> None:
+        """LOADING cannot go to UNLOADING or PENDING."""
+        scope = EffectScope("test")
+        fiber = PluginFiber("test_plugin", scope)
+        fiber.begin_loading()
+        with pytest.raises(IllegalStateTransition):
+            fiber.begin_unload()
+
+    def test_illegal_transition_from_failed(self) -> None:
+        """FAILED cannot go to ACTIVE directly (must retry through LOADING)."""
+        scope = EffectScope("test")
+        fiber = PluginFiber("test_plugin", scope)
+        fiber.begin_loading()
+        fiber.fail(RuntimeError("x"))
+        with pytest.raises(IllegalStateTransition):
+            fiber.activate()
+
+
+class TestFiberDisposalPaths:
+    """Tests for disposal from various states."""
+
+    def test_pending_to_disposed(self) -> None:
+        """Fiber that never started can be disposed directly."""
+        scope = EffectScope("test")
+        fiber = PluginFiber("test_plugin", scope)
+        fiber.dispose()
+        assert fiber.state == FiberState.DISPOSED
+        assert fiber.is_disposed
+
+
+# ════════════════════════════════════════════════════════════════
+# Scope-bound EventBus subscription tests
+# ════════════════════════════════════════════════════════════════
+
+
+class TestScopeBoundSubscription:
+    """Tests for EventBus scope-bound auto-cleanup."""
+
+    def test_subscribe_with_scope_auto_unsubscribes_on_dispose(self) -> None:
+        """Subscription bound to a scope is removed when scope disposes."""
+        from leapflow.platform.event_bus import EventBus
+        bus = EventBus.__new__(EventBus)
+        bus._subscribers = {}
+
+        scope = EffectScope("sub_scope")
+        called: list = []
+        cb = lambda event: called.append(event)
+
+        bus.subscribe(cb, scope=scope)
+        assert id(cb) in bus._subscribers
+
+        scope.dispose()
+        assert id(cb) not in bus._subscribers
+
+    def test_subscribe_without_scope_survives_unrelated_dispose(self) -> None:
+        """Subscription without scope is not affected by scope disposal."""
+        from leapflow.platform.event_bus import EventBus
+        bus = EventBus.__new__(EventBus)
+        bus._subscribers = {}
+
+        scope = EffectScope("unrelated")
+        cb = lambda event: None
+
+        bus.subscribe(cb)  # no scope
+        scope.dispose()
+        assert id(cb) in bus._subscribers
+
+    def test_multiple_scope_bound_subs_cleaned_together(self) -> None:
+        """Multiple subscriptions on one scope all cleaned on dispose."""
+        from leapflow.platform.event_bus import EventBus
+        bus = EventBus.__new__(EventBus)
+        bus._subscribers = {}
+
+        scope = EffectScope("shared")
+        cb1 = lambda e: None
+        cb2 = lambda e: None
+        cb3 = lambda e: None  # unbound
+
+        bus.subscribe(cb1, scope=scope)
+        bus.subscribe(cb2, scope=scope)
+        bus.subscribe(cb3)  # no scope
+
+        assert len(bus._subscribers) == 3
+        scope.dispose()
+        assert len(bus._subscribers) == 1
+        assert id(cb3) in bus._subscribers

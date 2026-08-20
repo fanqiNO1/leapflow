@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
+from typing import Optional
 
 from leapflow.domain.effect_scope import EffectScope
 
@@ -32,7 +33,9 @@ def _next_generation() -> int:
 class FiberState(enum.Enum):
     """Plugin fiber lifecycle states."""
     PENDING = "pending"
+    LOADING = "loading"
     ACTIVE = "active"
+    FAILED = "failed"
     UNLOADING = "unloading"
     DISPOSED = "disposed"
 
@@ -42,8 +45,10 @@ class IllegalStateTransition(RuntimeError):
 
 
 _VALID_TRANSITIONS: dict[FiberState, set[FiberState]] = {
-    FiberState.PENDING: {FiberState.ACTIVE},
+    FiberState.PENDING: {FiberState.ACTIVE, FiberState.LOADING, FiberState.DISPOSED},
+    FiberState.LOADING: {FiberState.ACTIVE, FiberState.FAILED, FiberState.DISPOSED},
     FiberState.ACTIVE: {FiberState.UNLOADING},
+    FiberState.FAILED: {FiberState.LOADING, FiberState.DISPOSED},
     FiberState.UNLOADING: {FiberState.DISPOSED},
     FiberState.DISPOSED: set(),
 }
@@ -66,6 +71,7 @@ class PluginFiber:
     scope: EffectScope = field(repr=False)
     state: FiberState = FiberState.PENDING
     generation: int = field(default_factory=_next_generation)
+    _error: Optional[Exception] = field(default=None, repr=False, init=False)
 
     @property
     def is_active(self) -> bool:
@@ -77,9 +83,38 @@ class PluginFiber:
         """Whether the fiber has been fully disposed."""
         return self.state == FiberState.DISPOSED
 
+    @property
+    def is_loading(self) -> bool:
+        """Whether the fiber is in LOADING state."""
+        return self.state == FiberState.LOADING
+
+    @property
+    def is_failed(self) -> bool:
+        """Whether the fiber is in FAILED state."""
+        return self.state == FiberState.FAILED
+
+    @property
+    def error(self) -> Optional[Exception]:
+        """The stored error from a failed loading attempt, if any."""
+        return self._error
+
     def activate(self) -> None:
-        """Transition from PENDING to ACTIVE."""
+        """Transition from PENDING or LOADING to ACTIVE."""
         self._transition(FiberState.ACTIVE)
+
+    def begin_loading(self) -> None:
+        """Transition PENDING→LOADING or FAILED→LOADING. Clears stored error."""
+        self._transition(FiberState.LOADING)
+        self._error = None
+
+    def fail(self, error: Exception) -> None:
+        """Transition LOADING→FAILED and store the error reference."""
+        self._transition(FiberState.FAILED)
+        self._error = error
+
+    def retry(self) -> None:
+        """Convenience alias for begin_loading() from FAILED state."""
+        self.begin_loading()
 
     def begin_unload(self) -> None:
         """Transition from ACTIVE to UNLOADING."""
@@ -88,6 +123,7 @@ class PluginFiber:
     def dispose(self) -> None:
         """Transition to DISPOSED and dispose the owned scope."""
         self._transition(FiberState.DISPOSED)
+        self._error = None
         self.scope.dispose()
 
     def _transition(self, target: FiberState) -> None:
