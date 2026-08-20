@@ -717,6 +717,52 @@ async def test_daemon_client_stream_heartbeat_prevents_idle_timeout() -> None:
     ]
 
 
+class _SlowCommandService(_FakeService):
+    """Simulates a long-running command handler exceeding client read timeout."""
+
+    def __init__(self, delay: float = 0.6) -> None:
+        super().__init__()
+        self._delay = delay
+
+    async def command_execute(self, name: str, args: str = "", session_id: str = "") -> dict[str, Any]:
+        await asyncio.sleep(self._delay)
+        return {"ok": True, "message": f"Executed {name} after delay", "plugin_id": "test"}
+
+
+@pytest.mark.asyncio
+async def test_daemon_rpc_heartbeat_keeps_long_running_command_alive() -> None:
+    """Non-streaming RPC must survive when handler exceeds client read timeout.
+
+    The server sends heartbeat notifications during the await, which the
+    client's request() loop skips, resetting its per-read deadline each time.
+    Without this, /plugin generate times out after 30s in daemon mode.
+    """
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
+        server, task, runtime_dir = await _start_server(
+            Path(root) / "runtime",
+            service=_SlowCommandService(delay=0.6),
+            stream_heartbeat_s=0.1,
+        )
+        socket_path = get_transport().readiness_path(runtime_dir)
+        # Client timeout (0.3s) is shorter than handler delay (0.6s) but
+        # longer than heartbeat interval (0.1s). Without heartbeat support
+        # in request(), this would raise DaemonUnavailableError.
+        client = DaemonClient(socket_path, timeout_s=0.3)
+
+        try:
+            payload = await client.command_execute("plugin generate", "test desc")
+        finally:
+            task.cancel()
+            await server.stop()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    assert payload["ok"] is True
+    assert payload["message"] == "Executed plugin generate after delay"
+
+
 @pytest.mark.asyncio
 async def test_dispatch_stream_keeps_contextvar_token_valid_across_chunks() -> None:
     """Regression: per-chunk asyncio.create_task() must not invalidate a

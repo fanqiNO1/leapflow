@@ -318,7 +318,7 @@ A plugin's state is the **composition** of three independent axes: Runtime, Trus
 | Sandbox invoke timeout | `SandboxHost.invoke_timeout_s` | 30s | ✅ |
 | Sandbox subprocess lifecycle | `SandboxHost.stop()` kills worker process | — | ✅ |
 | Usage deque memory | `deque(maxlen=500)` per tool in `PluginUsageTracker` | 500 samples | ✅ |
-| Plugin generation gating | `Settings.plugin_generation_enabled` | `False` (off) | ✅ |
+| Plugin generation gating | `Settings.plugin_generation_enabled` | `True` (enabled; set false to disable synthesis) | ✅ |
 | Per-plugin resource quota | — | — | ❌ Not implemented |
 | Tool call rate limiting | — | — | ❌ Not implemented |
 
@@ -436,7 +436,7 @@ Accessed via `plugin_status` tool or `PluginAdvisor.recommend()`.
 | Sandbox invoke timeout | 30s | 30s | Generous for network-bound tools; prevents hangs |
 | Usage deque maxlen | 500 | 500 | ~10 hours of moderate use; low memory footprint |
 | Health poll interval | ~5 min | 5 min | Balance between responsiveness and overhead |
-| `plugin_generation_enabled` | `False` | `False` in production; `True` in dev/demo profiles | Prevents unintended LLM spend |
+| `plugin_generation_enabled` | `True` | `False` in restricted production profiles; `True` in dev/demo profiles | Current code default enables generation, while install/rollback/disable remain approval-gated |
 
 ### 6.2 Gaps & Future Hardening
 

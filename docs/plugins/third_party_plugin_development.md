@@ -444,8 +444,7 @@ description:
 - **`--id <plugin_id>`** — override the auto-derived plugin id (a slug of the
   description). A colliding id is rejected cleanly.
 
-Generation is gated by `plugin.generation_enabled` (off by default; enable via
-`/config set plugin.generation_enabled true`) and requires an LLM provider.
+Generation is controlled by `plugin.generation_enabled` (enabled by default in current config; disable via `/config set plugin.generation_enabled false`) and requires an LLM provider. Installation still remains a separate approval-gated action.
 
 **Difference from the `plugin_generate` agent tool**: `/plugin generate` is a
 *user-initiated* control-plane command — the user's invocation is the consent, so it
@@ -536,7 +535,7 @@ result = client.install("plugin_name", verify=True, trusted_pubkeys={"..."})
 | Key | Default | Purpose |
 |-----|---------|---------|
 | `disabled_plugins` | `()` | Tuple of `plugin_id`s to skip at discovery time |
-| `plugin_generation_enabled` | `False` | Gate for LLM-driven code generation |
+| `plugin_generation_enabled` | `True` | Gate for LLM-driven code generation; set false to disable synthesis |
 | `plugin_install_dir` | `None` (→ `ProfileLayout.plugins_dir`) | Override install directory |
 | `plugin_marketplace_root` | `None` | Local directory marketplace source |
 | `plugin_marketplace_url` | `None` | HTTP marketplace URL (takes precedence over local) |
@@ -800,7 +799,7 @@ Query trust via `plugin_status("weather_lookup")` to see current level and advis
 | Config Key | Type | Default | Description |
 |------------|------|---------|-------------|
 | `disabled_plugins` | `tuple[str, ...]` | `()` | Plugin IDs to skip during built-in discovery |
-| `plugin_generation_enabled` | `bool` | `False` | Enable LLM-driven plugin code generation |
+| `plugin_generation_enabled` | `bool` | `True` | Enable LLM-driven plugin code generation; set false to disable synthesis |
 | `plugin_install_dir` | `str \| None` | `None` | Override profile plugins dir path |
 | `plugin_marketplace_root` | `str \| None` | `None` | Local marketplace directory |
 | `plugin_marketplace_url` | `str \| None` | `None` | HTTP marketplace URL |

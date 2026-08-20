@@ -181,11 +181,47 @@ class UnixRpcServer:
 
         result = method(**params)
         if hasattr(result, "__await__"):
-            result = await result
+            result = await self._await_with_heartbeat(request.id, result, writer)
         response = RpcResponse.success(request.id, result)
         await _write_json(writer, response.to_json())
         if request.method == "daemon.shutdown" and self._on_shutdown is not None:
             self._on_shutdown()
+
+    async def _await_with_heartbeat(
+        self,
+        request_id: str,
+        coro: Any,
+        writer: asyncio.StreamWriter,
+    ) -> Any:
+        """Await a coroutine while sending periodic heartbeats to keep the client alive.
+
+        Long-running RPC handlers (e.g. /plugin generate with LLM calls) can
+        exceed the client read timeout. Sending heartbeat notifications at a
+        regular interval resets the client's per-read deadline, preventing
+        spurious timeout disconnections.
+        """
+        task = asyncio.ensure_future(coro)
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=self._stream_heartbeat_s)
+            if done:
+                return task.result()
+            # Send heartbeat to keep client connection alive
+            heartbeat = StreamChunk(
+                request_id=request_id,
+                content="",
+                event_type="status",
+                metadata={"heartbeat": True},
+            ).to_notification()
+            try:
+                await _write_json(writer, heartbeat.to_json())
+            except (ConnectionResetError, BrokenPipeError):
+                # Client disconnected; cancel the handler and re-raise
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                raise
 
     async def _dispatch_stream(
         self,

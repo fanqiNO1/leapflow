@@ -808,7 +808,7 @@ Trust progresses on consecutive successes (5 / 20 / 50), demotes after repeated 
 
 - **Sandbox** (`plugins/sandbox/`) — subprocess JSON-RPC isolation (`SandboxHost` + `SandboxedToolPlugin`); a sandboxed plugin looks like any other `ToolPlugin` to the engine.
 - **Marketplace** (`plugins/marketplace/`) — `PluginManifest` with SHA-256 checksum **and** Ed25519 signing/verification, `LocalDirectorySource` + `HttpMarketplaceSource`, `MarketplaceClient`, and an asyncio HTTP `MarketplaceServer`.
-- **Generator** (`learning/plugin_generator.py`) — LLM code generation plus staged validation: syntax / import / Protocol conformance at generate-time, sandbox smoke-test at install-time. Gated by `plugin.generation_enabled` (**off by default**, opt-in via `/config`).
+- **Generator** (`learning/plugin_generator.py`) — LLM code generation plus staged validation: syntax / import / Protocol conformance at generate-time, sandbox smoke-test at install-time. The generation path is enabled by default in current config, but installation remains approval-gated; set `plugin.generation_enabled=false` to disable code synthesis for a profile.
 
 ### IM ActiveSignalSources
 
@@ -867,7 +867,7 @@ All keys are set via `leap config set …` (shell) or `/config set …` (TUI):
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `plugin.generation_enabled` | `false` | Allow the LLM to synthesize plugin code (`plugin_generate`) |
+| `plugin.generation_enabled` | `true` | Allow the LLM to synthesize plugin code (`plugin_generate`); set `false` to disable generation |
 | `plugin.install_dir` | *(profile-derived)* | Override the profile-scoped install directory |
 | `plugin.marketplace_root` | *(none)* | Local directory acting as a marketplace source |
 | `plugin.marketplace_url` | *(none)* | HTTP(S) marketplace registry base URL (takes precedence over `root`) |
