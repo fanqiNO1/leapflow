@@ -1797,3 +1797,61 @@ class TestAdapterGeneratorLLM:
         spec, manifest = _sample_adapter_inputs()
         result = generate_adapter_with_llm(spec, manifest, AsyncProvider())
         assert "AsyncRefined" in result
+
+
+class TestAdapterGeneratorEscaping:
+    """Special characters in manifest fields must still produce valid Python."""
+
+    def test_adapter_template_handles_special_chars_in_name(self) -> None:
+        """Plugin names/interfaces with dots, quotes, slashes produce valid Python."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_template,
+        )
+
+        spec = AdapterSpec(
+            source_interface="io.read",
+            target_protocol="ToolPlugin",
+            bridge_type="json_rpc_bridge",
+            shim_methods=["io.read-file", 'say"hello'],
+            estimated_complexity="medium",
+        )
+        manifest = PluginManifestInput(
+            name='@org/dsh-io.tools"v2',
+            version="1.0",
+            category="tools",
+            declared_interfaces=["io.read-file", 'say"hello', "weird\nname"],
+            source_language="typescript",
+            raw_manifest={"main": 'bridge".js'},
+        )
+        code = generate_adapter_template(spec, manifest)
+        # The internal compile() guard already ran; this asserts it end-to-end.
+        compile(code, "<test>", "exec")  # Must not raise
+        assert "class Dsh" in code
+        assert "plugin_id" in code
+
+    def test_adapter_template_special_chars_instantiable(self) -> None:
+        """The escaped adapter can be exec'd and instantiated without error."""
+        from leapflow.learning.compatibility.adapter_generator import (
+            generate_adapter_template,
+        )
+
+        spec = AdapterSpec(
+            source_interface="io.read",
+            target_protocol="ToolPlugin",
+            bridge_type="json_rpc_bridge",
+            estimated_complexity="low",
+        )
+        manifest = PluginManifestInput(
+            name='@org/dsh-io.tools"v2',
+            version="1.0",
+            category="tools",
+            declared_interfaces=["io.read-file", 'say"hello'],
+            source_language="typescript",
+        )
+        code = generate_adapter_template(spec, manifest)
+        namespace: dict = {}
+        exec(compile(code, "<test>", "exec"), namespace)
+        cls = namespace["DshIoToolsV2BridgePlugin"]
+        instance = cls()
+        assert instance.plugin_id == "dsh_io_tools_v2_bridge"
+        assert len(instance.tools) == 2

@@ -4893,7 +4893,38 @@ class AgentEngine:
         try:
             handler = handlers.get(name)
             if handler is not None:
-                result = await asyncio.wait_for(handler(args), timeout=timeout)
+                # The tool execution pipeline wraps only the handler call,
+                # enabling composable interceptors (audit, rate-limit, etc.)
+                # without touching the surrounding approval/semantic gates.
+                # Fast path: no interceptors registered = direct call, zero overhead.
+                from leapflow.plugins import get_registry
+                pipeline = get_registry().tool_pipeline
+                if pipeline.interceptor_count > 0:
+                    from leapflow.domain.tool_pipeline import ToolCallContext
+
+                    spec = _default_tool_registry().specs.get(name)
+                    tool_metadata: Dict[str, Any] = {}
+                    if spec is not None:
+                        tool_metadata = {
+                            "risk_level": spec.risk_level,
+                            "mutates_state": spec.mutates_state,
+                            "effect_scope": spec.effect_scope,
+                            "idempotency_scope": spec.idempotency_scope,
+                        }
+                    call_ctx = ToolCallContext(
+                        tool_name=name,
+                        arguments=args,
+                        metadata=tool_metadata,
+                        annotations={"timeout": timeout},
+                    )
+
+                    async def _invoke_handler(ctx: ToolCallContext) -> Dict[str, Any]:
+                        """Bridge the pipeline's context-based call to the args handler."""
+                        return await handler(ctx.arguments)
+
+                    result = await pipeline.execute(call_ctx, _invoke_handler)
+                else:
+                    result = await asyncio.wait_for(handler(args), timeout=timeout)
             else:
                 # No handler — tool is truly unknown
                 missing_resolution = registry.resolve(original_name, args)

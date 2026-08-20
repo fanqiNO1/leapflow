@@ -123,9 +123,22 @@ class ToolExecutionPipeline:
 
         Returns:
             The final result dict (possibly transformed by after hooks).
+
+        Timeout: when ``context.annotations['timeout']`` is set (the engine
+        passes the per-tool timeout there), the handler invocation is wrapped
+        in ``asyncio.wait_for``. A timeout raises ``asyncio.TimeoutError`` so
+        the caller's existing timeout handling stays authoritative. When no
+        timeout is annotated the handler is called directly (no wrapping).
         """
-        if not self._interceptors:
+        timeout = context.annotations.get("timeout")
+
+        async def _run_handler() -> Dict[str, Any]:
+            if timeout is not None:
+                return await asyncio.wait_for(handler(context), timeout=timeout)
             return await handler(context)
+
+        if not self._interceptors:
+            return await _run_handler()
 
         # Phase 1: before() hooks in priority order
         executed_before: List[ToolInterceptor] = []
@@ -140,8 +153,8 @@ class ToolExecutionPipeline:
                 return result
             executed_before.append(interceptor)
 
-        # Phase 2: execute the handler
-        result = await handler(context)
+        # Phase 2: execute the handler (timeout-wrapped when annotated)
+        result = await _run_handler()
 
         # Phase 3: after() hooks in REVERSE priority order
         for interceptor in reversed(self._interceptors):

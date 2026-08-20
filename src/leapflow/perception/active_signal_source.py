@@ -82,8 +82,11 @@ class ActiveSourceManager:
         await manager.dispose()     # cancels sources, awaits stop(), drains queue
 
     Future extension: this manager can be integrated with EffectScope by taking
-    a parent_scope parameter and registering dispose() as an effect. Not needed
-    for MVP; ActiveSourceManager lifecycle is currently owned by PerceptionSession.
+    a parent_scope parameter and registering dispose() as an effect. Because
+    dispose() is a coroutine, it must be registered via ``scope.async_effect()``
+    (not ``scope.effect()``) so ``EffectScope.async_dispose()`` awaits it. Not
+    needed for MVP; ActiveSourceManager lifecycle is currently owned by
+    PerceptionSession, which awaits ``dispose()`` directly in ``stop()``.
     """
 
     def __init__(

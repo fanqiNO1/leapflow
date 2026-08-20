@@ -12,6 +12,7 @@ not against the manifest at conversion time.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -68,7 +69,10 @@ def _normalize_name(raw_name: str) -> str:
     """Normalize a DSH package name into a LeapFlow plugin name.
 
     Strips a leading ``@org/`` scope, a ``dsh-`` prefix, then replaces
-    hyphens with underscores. Returns ``"unknown_plugin"`` for empty input.
+    hyphens with underscores. Any remaining non-identifier character (dots,
+    quotes, whitespace, ...) is collapsed to an underscore so the result is
+    always a valid Python identifier fragment suitable for code generation.
+    Returns ``"unknown_plugin"`` for empty input.
     """
     if not isinstance(raw_name, str) or not raw_name:
         return "unknown_plugin"
@@ -82,6 +86,10 @@ def _normalize_name(raw_name: str) -> str:
         name = name[len("dsh-"):]
     # LeapFlow plugin names are snake_case identifiers
     name = name.replace("-", "_")
+    # Keep only valid Python identifier characters so downstream code
+    # generation (class names, plugin ids) never emits invalid source.
+    name = re.sub(r"[^0-9a-zA-Z_]", "_", name)
+    name = name.strip("_")
     return name or "unknown_plugin"
 
 
