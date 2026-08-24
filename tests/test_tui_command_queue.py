@@ -345,6 +345,30 @@ def test_submit_text_rejects_empty_commands() -> None:
     assert status.counts == []
 
 
+@pytest.mark.asyncio
+async def test_process_loop_clears_spinner_after_command_completion() -> None:
+    holder: dict[str, LeapApp] = {}
+
+    async def on_input(_text: str) -> None:
+        holder["app"].spinner_text = "Thinking…"
+
+    app, console, _status = _make_app(on_input=on_input)
+    holder["app"] = app
+    task = asyncio.create_task(app._process_loop())
+    try:
+        app.submit_text("/plugin reload demo")
+        await _wait_for(lambda: any(c.status is TuiCommandStatus.DONE for c in console.cards))
+        assert app.spinner_text == ""
+        assert app._tool_start_time == 0.0
+    finally:
+        app._should_exit = True
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 def test_slash_completer_shows_commands_and_descriptions() -> None:
     completer = SlashCommandCompleter((
         ("help", "Show available commands"),

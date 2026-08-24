@@ -62,6 +62,28 @@ def test_detector_aggregates_repeated_unknown_tools() -> None:
     assert proposals[0].proposed_tools[0].name == "foo_tool"
 
 
+def test_detector_aggregates_unknown_tools_into_requirements() -> None:
+    detector = CapabilityGapDetector()
+    results = [
+        {
+            "error_type": "unknown_tool",
+            "original_tool_name": "json.pretty-print",
+            "suggestions": ["json_validate"],
+            "recovery_hint": "No formatter is registered.",
+        },
+        {"error_type": "unknown_tool", "original_tool_name": "json.pretty-print"},
+    ]
+
+    requirements = detector.requirements_from_tool_results(results, min_count=2)
+
+    assert len(requirements) == 1
+    req = requirements[0]
+    assert req.requirement_id == "req-unknown-tool-json_pretty_print"
+    assert req.capability == "json_pretty_print"
+    assert req.origin == "unknown_tool"
+    assert dict(req.metadata)["occurrences"] == "2"
+
+
 def test_detector_builds_proposal_from_explicit_request() -> None:
     detector = CapabilityGapDetector()
 

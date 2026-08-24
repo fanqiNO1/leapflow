@@ -13,6 +13,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from leapflow.plugins.capability_plan import CapabilityPlan, CapabilityPlanStep
+from leapflow.plugins.capability_resolver import (
+    CapabilityCandidate,
+    CapabilityResolution,
+    CapabilityResolver,
+    ResolverContext,
+)
 from leapflow.plugins.protocol import ToolMetadata, ToolPlugin
 from leapflow.plugins.registry import ToolPluginRegistry
 from leapflow.plugins.scoped_registry import ScopedToolRegistry
@@ -61,6 +68,12 @@ def reload_plugin(plugin_id: str) -> "PluginFiber":
 
 
 __all__ = [
+    "CapabilityCandidate",
+    "CapabilityPlan",
+    "CapabilityPlanStep",
+    "CapabilityResolution",
+    "CapabilityResolver",
+    "ResolverContext",
     "ScopedToolRegistry",
     "ToolMetadata",
     "ToolPlugin",

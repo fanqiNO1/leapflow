@@ -88,6 +88,9 @@ class SelfManagementPlugin:
         self._plugin_proposal_store: Any = None
         # Optional version store; lazily resolved from ProfileLayout.plugin_versions_dir.
         self._plugin_version_store: Any = None
+        # Optional adaptive capability decision store; lazily resolved from
+        # ProfileLayout.capability_plans_path.
+        self._capability_plan_store: Any = None
 
     @property
     def plugin_id(self) -> str:
@@ -108,6 +111,7 @@ class SelfManagementPlugin:
             "marketplace_trusted_pubkeys",
             "plugin_proposal_store",
             "plugin_version_store",
+            "capability_plan_store",
         ]
 
     def bind_runtime(self, **deps: Any) -> None:
@@ -129,6 +133,8 @@ class SelfManagementPlugin:
             self._plugin_proposal_store = deps["plugin_proposal_store"]
         if "plugin_version_store" in deps:
             self._plugin_version_store = deps["plugin_version_store"]
+        if "capability_plan_store" in deps:
+            self._capability_plan_store = deps["capability_plan_store"]
 
     # ── Read-only introspection ────────────────────────────
 
@@ -260,6 +266,9 @@ class SelfManagementPlugin:
             "version_store_available": (
                 self._plugin_version_store is not None or profile_layout is not None
             ),
+            "capability_plan_store_available": (
+                self._capability_plan_store is not None or profile_layout is not None
+            ),
         }
         limitations = self._capability_limitations(dependency_state)
 
@@ -271,6 +280,14 @@ class SelfManagementPlugin:
                 "tool_count": len(reg.tool_handlers),
                 "fiber_count": len(scoped.fibers),
                 "categories": sorted(tool_categories),
+                "capability_conflicts": [
+                    {
+                        "tool_name": c.tool_name,
+                        "kept_plugin": c.kept_plugin,
+                        "rejected_plugin": c.rejected_plugin,
+                    }
+                    for c in getattr(reg, "conflicts", [])
+                ],
             },
             "plugins_supported": {
                 "supported": "self_management" in reg.plugins,
@@ -336,6 +353,8 @@ class SelfManagementPlugin:
             limitations.append("Plugin proposals require a profile layout or injected proposal store.")
         if not dependency_state["version_store_available"]:
             limitations.append("Plugin versioning requires a profile layout or injected version store.")
+        if not dependency_state["capability_plan_store_available"]:
+            limitations.append("Adaptive capability plan history requires a profile layout or injected plan store.")
         return limitations
 
     async def _plugin_status_handler(self, plugin_id: str, **kwargs: Any) -> Dict[str, Any]:
@@ -387,6 +406,29 @@ class SelfManagementPlugin:
         except (RuntimeError, AttributeError) as exc:
             logger.warning("plugin_status failed for %s: %s", plugin_id, exc, exc_info=True)
             return {"ok": False, "error": f"plugin_status failed: {exc}"}
+
+    async def _plugin_plan_handler(self, limit: int = 5, latest: bool = False, **kwargs: Any) -> Dict[str, Any]:
+        """Inspect stored adaptive capability decisions and plans."""
+        try:
+            store = self._capability_plan_store_resolved()
+            if latest:
+                record = store.latest()
+                return {
+                    "ok": True,
+                    "store_path": str(getattr(store, "path", "")),
+                    "latest": record,
+                    "records": [record] if record else [],
+                }
+            records = store.list_records(limit=max(1, int(limit or 5)))
+            return {
+                "ok": True,
+                "store_path": str(getattr(store, "path", "")),
+                "records": records,
+                "count": len(records),
+            }
+        except (RuntimeError, AttributeError, OSError, ValueError) as exc:
+            logger.warning("plugin_plan failed: %s", exc, exc_info=True)
+            return {"ok": False, "error": f"plugin_plan failed: {exc}"}
 
     # ── Generation (produces code, does NOT install) ──────────
 
@@ -675,6 +717,20 @@ class SelfManagementPlugin:
             raise RuntimeError("profile_layout is required for plugin version storage")
         self._plugin_version_store = PluginVersionStore(profile_layout.plugin_versions_dir)
         return self._plugin_version_store
+
+    def _capability_plan_store_resolved(self) -> Any:
+        """Resolve the profile-scoped adaptive capability decision store."""
+        if self._capability_plan_store is not None:
+            return self._capability_plan_store
+        from leapflow.config import get_settings
+        from leapflow.storage.capability_plan_store import JsonCapabilityPlanStore
+
+        settings = get_settings()
+        profile_layout = getattr(settings, "profile_layout", None)
+        if profile_layout is None:
+            raise RuntimeError("profile_layout is required for capability plan storage")
+        self._capability_plan_store = JsonCapabilityPlanStore(profile_layout.capability_plans_path)
+        return self._capability_plan_store
 
     async def _install_from_code(
         self, plugin_id: str, code: str, *, proposal: Any = None, version_label: str = ""

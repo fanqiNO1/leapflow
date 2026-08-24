@@ -1095,7 +1095,7 @@ async def handle_app(ctx: "Context", console: "LeapConsole", args: str) -> None:
 # PENDING HUMAN CONFIRMATION per AGENTS.md:
 # This slash command requires a second human confirmation before shipping.
 # The behavior to exercise: /plugin list, /plugin status text_utils,
-# /plugin reload text_utils (in daemon mode with approval gate).
+# /plugin plan --latest, /plugin reload text_utils (in daemon mode with approval gate).
 # ══════════════════════════════════════════════════════════════════════
 
 
@@ -1144,6 +1144,54 @@ def _slugify_description(desc: str) -> str:
         meaningful = [w for w in words if len(w) > 1][:3]
     slug = "_".join(meaningful)[:30].rstrip("_")
     return slug or "generated_plugin"
+
+
+def plugin_generate_start_payload(args: str) -> dict[str, Any] | None:
+    """Return a user-facing progress preamble for /plugin generate.
+
+    The command itself is a non-streaming RPC in daemon mode, so this preamble is
+    rendered before the long call starts. It makes the blocking phase explicit
+    without inventing fake progress percentages.
+    """
+    normalized_args = args.strip()
+    if normalized_args == "generate":
+        normalized_args = ""
+    elif normalized_args.startswith("generate "):
+        normalized_args = normalized_args[len("generate "):].strip()
+    preview, dry_run, explicit_id, description = _parse_generate_flags(normalized_args)
+    if not description.strip():
+        return None
+    plugin_id = explicit_id or _slugify_description(description)
+    mode = "preview" if preview else ("dry-run" if dry_run else "install")
+    return {
+        "plugin_id": plugin_id,
+        "mode": mode,
+        "steps": [
+            "configuration and LLM provider checks",
+            "LLM generation with one bounded repair attempt",
+            "syntax / structure / protocol validation",
+            "profile install and sandbox smoke test" if mode == "install" else "return validated code without installing",
+            "runtime registry activation" if mode == "install" else "operator review",
+        ],
+    }
+
+
+def render_plugin_generate_start(console: "LeapConsole", args: str) -> None:
+    """Render immediate feedback before /plugin generate enters its long RPC."""
+    payload = plugin_generate_start_payload(args)
+    if payload is None:
+        return
+    from rich.panel import Panel
+    from rich.text import Text
+
+    info = Text()
+    info.append(f"Plugin: {payload['plugin_id']}\n")
+    info.append(f"Mode:   {payload['mode']}\n")
+    info.append("Stages:\n")
+    for idx, step in enumerate(payload["steps"], 1):
+        info.append(f"  {idx}. {step}\n")
+    info.append("This can take several minutes; daemon heartbeat keeps the command alive.")
+    console.print(Panel(info, title="Plugin generation started", border_style="yellow"))
 
 
 def _resolve_llm_for_generate(ctx: "Context") -> Any:
@@ -1239,38 +1287,75 @@ async def _do_generate_install(ctx: "Context", plugin_id: str, code: str) -> dic
 
 async def _handle_plugin_generate(ctx: "Context", args: str) -> dict[str, Any]:
     """Handle /plugin generate <description>."""
+    import time as _time
+
+    started = _time.monotonic()
+    steps: list[dict[str, Any]] = []
+
+    def add_step(name: str, status: str, detail: str = "") -> None:
+        steps.append({"name": name, "status": status, "detail": detail})
+
+    def elapsed() -> float:
+        return round(_time.monotonic() - started, 2)
+
     # 1. Parse flags
-    preview, dry_run, explicit_id, description = _parse_generate_flags(args)
+    normalized_args = args.strip()
+    if normalized_args == "generate":
+        normalized_args = ""
+    elif normalized_args.startswith("generate "):
+        normalized_args = normalized_args[len("generate "):].strip()
+    preview, dry_run, explicit_id, description = _parse_generate_flags(normalized_args)
     if not description.strip():
         return {"ok": False, "error": "Usage: /plugin generate <description>"}
+    add_step("parse_request", "ok", "Parsed generation flags and description.")
 
     # 2. Config gate
     from leapflow.config import get_settings
 
     settings = get_settings()
     if not getattr(settings, "plugin_generation_enabled", False):
+        add_step("config_gate", "blocked", "plugin.generation_enabled is false")
         return {
             "ok": False,
+            "view": "plugin_generate",
+            "steps": steps,
+            "duration_s": elapsed(),
             "error": "Plugin generation is disabled. Enable: /config set plugin.generation_enabled true",
         }
+    add_step("config_gate", "ok", "Plugin generation is enabled.")
 
     # 3. LLM gate
     llm_provider = _resolve_llm_for_generate(ctx)
     if llm_provider is None:
-        return {"ok": False, "error": "No LLM provider available. Configure credentials first."}
+        add_step("llm_gate", "blocked", "No LLM provider is available.")
+        return {
+            "ok": False,
+            "view": "plugin_generate",
+            "steps": steps,
+            "duration_s": elapsed(),
+            "error": "No LLM provider available. Configure credentials first.",
+        }
+    add_step("llm_gate", "ok", f"Using provider {llm_provider.__class__.__name__}.")
 
     # 4. Derive plugin_id
     plugin_id = explicit_id or _slugify_description(description)
+    add_step("plugin_id", "ok", f"Resolved plugin id: {plugin_id}")
 
     # Check collision
     from leapflow.plugins import get_registry
 
     reg = get_registry()
     if reg.get_plugin(plugin_id) is not None:
+        add_step("collision_check", "blocked", f"Plugin '{plugin_id}' already exists.")
         return {
             "ok": False,
+            "view": "plugin_generate",
+            "plugin_id": plugin_id,
+            "steps": steps,
+            "duration_s": elapsed(),
             "error": f"Plugin '{plugin_id}' already exists. Use --id <new_name> or /plugin reload {plugin_id}.",
         }
+    add_step("collision_check", "ok", "No existing plugin has that id.")
 
     # 5. Generate with bounded retry (max 1 refinement on validation failure)
     from leapflow.learning.plugin_generator import PluginGenerator, PluginGenerationRequest
@@ -1289,48 +1374,81 @@ async def _handle_plugin_generate(ctx: "Context", args: str) -> dict[str, Any]:
             desc_for_llm = f"{description}\n\nPrevious attempt failed: {snippet}. Fix the issue."
 
         request = PluginGenerationRequest(plugin_id=plugin_id, description=desc_for_llm)
+        attempt_started = _time.monotonic()
         result = await generator.generate_and_validate(request)
+        attempt_duration = round(_time.monotonic() - attempt_started, 2)
 
         if result.get("ok"):
             code = result["code"]
             tools_list = result.get("exposed_tools", [])
+            add_step(
+                f"generate_attempt_{attempt + 1}",
+                "ok",
+                f"Generated and validated {len(tools_list)} tool(s) in {attempt_duration}s.",
+            )
             break
-        else:
-            last_error = result.get("error", "Unknown error")
-            # Only retry on refinable failures (syntax/protocol/structure)
-            stage = result.get("stage", "")
-            if stage not in ("syntax", "protocol", "structure"):
-                break
+        last_error = result.get("error", "Unknown error")
+        stage = str(result.get("stage", ""))
+        add_step(
+            f"generate_attempt_{attempt + 1}",
+            "failed",
+            f"stage={stage or 'unknown'}; {last_error}; duration={attempt_duration}s",
+        )
+        # Only retry on refinable failures (syntax/protocol/structure)
+        if stage not in ("syntax", "protocol", "structure"):
+            break
 
     if code is None:
-        return {"ok": False, "view": "plugin_generate", "error": f"Generation failed: {last_error}"}
+        return {
+            "ok": False,
+            "view": "plugin_generate",
+            "plugin_id": plugin_id,
+            "steps": steps,
+            "duration_s": elapsed(),
+            "error": f"Generation failed: {last_error}",
+        }
 
     # 6. Preview gate
     if preview:
+        add_step("preview", "waiting_review", "Generated code returned without installing.")
         return {
             "ok": True,
             "view": "plugin_generate_preview",
             "code": code,
             "plugin_id": plugin_id,
             "tools": tools_list,
+            "steps": steps,
+            "duration_s": elapsed(),
             "awaiting_confirm": True,
+            "message": f"Preview generated for plugin '{plugin_id}'.",
         }
 
     if dry_run:
+        add_step("dry_run", "ok", "Validated code returned without installing.")
         return {
             "ok": True,
             "view": "plugin_generate_dry",
             "code": code,
             "plugin_id": plugin_id,
             "tools": tools_list,
+            "steps": steps,
+            "duration_s": elapsed(),
             "message": f"Dry run: plugin '{plugin_id}' validated but not installed.",
         }
 
     # 7. Install
+    install_started = _time.monotonic()
     install_result = await _do_generate_install(ctx, plugin_id, code)
+    install_duration = round(_time.monotonic() - install_started, 2)
     if not install_result.get("ok"):
+        add_step("install", "failed", f"{install_result.get('error', 'install failed')}; duration={install_duration}s")
         install_result["view"] = "plugin_generate"
+        install_result["plugin_id"] = plugin_id
+        install_result["tools"] = tools_list
+        install_result["steps"] = steps
+        install_result["duration_s"] = elapsed()
         return install_result
+    add_step("install", "ok", f"Installed, smoke-tested, and activated in {install_duration}s.")
 
     # 8. Success
     return {
@@ -1339,6 +1457,9 @@ async def _handle_plugin_generate(ctx: "Context", args: str) -> dict[str, Any]:
         "plugin_id": plugin_id,
         "tools": tools_list,
         "trust_level": "DRAFT",
+        "steps": steps,
+        "duration_s": elapsed(),
+        "install": install_result,
         "message": f"Plugin '{plugin_id}' generated, validated, and installed.",
     }
 
@@ -1414,6 +1535,32 @@ async def build_plugin_payload(ctx: "Context", args: str) -> dict[str, Any]:
         except (RuntimeError, AttributeError) as exc:
             return {"ok": False, "error": f"plugin status failed: {exc}"}
 
+    if subcommand == "plan":
+        tokens = sub_args.split()
+        latest = "--latest" in tokens
+        limit = 5
+        if "--limit" in tokens:
+            idx = tokens.index("--limit")
+            if idx + 1 >= len(tokens):
+                return {"ok": False, "error": "Usage: /plugin plan [--latest|--limit <n>]"}
+            try:
+                limit = max(1, int(tokens[idx + 1]))
+            except ValueError:
+                return {"ok": False, "error": "--limit must be an integer"}
+        try:
+            reg = get_registry()
+            sm_plugin = reg.get_plugin("self_management")
+            if sm_plugin is None:
+                return {"ok": False, "error": "self_management plugin not available"}
+            handler = getattr(sm_plugin, "_plugin_plan_handler", None)
+            if handler is None:
+                return {"ok": False, "error": "plugin_plan handler not available"}
+            result = await handler(limit=limit, latest=latest)
+            result["view"] = "plugin_plan"
+            return result
+        except (RuntimeError, AttributeError) as exc:
+            return {"ok": False, "error": f"plugin plan failed: {exc}"}
+
     if subcommand in ("reload", "disable", "enable"):
         if not sub_args:
             return {"ok": False, "error": f"Usage: /plugin {subcommand} <plugin_id>"}
@@ -1437,16 +1584,50 @@ async def build_plugin_payload(ctx: "Context", args: str) -> dict[str, Any]:
     if subcommand == "generate":
         return await _handle_plugin_generate(ctx, sub_args)
 
-    return {"ok": False, "error": f"Unknown subcommand: /plugin {subcommand}. Use: list, status, reload, disable, enable, generate"}
+    return {"ok": False, "error": f"Unknown subcommand: /plugin {subcommand}. Use: list, status, plan, reload, disable, enable, generate"}
+
+
+def _render_plugin_generate_steps(console: "LeapConsole", payload: dict[str, Any]) -> None:
+    """Render generation stage details when present."""
+    steps = payload.get("steps") or []
+    if not steps:
+        return
+    from rich.table import Table
+
+    duration = payload.get("duration_s")
+    title = "Plugin generation stages"
+    if duration is not None:
+        title = f"{title} ({duration}s)"
+    table = Table(
+        title=title,
+        show_header=True,
+        header_style="bold",
+        border_style="bright_black",
+        title_style="bold cyan",
+        padding=(0, 1),
+    )
+    table.add_column("Stage", style="cyan", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Details")
+    for step in steps:
+        status = str(step.get("status") or "")
+        style = "green" if status == "ok" else ("yellow" if status in {"blocked", "waiting_review"} else "red")
+        table.add_row(
+            str(step.get("name") or ""),
+            f"[{style}]{status or '-'}[/{style}]",
+            str(step.get("detail") or ""),
+        )
+    console.print(table)
 
 
 def render_plugin_payload(console: "LeapConsole", payload: dict[str, Any]) -> None:
     """Render a /plugin command result."""
+    view = str(payload.get("view") or "")
     if not payload.get("ok", True):
+        if view == "plugin_generate":
+            _render_plugin_generate_steps(console, payload)
         console.warning(str(payload.get("error") or "Plugin command failed."))
         return
-
-    view = str(payload.get("view") or "")
 
     if view == "plugin_list":
         from rich.table import Table
@@ -1506,6 +1687,45 @@ def render_plugin_payload(console: "LeapConsole", payload: dict[str, Any]) -> No
         console.print(Panel(info, title=str(payload.get("plugin_id") or "Plugin"), border_style="cyan"))
         return
 
+    if view == "plugin_plan":
+        from rich.table import Table
+
+        records = payload.get("records") or []
+        if not records:
+            console.system("No adaptive plugin capability decisions recorded yet.")
+            return
+        table = Table(
+            title="Adaptive Plugin Plans",
+            show_header=True,
+            header_style="bold",
+            border_style="bright_black",
+            title_style="bold cyan",
+            padding=(0, 1),
+        )
+        table.add_column("Record", style="cyan", no_wrap=True)
+        table.add_column("Selected")
+        table.add_column("Plan")
+        table.add_column("Executable", justify="center")
+        for record in records:
+            resolutions = record.get("resolutions") or []
+            selected = []
+            for resolution in resolutions:
+                selected_payload = resolution.get("selected") or {}
+                candidate = selected_payload.get("candidate") or {}
+                tool_name = str(candidate.get("tool_name") or "")
+                if tool_name:
+                    selected.append(tool_name)
+            plan_payload = record.get("plan") or {}
+            steps = plan_payload.get("steps") or []
+            table.add_row(
+                str(record.get("record_id") or "")[:18],
+                ", ".join(selected) or "-",
+                " → ".join(str(s.get("tool_name") or "") for s in steps) or "-",
+                "yes" if plan_payload.get("executable") else "no",
+            )
+        console.print(table)
+        return
+
     if view == "plugin_generate":
         msg = payload.get("message", "")
         plugin_id = payload.get("plugin_id", "")
@@ -1518,7 +1738,11 @@ def render_plugin_payload(console: "LeapConsole", payload: dict[str, Any]) -> No
             parts.append(f"Tools: {', '.join(tools)}")
         if trust:
             parts.append(f"Trust: {trust}")
+        duration = payload.get("duration_s")
+        if duration is not None:
+            parts.append(f"Duration: {duration}s")
         console.success(" | ".join(parts) if parts else f"Plugin '{plugin_id}' generated.")
+        _render_plugin_generate_steps(console, payload)
         return
 
     if view == "plugin_generate_preview":
@@ -1529,6 +1753,7 @@ def render_plugin_payload(console: "LeapConsole", payload: dict[str, Any]) -> No
         tools = payload.get("tools") or []
         code = payload.get("code", "")
         console.system(f"Preview: plugin '{plugin_id}' with tools: {', '.join(tools)}")
+        _render_plugin_generate_steps(console, payload)
         console.print(Panel(
             Syntax(code, "python", theme="monokai", line_numbers=True),
             title=f"{plugin_id} (preview)",
@@ -1542,6 +1767,7 @@ def render_plugin_payload(console: "LeapConsole", payload: dict[str, Any]) -> No
         tools = payload.get("tools") or []
         msg = payload.get("message", f"Dry run complete for '{plugin_id}'.")
         console.system(f"{msg} Tools: {', '.join(tools)}")
+        _render_plugin_generate_steps(console, payload)
         return
 
     # Mutation results (reload, disable, enable)
@@ -2375,11 +2601,13 @@ async def _execute_scheduler_arm(ctx: "Context", args: str) -> dict[str, Any]:
 
 def render_command_payload(console: "LeapConsole", payload: dict[str, Any]) -> None:
     """Render a generic command_execute result payload in the TUI."""
+    view = str(payload.get("view") or "")
+    if view.startswith("plugin_"):
+        render_plugin_payload(console, payload)
+        return
     if not payload.get("ok"):
         console.warning(str(payload.get("message") or payload.get("error") or "Command failed."))
         return
-
-    view = str(payload.get("view") or "")
 
     if view == "status":
         _render_status_view(console, payload)

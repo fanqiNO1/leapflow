@@ -1,5 +1,10 @@
 """Shared domain model — zero-dependency data types used across all layers."""
 
+from leapflow.domain.capability_requirement import (
+    ApprovalMode,
+    CapabilityRequirement,
+    RequirementOrigin,
+)
 from leapflow.domain.effect_scope import EffectScope, ScopeState
 from leapflow.domain.event_types import (
     CLIEventType,
@@ -9,6 +14,7 @@ from leapflow.domain.event_types import (
     UIActionSubType,
     UNDO_SHORTCUTS,
 )
+from leapflow.domain.environment_fingerprint import EnvironmentFingerprint
 from leapflow.domain.events import SystemEvent, UIElement, UISnapshot
 from leapflow.domain.platform import (
     Capability,
@@ -36,8 +42,10 @@ from leapflow.domain.trajectory import (
 
 __all__ = [
     "ActionType",
+    "ApprovalMode",
     "BehaviorTestCase",
     "CLIEventType",
+    "CapabilityRequirement",
     "EffectScope",
     "FiberState",
     "GapEvidence",
@@ -49,6 +57,7 @@ __all__ = [
     "Capability",
     "DEFAULT_DARWIN_CAPABILITIES",
     "DistillationCandidate",
+    "EnvironmentFingerprint",
     "Episode",
     "IllegalStateTransition",
     "NoiseSignal",
@@ -59,6 +68,7 @@ __all__ = [
     "ProposedToolSpec",
     "RawAction",
     "RecordingState",
+    "RequirementOrigin",
     "ScopeState",
     "SemanticAction",
     "SkillMetadata",

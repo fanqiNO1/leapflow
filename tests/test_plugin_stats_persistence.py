@@ -2,7 +2,8 @@
 
 Covers the DuckDB-backed ``PluginStatsStore`` round-trip, the
 ``_PersistingTrustLedger`` save-on-transition behavior, graceful degradation
-when the store is unavailable or corrupt, and the process-global wiring in
+when the store is unavailable or corrupt, the durable rolling usage samples that
+reliability scoring depends on, and the process-global wiring in
 ``_wire_plugin_stats_sink`` / ``persist_plugin_trust_state``.
 
 Hermetic: no network, no LLM, DuckDB writes confined to ``tmp_path``.
@@ -23,6 +24,7 @@ from leapflow.engine.session_factory import (
     persist_plugin_trust_state,
 )
 from leapflow.engine.turn_usage import TurnUsageTracker
+from leapflow.learning.plugin_stats import PluginUsageTracker
 from leapflow.learning.plugin_stats_store import PluginStatsStore
 from leapflow.learning.plugin_trust import PluginTrustLedger, PluginTrustLevel
 
@@ -239,3 +241,163 @@ class TestSinkWiringPersistence:
         sf, pa = reset_singletons
         assert sf._DEFAULT_STATS_STORE is None
         assert persist_plugin_trust_state() is False
+
+
+class TestUsageStateRoundTrip:
+    """Rolling usage samples must outlive the process.
+
+    Reliability scoring reads error rate and p95 latency to choose between
+    competing plugins. Held only in memory, that evidence resets on every
+    restart and the scorer silently falls back to "insufficient data".
+    """
+
+    def test_usage_samples_round_trip_preserves_stats(self, tmp_path: Path) -> None:
+        """save → reopen → load reproduces the same aggregated statistics."""
+        store = PluginStatsStore(_db(tmp_path))
+        tracker = PluginUsageTracker()
+        for _ in range(7):
+            tracker.record("probe_tool", True, 10.0)
+        for _ in range(3):
+            tracker.record("probe_tool", False, 50.0)
+
+        assert store.save_usage_state(tracker.to_state()) is True
+
+        state = PluginStatsStore(_db(tmp_path)).load_usage_state()
+        assert state is not None
+        restored = PluginUsageTracker.load_state(state)
+
+        samples = restored._samples["probe_tool"]
+        assert len(samples) == 10
+        assert sum(1 for s in samples if not s.ok) == 3
+        # The durations survive, so p95 and average remain computable.
+        assert max(s.duration_ms for s in samples) == 50.0
+
+    def test_empty_and_missing_state_degrade_to_fresh_tracker(self, tmp_path: Path) -> None:
+        """No stored usage yields an empty tracker rather than an error."""
+        assert PluginStatsStore(_db(tmp_path)).load_usage_state() is None
+        assert PluginUsageTracker.load_state({})._samples == {}
+
+    def test_malformed_sample_rows_are_skipped(self) -> None:
+        """A truncated blob loses samples, never startup."""
+        state = {
+            "max_samples_per_tool": 500,
+            "samples": {
+                "good_tool": [[1.0, True, 5.0], [2.0, False, 7.0]],
+                "broken_tool": [[1.0, True], "not-a-row", [1.0, True, "abc"]],
+                "wrong_shape": "not-a-list",
+            },
+        }
+        restored = PluginUsageTracker.load_state(state)
+
+        assert len(restored._samples["good_tool"]) == 2
+        assert len(restored._samples.get("broken_tool", [])) == 0
+        assert "wrong_shape" not in restored._samples
+
+    def test_persisted_window_uses_tracker_sample_limit(self) -> None:
+        """Persistence uses the tracker-configured sample window, not a new limit."""
+        tracker = PluginUsageTracker(max_samples_per_tool=25)
+        for i in range(40):
+            tracker.record("busy_tool", True, float(i))
+
+        rows = tracker.to_state()["samples"]["busy_tool"]
+        assert len(rows) == 25
+        # Truncated from the left: the newest sample is retained.
+        assert rows[-1][2] == 39.0
+
+    def test_no_path_store_usage_is_noop(self) -> None:
+        """A store with no db_path reports failure instead of raising."""
+        store = PluginStatsStore(None)
+        assert store.save_usage_state({"samples": {}}) is False
+        assert store.load_usage_state() is None
+
+
+class TestUsageSinkWiring:
+    """Wiring restores usage history and flushes it beside trust."""
+
+    @pytest.fixture
+    def reset_singletons(self, tmp_path: Path):
+        import leapflow.engine.session_factory as sf
+        from leapflow.learning import plugin_advisor as pa
+
+        saved_advisor = pa._default_advisor
+        saved_store = sf._DEFAULT_STATS_STORE
+        pa._default_advisor = None
+        sf._DEFAULT_STATS_STORE = None
+        try:
+            yield sf, pa
+        finally:
+            pa._default_advisor = saved_advisor
+            sf._DEFAULT_STATS_STORE = saved_store
+
+    def test_persist_flushes_usage_alongside_trust(
+        self, tmp_path: Path, reset_singletons
+    ) -> None:
+        """One persist call writes both tables, so trust keeps its evidence."""
+        sf, pa = reset_singletons
+        db_path = _db(tmp_path)
+
+        tracker = TurnUsageTracker()
+        sf._wire_plugin_stats_sink(tracker, db_path=db_path)
+        advisor = pa.get_default_advisor()
+        assert advisor is not None
+
+        advisor._usage_tracker.record("sink_tool", True, 12.0)
+        advisor._usage_tracker.record("sink_tool", False, 30.0)
+        assert persist_plugin_trust_state() is True
+
+        usage_state = PluginStatsStore(db_path).load_usage_state()
+        assert usage_state is not None
+        assert len(usage_state["samples"]["sink_tool"]) == 2
+
+    def test_wiring_restores_previous_usage_history(
+        self, tmp_path: Path, reset_singletons
+    ) -> None:
+        """A fresh process inherits the reliability history of the last one."""
+        sf, pa = reset_singletons
+        db_path = _db(tmp_path)
+        PluginStatsStore(db_path).save_usage_state(
+            {
+                "max_samples_per_tool": 500,
+                "samples": {"legacy_tool": [[1.0, True, 4.0], [2.0, False, 9.0]]},
+            }
+        )
+
+        sf._wire_plugin_stats_sink(TurnUsageTracker(), db_path=db_path)
+        advisor = pa.get_default_advisor()
+        assert advisor is not None
+
+        assert len(advisor._usage_tracker._samples["legacy_tool"]) == 2
+        # The restored tracker is still wired to the trust ledger.
+        assert advisor._usage_tracker._trust_ledger is advisor._trust_ledger
+
+    def test_corrupt_usage_state_degrades_to_empty_tracker(
+        self, tmp_path: Path, reset_singletons
+    ) -> None:
+        """An unreadable usage blob must not block wiring."""
+        sf, pa = reset_singletons
+        db_path = _db(tmp_path)
+        from leapflow.storage.duckdb_connect import connect
+
+        conn = connect(db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS plugin_usage_state (
+                    key TEXT PRIMARY KEY DEFAULT 'singleton',
+                    state_json TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO plugin_usage_state (key, state_json) "
+                "VALUES ('singleton', ?)",
+                ["{not valid json"],
+            )
+        finally:
+            conn.close()
+
+        sf._wire_plugin_stats_sink(TurnUsageTracker(), db_path=db_path)
+        advisor = pa.get_default_advisor()
+        assert advisor is not None
+        assert advisor._usage_tracker._samples == {}

@@ -42,7 +42,13 @@ class DaemonClient:
         """Return the Unix socket path used by this client."""
         return self._sock_path
 
-    async def request(self, method: str, params: dict[str, Any] | None = None) -> Any:
+    async def request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        on_stream_event: Callable[[StreamEvent], Any] | None = None,
+    ) -> Any:
         """Send one non-streaming JSON-RPC request and return its result.
 
         Handles server-sent heartbeat notifications transparently: each
@@ -60,6 +66,12 @@ class DaemonClient:
                 if payload.get("method") == "stream.chunk":
                     p = payload.get("params") or {}
                     if isinstance(p.get("metadata"), dict) and p["metadata"].get("heartbeat"):
+                        continue
+                    if p.get("id") == request.id and on_stream_event is not None:
+                        event = _event_from_params(dict(p))
+                        result = on_stream_event(event)
+                        if hasattr(result, "__await__"):
+                            await result
                         continue
                 if payload.get("id") != request.id:
                     continue
@@ -225,7 +237,14 @@ class DaemonClient:
         result = await self.request("app.command", {"args": args})
         return dict(result or {})
 
-    async def command_execute(self, name: str, args: str = "", session_id: str = "") -> dict[str, Any]:
+    async def command_execute(
+        self,
+        name: str,
+        args: str = "",
+        session_id: str = "",
+        *,
+        on_stream_event: Callable[[StreamEvent], Any] | None = None,
+    ) -> dict[str, Any]:
         """Execute any engine-routed slash command via daemon.
 
         ``session_id`` tells the daemon which client session the command belongs
@@ -233,7 +252,9 @@ class DaemonClient:
         conversation instead of whichever session was last active.
         """
         result = await self.request(
-            "command.execute", {"name": name, "args": args, "session_id": session_id},
+            "command.execute",
+            {"name": name, "args": args, "session_id": session_id},
+            on_stream_event=on_stream_event,
         )
         return dict(result or {})
 

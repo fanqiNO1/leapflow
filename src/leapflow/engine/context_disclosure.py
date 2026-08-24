@@ -179,6 +179,7 @@ class DisclosureRuntimeState:
     context_posture: str = "baseline"
     recent_failure: bool = False
     last_turn_tool_categories: frozenset[str] = field(default_factory=frozenset)
+    active_capability_plan: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +209,13 @@ class DisclosurePlanner:
         expanded_defs: list[Mapping[str, Any]] = list(core_defs)
         expanded_names: set[str] = set(core_names)
         expanded_categories: list[str] = []
+        planned_tool_names = set(_planned_tool_names(runtime.active_capability_plan))
+
+        for tool_definition in tool_definitions:
+            name = _tool_name(tool_definition)
+            if name in planned_tool_names and name not in expanded_names:
+                expanded_defs.append(tool_definition)
+                expanded_names.add(name)
 
         for category in sorted(runtime.last_turn_tool_categories):
             if not category:
@@ -223,29 +231,34 @@ class DisclosurePlanner:
             if matched:
                 expanded_categories.append(category)
 
-        level = DisclosureLevel.EXPANDED if expanded_categories else DisclosureLevel.CORE
-        reason = (
-            f"tier1: continuity({', '.join(expanded_categories)})"
-            if expanded_categories
-            else "tier0/0.5: static core whitelist"
-        )
+        level = DisclosureLevel.EXPANDED if expanded_categories or planned_tool_names else DisclosureLevel.CORE
+        if planned_tool_names and expanded_categories:
+            reason = f"plan: capability_plan; tier1: continuity({', '.join(expanded_categories)})"
+        elif planned_tool_names:
+            reason = "plan: capability_plan"
+        else:
+            reason = (
+                f"tier1: continuity({', '.join(expanded_categories)})"
+                if expanded_categories
+                else "tier0/0.5: static core whitelist"
+            )
         scoped_manifests = [manifest_by_name[name] for name in expanded_names if name in manifest_by_name]
         return PromptAssemblyPlan(
             level=level,
             tool_definitions=tuple(expanded_defs),
             catalog_definitions=tuple(tool_definitions),
-            memory=MemoryDisclosure.QUERY_RETRIEVAL if expanded_categories else MemoryDisclosure.SESSION_SUMMARY,
-            history=HistoryDisclosure.RECENT if expanded_categories else HistoryDisclosure.SHORT,
+            memory=MemoryDisclosure.QUERY_RETRIEVAL if expanded_categories or planned_tool_names else MemoryDisclosure.SESSION_SUMMARY,
+            history=HistoryDisclosure.RECENT if expanded_categories or planned_tool_names else HistoryDisclosure.SHORT,
             # At the CORE floor (no Tier 1 category opened) skip reasoning entirely: a
             # turn that only needs the static low-risk whitelist is, by construction, not
             # complex enough to justify the added latency of provider-side reasoning.
             reasoning=(
                 ReasoningDisclosure.AUTO
-                if runtime.enable_thinking and expanded_categories
+                if runtime.enable_thinking and (expanded_categories or planned_tool_names)
                 else ReasoningDisclosure.OFF
             ),
             native_tools=runtime.native_tools_enabled and bool(expanded_defs),
-            stream_mode="tool_aware" if expanded_categories else "direct",
+            stream_mode="tool_aware" if expanded_categories or planned_tool_names else "direct",
             risk_level=_highest_risk(scoped_manifests),
             reason=reason,
             selected_tool_names=tuple(sorted(expanded_names)),
@@ -308,6 +321,18 @@ def _full_reason(runtime: DisclosureRuntimeState) -> str:
     if runtime.recent_failure:
         return "gate: recent_failure"
     return f"gate: posture({runtime.context_posture})"
+
+
+def _planned_tool_names(plan: Any | None) -> tuple[str, ...]:
+    """Extract tool names from a declarative capability plan, if present."""
+    if plan is None:
+        return ()
+    result: list[str] = []
+    for step in getattr(plan, "steps", ()) or ():
+        name = str(getattr(step, "tool_name", "") or "")
+        if name:
+            result.append(name)
+    return tuple(result)
 
 
 def _tool_name(tool_definition: Mapping[str, Any]) -> str:

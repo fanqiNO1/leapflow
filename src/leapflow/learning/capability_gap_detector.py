@@ -11,6 +11,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from leapflow.domain.capability_requirement import CapabilityRequirement
 from leapflow.domain.plugin_proposal import GapEvidence, PluginProposal, ProposedToolSpec, RiskLevel
 
 _SAFE_IDENTIFIER = re.compile(r"[^a-z0-9_]+")
@@ -108,6 +109,49 @@ class CapabilityGapDetector:
             evidence=(evidence,),
             proposed_tools=tools,
         )
+
+    def requirements_from_tool_results(
+        self,
+        results: Sequence[Mapping[str, Any]],
+        *,
+        min_count: int = 1,
+    ) -> tuple[CapabilityRequirement, ...]:
+        """Aggregate unknown-tool evidence into reviewable capability needs.
+
+        This is the observation-only bridge from failed tool calls to adaptive
+        resolution. It creates no code, performs no install, and does not infer
+        capability names from user text; it only reflects the structured
+        ``original_tool_name`` emitted by the tool registry.
+        """
+        buckets: dict[str, list[Mapping[str, Any]]] = {}
+        for result in results:
+            if result.get("error_type") != "unknown_tool":
+                continue
+            key = str(result.get("original_tool_name") or "unknown_tool")
+            buckets.setdefault(key, []).append(result)
+
+        requirements: list[CapabilityRequirement] = []
+        for key, bucket in sorted(buckets.items()):
+            if len(bucket) < min_count:
+                continue
+            latest = bucket[-1]
+            requirements.append(
+                CapabilityRequirement.create(
+                    _slug(key, fallback="generated_tool"),
+                    "unknown_tool",
+                    evidence=f"Runtime attempted unknown tool '{key}'.",
+                    metadata={
+                        "original_tool_name": key,
+                        "occurrences": len(bucket),
+                        "suggestions": ",".join(
+                            str(item) for item in latest.get("suggestions", [])[:5]
+                        ),
+                        "recovery_hint": str(latest.get("recovery_hint") or ""),
+                    },
+                    requirement_id=f"req-unknown-tool-{_slug(key, fallback='generated_tool')}",
+                )
+            )
+        return tuple(requirements)
 
     def proposals_from_tool_results(
         self,

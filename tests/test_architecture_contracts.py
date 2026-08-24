@@ -139,6 +139,49 @@ def test_plugin_core_does_not_import_tool_implementations() -> None:
     )
 
 
+# ── Plugin subsystem lives under leapflow.plugins, not leapflow.tools ─────
+
+# The plugin subsystem (contracts, registry, scoped lifecycle, marketplace,
+# sandbox) was relocated to ``leapflow.plugins``. The legacy ``leapflow.tools``
+# locations must stay gone: a re-created shim would silently split the single
+# source of truth for the registry and let two divergent registries coexist.
+_RELOCATED_TOOL_MODULES = (
+    "leapflow.tools.plugins",
+    "leapflow.tools.protocol",
+    "leapflow.tools.plugin_registry",
+    "leapflow.tools.scoped_registry",
+    "leapflow.tools.marketplace",
+    "leapflow.tools.sandbox",
+)
+
+_TOOLS_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "leapflow" / "tools"
+_RELOCATED_TOOL_PATHS = (
+    _TOOLS_DIR / "plugins",
+    _TOOLS_DIR / "protocol.py",
+    _TOOLS_DIR / "plugin_registry.py",
+    _TOOLS_DIR / "scoped_registry.py",
+    _TOOLS_DIR / "marketplace",
+    _TOOLS_DIR / "sandbox",
+)
+
+
+def test_legacy_tool_plugin_paths_are_physically_removed() -> None:
+    """The pre-relocation plugin source locations must not exist on disk."""
+    present = [str(p) for p in _RELOCATED_TOOL_PATHS if p.exists()]
+    assert present == [], (
+        "legacy plugin-subsystem source paths were re-created; the subsystem "
+        "lives under src/leapflow/plugins/ and these must stay absent:\n  "
+        + "\n  ".join(present)
+    )
+
+
+@pytest.mark.parametrize("module_name", _RELOCATED_TOOL_MODULES)
+def test_legacy_tool_plugin_modules_are_not_importable(module_name: str) -> None:
+    """Importing a relocated module must fail rather than resolve to a shim."""
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(module_name)
+
+
 # ── Transport-Lifecycle Separation ───────────────────────────────────────
 
 
@@ -174,6 +217,8 @@ def test_long_lived_event_source_exposes_no_action_execution() -> None:
 
 
 _DOMAIN_TYPES = [
+    ("leapflow.domain.capability_requirement", "CapabilityRequirement"),
+    ("leapflow.domain.environment_fingerprint", "EnvironmentFingerprint"),
     ("leapflow.gateway.protocol", "InboundMessage"),
     ("leapflow.gateway.protocol", "OutboundContent"),
     ("leapflow.gateway.protocol", "SendTarget"),
@@ -260,6 +305,8 @@ def test_extension_points_are_runtime_checkable_protocols(
 
 
 _STANDALONE_MODULES = [
+    "leapflow.domain.capability_requirement",
+    "leapflow.domain.environment_fingerprint",
     "leapflow.logging_setup",
     "leapflow.layout",
     "leapflow.config_service",
@@ -275,6 +322,8 @@ _STANDALONE_MODULES = [
     "leapflow.daemon.session_registry",
     "leapflow.daemon.notifications",
     "leapflow.plugins",
+    "leapflow.plugins.capability_plan",
+    "leapflow.plugins.capability_resolver",
     "leapflow.plugins.protocol",
     "leapflow.plugins.registry",
     "leapflow.plugins.scoped_registry",

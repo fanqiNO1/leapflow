@@ -4,6 +4,7 @@ import asyncio
 import contextvars
 import sys
 import tempfile
+import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
@@ -729,6 +730,33 @@ class _SlowCommandService(_FakeService):
         return {"ok": True, "message": f"Executed {name} after delay", "plugin_id": "test"}
 
 
+class _ApprovalCommandService(_FakeService):
+    """Command service that requests approval through the daemon route."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        from leapflow.daemon.approval_coordinator import ApprovalCoordinator
+
+        self._approval_coordinator = ApprovalCoordinator(ttl_s=5.0)
+
+    async def command_execute(self, name: str, args: str = "", session_id: str = "") -> dict[str, Any]:
+        from leapflow.daemon.approval_route import approval_route
+        from leapflow.security.approval import ApprovalRequest
+
+        decision = await self._approval_coordinator.request_approval(
+            ApprovalRequest(
+                category="plugin_management",
+                detail=f"{name} {args}".strip(),
+                display={"title": "Plugin approval", "summary": args},
+            ),
+            approval_route.get(),
+        )
+        return {"ok": decision.startswith("allow"), "decision": decision}
+
+    async def approval_resolve(self, pending_id: str, decision: str, reason: str = "") -> dict[str, Any]:
+        return await self._approval_coordinator.resolve(pending_id, decision, reason)
+
+
 @pytest.mark.asyncio
 async def test_daemon_rpc_heartbeat_keeps_long_running_command_alive() -> None:
     """Non-streaming RPC must survive when handler exceeds client read timeout.
@@ -761,6 +789,70 @@ async def test_daemon_rpc_heartbeat_keeps_long_running_command_alive() -> None:
 
     assert payload["ok"] is True
     assert payload["message"] == "Executed plugin generate after delay"
+
+
+@pytest.mark.asyncio
+async def test_command_execute_fast_path_does_not_wait_for_approval_heartbeat() -> None:
+    """A no-approval command must not wait for the heartbeat interval."""
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
+        server, task, runtime_dir = await _start_server(
+            Path(root) / "runtime",
+            service=_SlowCommandService(delay=0.01),
+            stream_heartbeat_s=5.0,
+        )
+        socket_path = get_transport().readiness_path(runtime_dir)
+        client = DaemonClient(socket_path, timeout_s=2.0)
+
+        try:
+            started = time.monotonic()
+            payload = await client.command_execute("plugin status", "text_utils")
+            elapsed = time.monotonic() - started
+        finally:
+            task.cancel()
+            await server.stop()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    assert payload["ok"] is True
+    assert elapsed < 1.0
+
+
+@pytest.mark.asyncio
+async def test_command_execute_routes_approval_request_to_client_callback() -> None:
+    """Non-streaming command RPCs can still drive the native approval flow."""
+    with tempfile.TemporaryDirectory(prefix="lfd-", dir=_short_tempdir()) as root:
+        service = _ApprovalCommandService()
+        server, task, runtime_dir = await _start_server(Path(root) / "runtime", service=service)
+        socket_path = get_transport().readiness_path(runtime_dir)
+        client = DaemonClient(socket_path)
+        seen: list[str] = []
+
+        async def on_event(event) -> None:
+            if event.type != "approval_request":
+                return
+            approval = (event.metadata or {}).get("approval") or {}
+            pending_id = str(approval.get("pending_id") or "")
+            seen.append(pending_id)
+            await client.approval_resolve(pending_id, "allow_once")
+
+        try:
+            payload = await client.command_execute(
+                "plugin reload",
+                "demo_plugin",
+                on_stream_event=on_event,
+            )
+        finally:
+            task.cancel()
+            await server.stop()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    assert seen
+    assert payload == {"ok": True, "decision": "allow_once"}
 
 
 @pytest.mark.asyncio

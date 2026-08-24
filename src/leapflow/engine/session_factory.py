@@ -143,6 +143,29 @@ def _load_or_new_trust_ledger(store: Any) -> _PersistingTrustLedger:
     return _PersistingTrustLedger(store=store)
 
 
+def _load_or_new_usage_tracker(store: Any) -> Any:
+    """Restore the persisted usage tracker, or start fresh. Never raises.
+
+    Reliability scoring needs history that outlives the process; a missing or
+    corrupt blob yields an empty tracker rather than an error, so a bad write
+    costs recent signal instead of the session.
+    """
+    from leapflow.learning.plugin_stats import PluginUsageTracker as _PUTracker
+
+    if store is not None:
+        try:
+            state = store.load_usage_state()
+        except (RuntimeError, OSError, ValueError) as exc:
+            logger.warning("Failed to load plugin usage state: %s", exc)
+            state = None
+        if state:
+            try:
+                return _PUTracker.load_state(state)
+            except (ValueError, TypeError, KeyError) as exc:
+                logger.warning("Corrupt plugin usage state ignored: %s", exc)
+    return _PUTracker()
+
+
 def persist_plugin_trust_state() -> bool:
     """Flush the process-global plugin trust ledger to its DuckDB store.
 
@@ -160,7 +183,14 @@ def persist_plugin_trust_state() -> bool:
         ledger = getattr(advisor, "_trust_ledger", None) if advisor is not None else None
         if ledger is None:
             return False
-        return bool(store.save_trust_state(ledger.to_state()))
+        saved = bool(store.save_trust_state(ledger.to_state()))
+        # Usage samples are flushed alongside trust: the two are read back as a
+        # pair by reliability scoring, and persisting only one would restore a
+        # trust level with no evidence behind it.
+        usage_tracker = getattr(advisor, "_usage_tracker", None)
+        if usage_tracker is not None:
+            store.save_usage_state(usage_tracker.to_state())
+        return saved
     except (ImportError, RuntimeError, AttributeError, OSError, TypeError, ValueError) as exc:
         logger.warning("Failed to persist plugin trust state: %s", exc)
         return False
@@ -175,11 +205,12 @@ def _wire_plugin_stats_sink(
     PluginAdvisor singletons on first call. Safe to call multiple times;
     subsequent calls simply set the sink reference.
 
-    On first-time initialization the trust ledger is restored from a
-    profile-scoped DuckDB store (``plugin_stats.duckdb`` beside the other profile
-    DBs) so trust survives process restarts. ``db_path`` overrides the derived
-    path (used by tests); when omitted the profile layout supplies it. If the
-    store is unavailable the ledger stays in memory only.
+    On first-time initialization the trust ledger and the rolling usage samples
+    are restored from a profile-scoped DuckDB store (``plugin_stats.duckdb``
+    beside the other profile DBs) so trust and reliability history survive
+    process restarts. ``db_path`` overrides the derived path (used by tests);
+    when omitted the profile layout supplies it. If the store is unavailable both
+    stay in memory only.
     """
     try:
         from leapflow.learning.plugin_advisor import (
@@ -187,7 +218,6 @@ def _wire_plugin_stats_sink(
             get_default_advisor,
             set_default_advisor,
         )
-        from leapflow.learning.plugin_stats import PluginUsageTracker as _PUTracker
 
         advisor = get_default_advisor()
         if advisor is not None:
@@ -195,10 +225,10 @@ def _wire_plugin_stats_sink(
             tracker.set_plugin_stats_sink(advisor._usage_tracker)
             return
 
-        # First-time initialization: restore durable trust state if present.
+        # First-time initialization: restore durable trust + usage state if present.
         store = _resolve_stats_store(db_path)
         trust_ledger = _load_or_new_trust_ledger(store)
-        usage_tracker = _PUTracker()
+        usage_tracker = _load_or_new_usage_tracker(store)
         usage_tracker.set_trust_ledger(trust_ledger)
         advisor = PluginAdvisor(trust_ledger, usage_tracker)
         set_default_advisor(advisor)

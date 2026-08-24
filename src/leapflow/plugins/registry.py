@@ -3,12 +3,31 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from leapflow.domain.tool_pipeline import ToolExecutionPipeline
 from leapflow.plugins.protocol import ToolMetadata, ToolPlugin
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class CapabilityConflict:
+    """A rejected duplicate tool-name claim.
+
+    Tool names form a single global namespace consumed by the provider, so two
+    plugins cannot both expose the same name. The registry keeps the incumbent
+    (first indexed) and rejects the challenger, surfacing the rejected claim
+    here -- and through ``plugin_list`` -- instead of silently overwriting the
+    live handler or emitting a duplicate schema.
+    """
+
+    tool_name: str
+    kept_plugin: str
+    rejected_plugin: str
+    kept_description: str = ""
+    rejected_description: str = ""
 
 
 class ToolPluginRegistry:
@@ -38,6 +57,10 @@ class ToolPluginRegistry:
         self._tool_definitions: list[dict[str, Any]] = []
         self._tool_handlers: dict[str, Any] = {}
         self._all_metadata: list[ToolMetadata] = []
+        # tool name -> owning plugin_id, the authority for first-wins name
+        # arbitration and for tearing down only the names a plugin owns live.
+        self._tool_owner: dict[str, str] = {}
+        self._conflicts: list[CapabilityConflict] = []
         self._assembled = False
         self._version: int = 0
         self._last_bound_deps: dict[str, Any] = {}  # Track last-injected deps for re-injection on reload
@@ -93,9 +116,9 @@ class ToolPluginRegistry:
                 catalog = None
             if catalog:
                 return list(catalog)
-        if self._assembled:
-            return self._tool_definitions
-        return []
+        if not self._assembled:
+            self.assemble()
+        return self._tool_definitions
 
     def set_memory_manager(self, mgr: Any) -> None:
         """Install memory manager reference for memory tools."""
@@ -217,7 +240,7 @@ class ToolPluginRegistry:
 
         for plugin in self._plugins.values():
             for tool in plugin.tools:
-                self._index_tool(tool)
+                self._index_tool(tool, plugin.plugin_id)
 
         self._assembled = True
         self._version += 1
@@ -244,25 +267,65 @@ class ToolPluginRegistry:
         # from the plugin itself; publishing now would duplicate every schema.
         if self._assembled:
             for tool in plugin.tools:
-                self._index_tool(tool)
+                self._index_tool(tool, plugin.plugin_id)
         self._version += 1
         return tool_names
 
-    def register_late_tool(self, definition: dict[str, Any], handler: Any, name: str) -> None:
+    def register_late_tool(
+        self, definition: dict[str, Any], handler: Any, name: str, owner: str = "late_tool"
+    ) -> None:
         """Register a standalone tool after assembly (session_search, MCP, ...).
 
         Used for tools that have no owning plugin; plugin-owned tools go
-        through publish_plugin_tools().
+        through publish_plugin_tools(). Subject to the same first-wins name
+        arbitration: a late tool cannot shadow a name a plugin already claimed.
         """
+        if name in self._tool_owner:
+            self._record_conflict(
+                name, owner, definition.get("function", {}).get("description", "")
+            )
+            return
         self._tool_definitions.append(definition)
         self._tool_handlers[name] = handler
+        self._tool_owner[name] = owner
         self._version += 1
 
-    def _index_tool(self, tool: ToolMetadata) -> None:
-        """Add one tool to the metadata, schema, and handler indexes."""
+    def _index_tool(self, tool: ToolMetadata, owner: str) -> None:
+        """Add one tool to the metadata, schema, and handler indexes.
+
+        Tool names are a single global namespace: the first plugin to claim a
+        name keeps it, and a later plugin declaring the same name is rejected
+        and recorded in ``conflicts`` rather than silently overwriting the live
+        handler or emitting a duplicate schema. Rejection is non-fatal so one
+        colliding plugin cannot break assembly for every other plugin.
+        """
+        if tool.name in self._tool_owner:
+            self._record_conflict(tool.name, owner, tool.description)
+            return
         self._all_metadata.append(tool)
         self._tool_definitions.append(tool.to_openai_schema())
         self._tool_handlers[tool.name] = tool.handler
+        self._tool_owner[tool.name] = owner
+
+    def _record_conflict(self, name: str, challenger: str, challenger_description: str) -> None:
+        """Record a rejected duplicate tool-name claim; never raises."""
+        incumbent = self._tool_owner.get(name, "")
+        incumbent_meta = next((m for m in self._all_metadata if m.name == name), None)
+        self._conflicts.append(
+            CapabilityConflict(
+                tool_name=name,
+                kept_plugin=incumbent,
+                rejected_plugin=challenger,
+                kept_description=incumbent_meta.description if incumbent_meta else "",
+                rejected_description=challenger_description,
+            )
+        )
+        logger.warning(
+            "Tool-name conflict on %r: kept %r, rejected duplicate from %r",
+            name,
+            incumbent,
+            challenger,
+        )
 
     # ── Unregistration ──
 
@@ -282,8 +345,14 @@ class ToolPluginRegistry:
         if plugin is None:
             return False
 
-        tool_names = {t.name for t in plugin.tools}
-        self._remove_tools_by_name(tool_names)
+        # Only tear down names this plugin owns live. A plugin whose duplicate
+        # claim was rejected owns none of the colliding names, so disposing it
+        # must not remove the incumbent's live handler.
+        owned = {t.name for t in plugin.tools if self._tool_owner.get(t.name) == plugin_id}
+        self._remove_tools_by_name(owned)
+        self._conflicts = [
+            c for c in self._conflicts if plugin_id not in (c.kept_plugin, c.rejected_plugin)
+        ]
         self._version += 1
         return True
 
@@ -308,9 +377,10 @@ class ToolPluginRegistry:
         """
         initial_count = len(self._tool_handlers)
 
-        # Remove handlers
+        # Remove handlers and their ownership claims
         for name in names:
             self._tool_handlers.pop(name, None)
+            self._tool_owner.pop(name, None)
 
         # Remove from _tool_definitions
         self._tool_definitions = [
@@ -347,6 +417,24 @@ class ToolPluginRegistry:
         if not self._assembled:
             self.assemble()
         return self._all_metadata
+
+    @property
+    def conflicts(self) -> list[CapabilityConflict]:
+        """Rejected duplicate tool-name claims recorded during indexing."""
+        if not self._assembled:
+            self.assemble()
+        return list(self._conflicts)
+
+    @property
+    def tool_owners(self) -> dict[str, str]:
+        """Live tool name → owning plugin id mapping.
+
+        This exposes the registry's first-wins arbitration result to adaptive
+        capability selection without letting consumers mutate ownership state.
+        """
+        if not self._assembled:
+            self.assemble()
+        return dict(self._tool_owner)
 
     def get_tools_by_category(self, category: str) -> list[ToolMetadata]:
         """Query tools by x_leapflow.category."""

@@ -66,6 +66,11 @@ class ShellTerminalPlugin:
                     "idempotency_scope": "session",
                 },
                 mutates_state=True,
+                # Grounded in leapflow.domain.platform.Capability.SHELL_EXEC:
+                # a host without shell execution cannot run this tool, which
+                # environment-fit scoring uses to exclude it rather than fail
+                # the call at runtime.
+                requires_platform_capabilities=("shell.exec",),
             ),
             ToolMetadata(
                 name="terminal_open",

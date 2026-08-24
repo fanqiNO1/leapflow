@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from leapflow.learning.plugin_trust import PluginTrustLedger
 
@@ -122,13 +122,65 @@ class PluginUsageTracker:
             version = getattr(reg, "_version", 0)
             if self._tool_to_plugin is not None and self._registry_version == version:
                 return self._tool_to_plugin
-            # Rebuild
-            mapping: Dict[str, str] = {}
-            for pid, plugin in reg.plugins.items():
-                for tool_meta in plugin.tools:
-                    mapping[tool_meta.name] = pid
+            # Prefer the registry's live ownership map: it reflects first-wins
+            # tool-name arbitration, so usage/trust accrues to the plugin whose
+            # handler actually ran. Rebuilding from ``reg.plugins`` would let a
+            # rejected duplicate tool claim steal the usage history.
+            owners = getattr(reg, "tool_owners", None)
+            if owners:
+                mapping = {str(name): str(pid) for name, pid in dict(owners).items()}
+            else:
+                mapping = {}
+                for pid, plugin in reg.plugins.items():
+                    for tool_meta in plugin.tools:
+                        mapping.setdefault(tool_meta.name, pid)
             self._tool_to_plugin = mapping
             self._registry_version = version
             return mapping
         except (ImportError, RuntimeError, AttributeError):
             return self._tool_to_plugin or {}
+
+    # ── Persistence ──
+
+    def to_state(self) -> Dict[str, Any]:
+        """Serialize recent usage samples for persistence.
+
+        Samples are keyed by tool name rather than plugin id: the tool → plugin
+        mapping is derived from the live registry, so a plugin that is renamed or
+        reinstalled still inherits the reliability history of the tools it owns.
+        """
+        return {
+            "max_samples_per_tool": self._max_samples,
+            "samples": {
+                tool_name: [
+                    [round(s.timestamp, 3), s.ok, round(s.duration_ms, 2)]
+                    for s in list(samples)[-self._max_samples:]
+                ]
+                for tool_name, samples in self._samples.items()
+                if samples
+            },
+        }
+
+    @classmethod
+    def load_state(cls, state: Dict[str, Any]) -> "PluginUsageTracker":
+        """Restore a tracker from serialized state; malformed rows are skipped."""
+        if not state:
+            return cls()
+        tracker = cls(
+            max_samples_per_tool=int(state.get("max_samples_per_tool") or 500)
+        )
+        for tool_name, rows in (state.get("samples") or {}).items():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                # A truncated or hand-edited blob must not break startup; a
+                # dropped sample only dilutes signal, while a raise would cost
+                # the whole session its history.
+                try:
+                    timestamp, ok, duration_ms = row
+                    tracker._samples[str(tool_name)].append(
+                        PluginUsageSample(float(timestamp), bool(ok), float(duration_ms))
+                    )
+                except (TypeError, ValueError):
+                    continue
+        return tracker

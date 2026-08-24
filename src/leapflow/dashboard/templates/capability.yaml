@@ -1,0 +1,66 @@
+# Adaptive capability decision template for LeapBoard.
+template: capability
+version: 1
+title: "Capability adaptation"
+domain: capability_adaptation
+meta:
+  title: "Capability adaptation"
+  description: "Shows adaptive plugin capability decisions, selected tools, and plan order."
+layout:
+  - type: Page
+    props:
+      title: "Capability adaptation"
+    children:
+      - type: Section
+        props:
+          title: "Latest capability decision"
+          subtitle: "Environment, selected plugin tools, and orchestration order."
+        children:
+          - type: Grid
+            props:
+              cols: 3
+            children:
+              - type: Stat
+                props:
+                  label: "Environment"
+                  value: "{{ capability_plan.environment.fingerprint_id }}"
+              - type: Stat
+                props:
+                  label: "Plan"
+                  value: "{{ capability_plan.plan.plan_id }}"
+              - type: Stat
+                props:
+                  label: "Executable"
+                  value: "{{ capability_plan.plan.executable }}"
+          - type: Table
+            props:
+              title: "Requirements"
+              columns:
+                - "Capability"
+                - "Origin"
+                - "Evidence"
+            repeat:
+              path: "capability_plan.requirements"
+              as: "requirement"
+            bind:
+              row:
+                - "{{ requirement.capability }}"
+                - "{{ requirement.origin }}"
+                - "{{ requirement.evidence }}"
+          - type: Table
+            props:
+              title: "Plan steps"
+              columns:
+                - "Tool"
+                - "Plugin"
+                - "Policy"
+                - "Approval"
+            repeat:
+              path: "capability_plan.plan.steps"
+              as: "step"
+            bind:
+              row:
+                - "{{ step.tool_name }}"
+                - "{{ step.plugin_id }}"
+                - "{{ step.execution_policy }}"
+                - "{{ step.requires_approval }}"

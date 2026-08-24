@@ -181,7 +181,27 @@ class UnixRpcServer:
 
         result = method(**params)
         if hasattr(result, "__await__"):
-            result = await self._await_with_heartbeat(request.id, result, writer)
+            approval_queue: asyncio.Queue[StreamChunk] | None = None
+            route_token: contextvars.Token[Any] | None = None
+            if request.method == "command.execute":
+                from leapflow.daemon.approval_route import approval_route as _approval_route
+
+                approval_queue = asyncio.Queue()
+                route_token = _approval_route.set((approval_queue, request.id))
+            try:
+                result = await self._await_with_heartbeat(
+                    request.id,
+                    result,
+                    writer,
+                    approval_queue=approval_queue,
+                )
+            finally:
+                if route_token is not None:
+                    _approval_route.reset(route_token)
+                    try:
+                        self._service._approval_coordinator.deny_for_request(request.id, reason="command_ended")
+                    except AttributeError:
+                        pass
         response = RpcResponse.success(request.id, result)
         await _write_json(writer, response.to_json())
         if request.method == "daemon.shutdown" and self._on_shutdown is not None:
@@ -192,6 +212,8 @@ class UnixRpcServer:
         request_id: str,
         coro: Any,
         writer: asyncio.StreamWriter,
+        *,
+        approval_queue: "asyncio.Queue[StreamChunk] | None" = None,
     ) -> Any:
         """Await a coroutine while sending periodic heartbeats to keep the client alive.
 
@@ -201,9 +223,34 @@ class UnixRpcServer:
         spurious timeout disconnections.
         """
         task = asyncio.ensure_future(coro)
+        approval_get: asyncio.Task[Any] | None = None
         while True:
-            done, _ = await asyncio.wait({task}, timeout=self._stream_heartbeat_s)
-            if done:
+            wait_set: set[asyncio.Task[Any]] = {task}
+            if approval_queue is not None:
+                if approval_get is None or approval_get.done():
+                    approval_get = asyncio.create_task(approval_queue.get())
+                wait_set.add(approval_get)
+            done, _ = await asyncio.wait(
+                wait_set,
+                timeout=self._stream_heartbeat_s,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if approval_get is not None and approval_get in done:
+                chunk = approval_get.result()
+                approval_get = None
+                try:
+                    await _write_json(writer, chunk.to_notification().to_json())
+                except (ConnectionResetError, BrokenPipeError):
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    raise
+                continue
+            if task in done:
+                if approval_get is not None and not approval_get.done():
+                    approval_get.cancel()
                 return task.result()
             # Send heartbeat to keep client connection alive
             heartbeat = StreamChunk(

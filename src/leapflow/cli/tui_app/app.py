@@ -794,6 +794,8 @@ class LeapApp:
                 self._active_dispatch_task = None
                 self._active_terminal_status = None
                 self._active_terminal_reason = ""
+                self._spinner_text = ""
+                self._tool_start_time = 0.0
                 self._agent_running = False
                 self._sync_task_counts()
                 self._invalidate()

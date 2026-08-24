@@ -78,6 +78,39 @@ def test_disclosure_planner_expands_via_last_turn_tool_category_continuity() -> 
     assert "gateway_send" not in names
 
 
+def test_disclosure_planner_expands_tools_from_capability_plan() -> None:
+    """A structured capability plan can disclose its tools without opening FULL."""
+    from leapflow.plugins.capability_plan import CapabilityPlan
+    from leapflow.plugins.capability_resolver import CapabilityCandidate
+
+    plan_hint = CapabilityPlan.from_candidates(
+        (
+            CapabilityCandidate(
+                plugin_id="shell_terminal",
+                tool_name="shell_run",
+                provides_capabilities=("shell.run",),
+                risk_level="external",
+                requires_approval=True,
+                mutates_state=True,
+            ),
+        ),
+        plan_id="plan-disclosure-test",
+    )
+
+    plan = DisclosurePlanner().plan(
+        TOOL_DEFINITIONS,
+        DisclosureRuntimeState(
+            native_tools_enabled=True,
+            active_capability_plan=plan_hint,
+        ),
+    )
+
+    names = _tool_names(plan)
+    assert plan.level == DisclosureLevel.EXPANDED
+    assert plan.reason == "plan: capability_plan"
+    assert "shell_run" in names
+
+
 def test_disclosure_planner_uses_full_context_for_structural_gates() -> None:
     planner = DisclosurePlanner()
 
@@ -108,6 +141,7 @@ def test_disclosure_planner_never_performs_text_fitting() -> None:
     signature = inspect.signature(DisclosurePlanner.plan)
     assert "user_text" not in signature.parameters
     assert list(signature.parameters)[1:] == ["tool_definitions", "runtime"]
+    assert "active_capability_plan" in DisclosureRuntimeState.__dataclass_fields__
 
 
 def test_capability_manifest_prefers_explicit_tool_metadata() -> None:

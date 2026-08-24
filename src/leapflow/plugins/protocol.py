@@ -75,6 +75,19 @@ class ToolMetadata:
     # which supports both generated-plugin **kwargs handlers and older params-dict handlers.
     x_leapflow: dict[str, Any] = field(default_factory=dict)
     mutates_state: bool = False
+    # Declarative capability metadata consumed by the capability resolver and
+    # environment-fit scoring. ``provides_capabilities`` are abstract capability
+    # tags this tool offers (matched against a requirement). ``requires_capabilities``
+    # are abstract capability tags another selected tool must provide earlier in
+    # an orchestration plan. Their tag vocabulary is owned by the resolver, not
+    # this type. ``requires_platform_capabilities`` are
+    # ``leapflow.domain.platform.Capability`` values (e.g. "shell.exec") the
+    # host must support for the tool to run. All default empty so a tool that
+    # neither offers nor depends on named capabilities declares nothing -- the
+    # common case, kept noise-free.
+    provides_capabilities: tuple[str, ...] = ()
+    requires_capabilities: tuple[str, ...] = ()
+    requires_platform_capabilities: tuple[str, ...] = ()
 
     def to_openai_schema(self) -> dict[str, Any]:
         """Generate OpenAI function-calling schema dict.
@@ -86,6 +99,14 @@ class ToolMetadata:
         x_leapflow = dict(self.x_leapflow)
         if self.mutates_state:
             x_leapflow.setdefault("mutates_state", True)
+        if self.provides_capabilities:
+            x_leapflow.setdefault("provides_capabilities", list(self.provides_capabilities))
+        if self.requires_capabilities:
+            x_leapflow.setdefault("requires_capabilities", list(self.requires_capabilities))
+        if self.requires_platform_capabilities:
+            x_leapflow.setdefault(
+                "requires_platform_capabilities", list(self.requires_platform_capabilities)
+            )
         entry: dict[str, Any] = {
             "type": "function",
             "function": {

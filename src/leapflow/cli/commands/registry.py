@@ -133,6 +133,7 @@ COMMAND_REGISTRY: Tuple[CommandDef, ...] = (
     # Plugins (self-management)
     CommandDef("plugin", "List all plugins", "Skills & Tools", aliases=("plugin list",)),
     CommandDef("plugin status", "Show plugin details and trust level", "Skills & Tools", args_hint="<id>"),
+    CommandDef("plugin plan", "Show adaptive plugin capability decisions and plans", "Skills & Tools", args_hint="[--latest|--limit <n>]", effect=CommandEffect.READ_ONLY),
     CommandDef("plugin reload", "Hot-reload a plugin (daemon mode, approval required)", "Skills & Tools", args_hint="<id>", requires_host=True, effect=CommandEffect.SESSION, execution=CommandExecution.SHORT_OPERATION),
     CommandDef("plugin disable", "Disable a plugin (daemon mode, approval required)", "Skills & Tools", args_hint="<id>", requires_host=True, effect=CommandEffect.DESTRUCTIVE, execution=CommandExecution.SHORT_OPERATION),
     CommandDef("plugin enable", "Re-enable a disabled plugin (daemon mode, approval required)", "Skills & Tools", args_hint="<id>", requires_host=True, effect=CommandEffect.SESSION, execution=CommandExecution.SHORT_OPERATION),

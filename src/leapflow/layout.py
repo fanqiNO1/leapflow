@@ -380,6 +380,12 @@ class ProfileLayout:
         return self.root / "plugins" / "proposals.json"
 
     @property
+    def capability_plans_path(self) -> Path:
+        # Profile-scoped adaptive capability decision history: requirements,
+        # candidate scores, selected tools, and declarative plans.
+        return self.root / "plugins" / "capability_plans.json"
+
+    @property
     def plugin_versions_dir(self) -> Path:
         # Versioned source snapshots and active pointers for profile-installed plugins.
         return self.root / "plugins" / "versions"

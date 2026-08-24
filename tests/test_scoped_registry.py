@@ -262,6 +262,62 @@ class TestScopedToolRegistryMultiplePlugins:
         assert "plugin-b" in fresh_tool_registry._plugins
 
 
+class TestScopedToolRegistryLifecycleStorm:
+    """Interleaved multi-plugin disable/enable keeps siblings live throughout.
+
+    Per-operation lifecycle is covered elsewhere; this pins the *combined*
+    invariant a real session relies on: disposing one plugin (disable) removes
+    only its tools, re-registering it (enable) restores them, and neither step
+    disturbs the plugins that stayed resident. The version counter must advance
+    monotonically so downstream catalog caches invalidate on every transition.
+    """
+
+    def test_interleaved_disable_enable_leaves_siblings_live(
+        self, fresh_tool_registry: ToolPluginRegistry
+    ) -> None:
+        reg = fresh_tool_registry
+        scoped = ScopedToolRegistry(reg)
+        specs = {
+            "provider": "provider_ping",
+            "consumer": "consumer_call",
+            "worker": "worker_run",
+        }
+        for plugin_id, tool_name in specs.items():
+            plugin = FakeToolPlugin(_plugin_id=plugin_id, _tools=[_make_tool_metadata(tool_name)])
+            scoped.scoped_register(plugin, scoped.create_fiber(plugin_id))
+        reg.assemble()
+
+        for tool_name in specs.values():
+            assert tool_name in reg.tool_handlers
+
+        # Disable the provider: only its tool disappears.
+        version_before_disable = reg.version
+        provider_fiber = scoped.get_fiber("provider")
+        provider_fiber.activate()
+        provider_fiber.begin_unload()
+        provider_fiber.dispose()
+        assert "provider_ping" not in reg.tool_handlers
+        assert "consumer_call" in reg.tool_handlers
+        assert "worker_run" in reg.tool_handlers
+        assert reg.version > version_before_disable
+
+        # Re-enable it: a fresh fiber re-registers and republishes the tool into
+        # the already-assembled catalog, exactly as the enable path does.
+        version_before_enable = reg.version
+        reenabled = FakeToolPlugin(
+            _plugin_id="provider", _tools=[_make_tool_metadata("provider_ping")]
+        )
+        scoped.scoped_register(reenabled, scoped.create_fiber("provider"))
+        reg.publish_plugin_tools(reenabled)
+        assert "provider_ping" in reg.tool_handlers
+        assert "consumer_call" in reg.tool_handlers
+        assert "worker_run" in reg.tool_handlers
+        assert reg.version > version_before_enable
+        # The churn produced no duplicate schema for the re-added tool.
+        names = [d["function"]["name"] for d in reg.tool_definitions]
+        assert names.count("provider_ping") == 1
+
+
 class TestScopedToolRegistryLateTool:
     """Late-registered tool is cleaned up on dispose."""
 

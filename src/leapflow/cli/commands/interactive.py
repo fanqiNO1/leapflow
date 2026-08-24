@@ -354,6 +354,7 @@ async def cmd_interactive(ctx: "Context", *, resume_id: Optional[str] = None) ->
         handle_plugin,
         _is_plugin_command,
         render_command_payload,
+        render_plugin_generate_start,
     )
     from leapflow.utils.terminal_io import TerminalIOProvider
     from leapflow.engine.session import SessionMode
@@ -692,6 +693,8 @@ async def cmd_interactive(ctx: "Context", *, resume_id: Optional[str] = None) ->
 
             if _is_plugin_command(canonical):
                 plugin_args = cmd_text[len("plugin"):].strip()
+                if plugin_args.startswith("generate"):
+                    render_plugin_generate_start(console, plugin_args)
                 await handle_plugin(ctx, console, plugin_args)
                 return
 
@@ -960,8 +963,10 @@ async def cmd_interactive_daemon(
     from leapflow.config_service import ConfigService
     from leapflow.cli.commands.router import CommandRouter
     from leapflow.cli.commands.slash_handlers import (
+        _is_plugin_command,
         render_app_payload,
         render_command_payload,
+        render_plugin_generate_start,
     )
     from leapflow.cli.tui_app import (
         LeapApp,
@@ -1324,10 +1329,22 @@ async def cmd_interactive_daemon(
                 return
 
             # Engine-routed commands: dispatch through daemon RPC
+            plugin_args_for_progress = ""
+            if _is_plugin_command(canonical):
+                plugin_args_for_progress = canonical[len("plugin"):].strip()
+                if plugin_args_for_progress:
+                    plugin_args_for_progress = plugin_args_for_progress + (" " + cmd_args if cmd_args else "")
+                else:
+                    plugin_args_for_progress = cmd_args
+                if plugin_args_for_progress.startswith("generate"):
+                    render_plugin_generate_start(console, plugin_args_for_progress)
             try:
                 payload = await bridge.call(
                     lambda current_client: current_client.command_execute(
-                        canonical, cmd_args, session_id=active_session_id,
+                        canonical,
+                        cmd_args,
+                        session_id=active_session_id,
+                        on_stream_event=_handle_daemon_approval,
                     ),
                     description=f"/{canonical}",
                 )
