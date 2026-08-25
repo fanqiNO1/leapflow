@@ -1006,6 +1006,9 @@ requires-dist = [
 ]
 provides-extras = ["dev", "hub", "dashboard", "web"]
 
+[package.metadata.requires-dev]
+leapbench = []
+
 [[package]]
 name = "lxml"
 version = "6.1.1"

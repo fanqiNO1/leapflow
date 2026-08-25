@@ -55,6 +55,16 @@ dashboard = ["aiohttp>=3.9"]
 # extractor always ships: this upgrades quality, it does not enable the feature.
 web = ["trafilatura>=2.2"]
 
+# LeapBench (benchmarks/leapbench) dependencies. A group rather than an extra
+# so the documented default install (`uv sync --all-extras`) never pulls them,
+# and — via the per-group requires-python below — they never constrain the
+# py3.11 lanes. Installed with `uv sync --all-extras --group leapbench`.
+[dependency-groups]
+leapbench = []
+
+[tool.uv.dependency-groups]
+leapbench = { requires-python = ">=3.12" }
+
 [project.scripts]
 leap = "leapflow.__main__:main"
 
