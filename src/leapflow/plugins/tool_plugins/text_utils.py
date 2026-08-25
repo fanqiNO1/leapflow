@@ -41,6 +41,7 @@ class TextUtilsPlugin:
                     "schema_cost": "low",
                     "requires_approval": False,
                 },
+                provides_capabilities=("text.search",),
             ),
             ToolMetadata(
                 name="text_replace",
@@ -56,6 +57,7 @@ class TextUtilsPlugin:
                     "required": ["text", "old", "new"],
                 },
                 handler=text_replace,
+                provides_capabilities=("text.replace",),
             ),
         ]
 

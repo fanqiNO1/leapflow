@@ -147,12 +147,53 @@ async def test_perception_execution_clipboard(adapters: Adapters) -> None:
 
 
 async def test_perception_capture_screenshot(adapters: Adapters) -> None:
-    result = await adapters.darwin_perception.capture_screenshot()
+    """Window-scoped capture writes a PNG; a targetless request is refused.
+
+    cua-driver exposes no full-display capture tool, so capture_screenshot()
+    needs a (pid, window_id) pair. A targetless call used to be mapped onto
+    get_desktop_state and came back from the driver as "Unknown tool".
+
+    list_windows reports every layer-0 surface (~200 here), most of them
+    offscreen service windows that produce neither an AX tree nor an image.
+    Selecting on is_on_screen plus a real size is what makes this deterministic;
+    the smallest qualifying window is used because the AX walk that accompanies
+    the capture scales with element count.
+    """
+    from leapflow.platform.protocol import RpcError
+
+    windows_info = await adapters.darwin_perception.list_windows()
+
+    def _area(window: dict) -> float:
+        bounds = window.get("bounds") or {}
+        return float(bounds.get("width", 0)) * float(bounds.get("height", 0))
+
+    candidates = sorted(
+        (
+            w
+            for w in windows_info.get("windows", [])
+            if w.get("is_on_screen")
+            and float((w.get("bounds") or {}).get("width", 0)) >= 200
+            and float((w.get("bounds") or {}).get("height", 0)) >= 200
+        ),
+        key=_area,
+    )
+    if not candidates:
+        pytest.skip("no on-screen window large enough to capture")
+    window = candidates[0]
+
+    result = await adapters.darwin_perception.capture_screenshot(
+        pid=window["pid"], window_id=window["window_id"]
+    )
     assert isinstance(result, dict)
-    assert "ok" in result
     assert result["ok"] is True
-    assert "path" in result
+    # The image is routed to disk; a base64 payload must never reach context.
+    assert result["path"] == result["screenshot_file_path"]
     assert os.path.exists(result["path"])
+    assert os.path.getsize(result["path"]) > 0
+
+    with pytest.raises(RpcError) as excinfo:
+        await adapters.darwin_perception.capture_screenshot()
+    assert excinfo.value.code == "invalid_params"
 
 
 async def test_execution_perform_file_op(adapters: Adapters) -> None:

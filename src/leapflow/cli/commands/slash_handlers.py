@@ -1703,8 +1703,11 @@ def render_plugin_payload(console: "LeapConsole", payload: dict[str, Any]) -> No
             padding=(0, 1),
         )
         table.add_column("Record", style="cyan", no_wrap=True)
+        table.add_column("Phase", no_wrap=True)
         table.add_column("Selected")
         table.add_column("Plan")
+        table.add_column("Mutation", no_wrap=True)
+        table.add_column("Registry Δ", no_wrap=True)
         table.add_column("Executable", justify="center")
         for record in records:
             resolutions = record.get("resolutions") or []
@@ -1717,10 +1720,19 @@ def render_plugin_payload(console: "LeapConsole", payload: dict[str, Any]) -> No
                     selected.append(tool_name)
             plan_payload = record.get("plan") or {}
             steps = plan_payload.get("steps") or []
+            mutation = record.get("mutation") or {}
+            registry_before = record.get("registry_version_before")
+            registry_after = record.get("registry_version_after")
+            registry_delta = "-"
+            if registry_before is not None and registry_after is not None:
+                registry_delta = f"{registry_before}→{registry_after}"
             table.add_row(
                 str(record.get("record_id") or "")[:18],
+                str(record.get("phase") or "-"),
                 ", ".join(selected) or "-",
                 " → ".join(str(s.get("tool_name") or "") for s in steps) or "-",
+                str(mutation.get("action") or "-"),
+                registry_delta,
                 "yes" if plan_payload.get("executable") else "no",
             )
         console.print(table)

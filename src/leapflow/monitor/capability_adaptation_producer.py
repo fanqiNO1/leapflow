@@ -25,15 +25,69 @@ class CapabilityAdaptationProducer:
             return ()
         plan = latest.get("plan") or {}
         executable = bool(plan.get("executable"))
-        severity = Severity.INFO if executable else Severity.NOTABLE
+        mutation = latest.get("mutation") or {}
+        mutation_ok = mutation and mutation.get("ok") is False
+        severity = Severity.NOTABLE if (not executable or mutation_ok) else Severity.INFO
         selected = self._selected_tools(latest)
         missing = plan.get("missing_dependencies") or []
         evidence = [
             Evidence(kind="record", label="record_id", value=str(latest.get("record_id") or "")),
             Evidence(kind="metric", label="selected_tools", value=", ".join(selected) or "-"),
         ]
+        phase = str(latest.get("phase") or "")
+        if phase:
+            evidence.append(Evidence(kind="metric", label="loop_phase", value=phase))
+        action = str(mutation.get("action") or "") if isinstance(mutation, dict) else ""
+        if action:
+            evidence.append(Evidence(kind="metric", label="mutation_action", value=action))
+        before_version = latest.get("registry_version_before")
+        after_version = latest.get("registry_version_after")
+        if before_version is not None and after_version is not None:
+            evidence.append(
+                Evidence(
+                    kind="metric",
+                    label="registry_delta",
+                    value=f"{before_version}->{after_version}",
+                )
+            )
+        delta = latest.get("decision_delta") or {}
+        if isinstance(delta, dict) and delta.get("changed"):
+            evidence.append(
+                Evidence(kind="metric", label="selected_delta", value=str(delta.get("changed")))
+            )
+        observation_ids = latest.get("observation_ids") or []
+        if observation_ids:
+            evidence.append(
+                Evidence(kind="metric", label="observation_count", value=str(len(observation_ids)))
+            )
+        proposal = latest.get("proposal") or {}
+        if isinstance(proposal, dict) and proposal.get("proposal_id"):
+            evidence.append(
+                Evidence(kind="record", label="proposal_id", value=str(proposal.get("proposal_id")))
+            )
+            evidence.append(
+                Evidence(
+                    kind="metric", label="proposal_status", value=str(proposal.get("status") or "")
+                )
+            )
+        policy_decision = latest.get("policy_decision") or {}
+        if isinstance(policy_decision, dict) and policy_decision.get("action"):
+            evidence.append(
+                Evidence(
+                    kind="metric", label="policy_action", value=str(policy_decision.get("action"))
+                )
+            )
+            evidence.append(
+                Evidence(
+                    kind="metric",
+                    label="autonomy_level",
+                    value=str(policy_decision.get("autonomy_level") or ""),
+                )
+            )
         if missing:
-            evidence.append(Evidence(kind="metric", label="missing_dependencies", value=str(len(missing))))
+            evidence.append(
+                Evidence(kind="metric", label="missing_dependencies", value=str(len(missing)))
+            )
         return (
             Finding(
                 watch_id=ctx.spec.watch_id or self.domain,
@@ -41,8 +95,8 @@ class CapabilityAdaptationProducer:
                 title="Adaptive plugin capability decision recorded",
                 summary=(
                     "Latest capability plan is executable."
-                    if executable else
-                    "Latest capability plan has unresolved dependencies."
+                    if executable
+                    else "Latest capability plan has unresolved dependencies."
                 ),
                 severity=severity,
                 tags=("capability_adaptation", "plugin_plan"),

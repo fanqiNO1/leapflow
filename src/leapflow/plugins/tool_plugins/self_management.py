@@ -149,24 +149,29 @@ class SelfManagementPlugin:
             plugins_info: list[dict[str, Any]] = []
             for plugin_id, plugin in reg.plugins.items():
                 fiber = scoped.get_fiber(plugin_id)
-                plugins_info.append({
-                    "plugin_id": plugin_id,
-                    "category": plugin.category,
-                    "tool_count": len(plugin.tools),
-                    "state": fiber.state.value if fiber else "unmanaged",
-                    "generation": fiber.generation if fiber else None,
-                })
+                plugins_info.append(
+                    {
+                        "plugin_id": plugin_id,
+                        "category": plugin.category,
+                        "tool_count": len(plugin.tools),
+                        "state": fiber.state.value if fiber else "unmanaged",
+                        "generation": fiber.generation if fiber else None,
+                    }
+                )
 
             # Cross-subsystem: Gateway adapters
             gateway_adapters: list[dict[str, Any]] = []
             try:
                 from leapflow.gateway.adapters import BUILTIN_PLUGINS
+
                 for bp in BUILTIN_PLUGINS:
-                    gateway_adapters.append({
-                        "platform_id": bp.platform_id,
-                        "display_name": bp.display_name,
-                        "subsystem": "gateway",
-                    })
+                    gateway_adapters.append(
+                        {
+                            "platform_id": bp.platform_id,
+                            "display_name": bp.display_name,
+                            "subsystem": "gateway",
+                        }
+                    )
             except (ImportError, AttributeError):
                 pass
 
@@ -176,13 +181,16 @@ class SelfManagementPlugin:
                 from leapflow.llm.provider_registry import (
                     get_default_registry as get_llm_registry,
                 )
+
                 llm_reg = get_llm_registry()
                 for plugin_meta in llm_reg.list_plugins():
-                    llm_providers.append({
-                        "provider_id": plugin_meta.get("provider_id", "unknown"),
-                        "display_name": plugin_meta.get("display_name", ""),
-                        "subsystem": "llm",
-                    })
+                    llm_providers.append(
+                        {
+                            "provider_id": plugin_meta.get("provider_id", "unknown"),
+                            "display_name": plugin_meta.get("display_name", ""),
+                            "subsystem": "llm",
+                        }
+                    )
             except (ImportError, AttributeError, RuntimeError):
                 pass
 
@@ -301,7 +309,8 @@ class SelfManagementPlugin:
             "self_evolution": {
                 "proposal_flow": "plugin_propose" in self_management_tools,
                 "generation_tool": "plugin_generate" in self_management_tools,
-                "generation_ready": self._plugin_generation_enabled and self._llm_provider is not None,
+                "generation_ready": self._plugin_generation_enabled
+                and self._llm_provider is not None,
                 "install_tool": "plugin_install" in self_management_tools,
                 "rollback_tool": "plugin_rollback" in self_management_tools,
                 "behavior_test_gate": True,
@@ -350,11 +359,17 @@ class SelfManagementPlugin:
         if not dependency_state["marketplace_configured"]:
             limitations.append("Marketplace installs require a configured marketplace client.")
         if not dependency_state["proposal_store_available"]:
-            limitations.append("Plugin proposals require a profile layout or injected proposal store.")
+            limitations.append(
+                "Plugin proposals require a profile layout or injected proposal store."
+            )
         if not dependency_state["version_store_available"]:
-            limitations.append("Plugin versioning requires a profile layout or injected version store.")
+            limitations.append(
+                "Plugin versioning requires a profile layout or injected version store."
+            )
         if not dependency_state["capability_plan_store_available"]:
-            limitations.append("Adaptive capability plan history requires a profile layout or injected plan store.")
+            limitations.append(
+                "Adaptive capability plan history requires a profile layout or injected plan store."
+            )
         return limitations
 
     async def _plugin_status_handler(self, plugin_id: str, **kwargs: Any) -> Dict[str, Any]:
@@ -375,10 +390,7 @@ class SelfManagementPlugin:
                 "plugin_id": plugin_id,
                 "category": plugin.category,
                 "dependencies": list(plugin.dependencies),
-                "tools": [
-                    {"name": t.name, "description": t.description}
-                    for t in plugin.tools
-                ],
+                "tools": [{"name": t.name, "description": t.description} for t in plugin.tools],
                 "fiber": {
                     "state": fiber.state.value if fiber else "unmanaged",
                     "generation": fiber.generation if fiber else None,
@@ -388,6 +400,7 @@ class SelfManagementPlugin:
             # Learning-driven trust and recommendation (purely additive)
             try:
                 from leapflow.learning.plugin_advisor import get_default_advisor
+
                 advisor = get_default_advisor()
                 if advisor is not None:
                     trust = advisor._trust_ledger.level(plugin_id)
@@ -407,7 +420,9 @@ class SelfManagementPlugin:
             logger.warning("plugin_status failed for %s: %s", plugin_id, exc, exc_info=True)
             return {"ok": False, "error": f"plugin_status failed: {exc}"}
 
-    async def _plugin_plan_handler(self, limit: int = 5, latest: bool = False, **kwargs: Any) -> Dict[str, Any]:
+    async def _plugin_plan_handler(
+        self, limit: int = 5, latest: bool = False, **kwargs: Any
+    ) -> Dict[str, Any]:
         """Inspect stored adaptive capability decisions and plans."""
         try:
             store = self._capability_plan_store_resolved()
@@ -470,6 +485,7 @@ class SelfManagementPlugin:
         if test_cases:
             try:
                 from leapflow.domain.plugin_proposal import BehaviorTestCase, PluginProposal
+
                 parsed_tests = tuple(
                     BehaviorTestCase.create(
                         str(item.get("tool_name") or ""),
@@ -527,7 +543,10 @@ class SelfManagementPlugin:
             plugin_id = plugin_id or proposal.plugin_id
             description = description or proposal.capability_summary
         if not plugin_id or not description:
-            return {"ok": False, "error": "plugin_id and description are required unless proposal_id is provided"}
+            return {
+                "ok": False,
+                "error": "plugin_id and description are required unless proposal_id is provided",
+            }
 
         if not self._plugin_generation_enabled:
             return {
@@ -567,7 +586,9 @@ class SelfManagementPlugin:
 
     # ── Compatibility assessment (read-only) ─────────────────
 
-    async def _assess_compatibility_handler(self, manifest: dict = None, **kwargs: Any) -> Dict[str, Any]:
+    async def _assess_compatibility_handler(
+        self, manifest: dict = None, **kwargs: Any
+    ) -> Dict[str, Any]:
         """Assess whether a foreign plugin manifest is compatible with LeapFlow."""
         if manifest is None:
             manifest = kwargs.get("manifest")
@@ -591,7 +612,9 @@ class SelfManagementPlugin:
                     "bridge_type": report.adapter_spec.bridge_type,
                     "shim_methods": report.adapter_spec.shim_methods,
                     "estimated_complexity": report.adapter_spec.estimated_complexity,
-                } if report.adapter_spec else None,
+                }
+                if report.adapter_spec
+                else None,
                 "stages": [
                     {
                         "stage_name": s.stage_name,
@@ -611,7 +634,13 @@ class SelfManagementPlugin:
     # ── State-mutating (requires approval) ─────────────────
 
     async def _plugin_install_handler(
-        self, plugin_id: str = "", code: str = "", marketplace_name: str = "", proposal_id: str = "", version_label: str = "", **kwargs: Any
+        self,
+        plugin_id: str = "",
+        code: str = "",
+        marketplace_name: str = "",
+        proposal_id: str = "",
+        version_label: str = "",
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         """Install a plugin from validated code or marketplace, then load it. REQUIRES approval.
 
@@ -656,7 +685,9 @@ class SelfManagementPlugin:
 
         try:
             if code:
-                result = await self._install_from_code(plugin_id, code, proposal=proposal, version_label=version_label)
+                result = await self._install_from_code(
+                    plugin_id, code, proposal=proposal, version_label=version_label
+                )
             elif marketplace_name:
                 # Run compatibility gate for marketplace installs (BLOCKING)
                 result = await self._install_from_marketplace_with_gate(plugin_id, marketplace_name)
@@ -780,11 +811,16 @@ class SelfManagementPlugin:
                 plugin_id,
                 target,
                 version=version_label,
-                metadata={"source": "plugin_install", "proposal_id": getattr(proposal, "proposal_id", "")},
+                metadata={
+                    "source": "plugin_install",
+                    "proposal_id": getattr(proposal, "proposal_id", ""),
+                },
             )
             result["version"] = version_info.get("version", "")
         except (RuntimeError, OSError, ValueError, AttributeError) as exc:
-            logger.debug("plugin version recording skipped for %s: %s", plugin_id, exc, exc_info=True)
+            logger.debug(
+                "plugin version recording skipped for %s: %s", plugin_id, exc, exc_info=True
+            )
         return result
 
     async def _install_from_marketplace_with_gate(
@@ -838,7 +874,9 @@ class SelfManagementPlugin:
             result["compatibility_notes"] = compatibility_notes
         return result
 
-    async def _install_from_marketplace(self, plugin_id: str, marketplace_name: str) -> Dict[str, Any]:
+    async def _install_from_marketplace(
+        self, plugin_id: str, marketplace_name: str
+    ) -> Dict[str, Any]:
         """Install via the configured MarketplaceClient with verification + smoke test."""
         from pathlib import Path
 
@@ -1088,7 +1126,9 @@ class SelfManagementPlugin:
         try:
             setattr(plugin_obj, "__leapflow_plugin_path__", str(path))
         except Exception:
-            logger.debug("Cannot attach plugin source path metadata for %s", module_name, exc_info=True)
+            logger.debug(
+                "Cannot attach plugin source path metadata for %s", module_name, exc_info=True
+            )
         return plugin_obj, ""
 
     @staticmethod
@@ -1143,7 +1183,9 @@ class SelfManagementPlugin:
         try:
             active = self._version_store().active(plugin_id)
         except (RuntimeError, OSError, ValueError, AttributeError) as exc:
-            logger.debug("Cannot read active plugin version for %s: %s", plugin_id, exc, exc_info=True)
+            logger.debug(
+                "Cannot read active plugin version for %s: %s", plugin_id, exc, exc_info=True
+            )
             return "", (), ""
         if not isinstance(active, dict):
             return "", (), ""
@@ -1156,7 +1198,11 @@ class SelfManagementPlugin:
         try:
             proposal = self._proposal_store().get(proposal_id)
         except (RuntimeError, OSError, ValueError, AttributeError) as exc:
-            return proposal_id, (), f"Plugin proposal '{proposal_id}' unavailable for behavior tests: {exc}"
+            return (
+                proposal_id,
+                (),
+                f"Plugin proposal '{proposal_id}' unavailable for behavior tests: {exc}",
+            )
         if proposal is None:
             return proposal_id, (), f"Plugin proposal '{proposal_id}' not found for behavior tests"
         return proposal_id, tuple(getattr(proposal, "test_cases", ()) or ()), ""
@@ -1192,7 +1238,9 @@ class SelfManagementPlugin:
             reload_plugin(plugin_id)
             return ""
         except (OSError, RuntimeError, KeyError, AttributeError) as exc:
-            logger.warning("plugin rollback after failed behavior tests failed: %s", exc, exc_info=True)
+            logger.warning(
+                "plugin rollback after failed behavior tests failed: %s", exc, exc_info=True
+            )
             return str(exc)
 
     async def _plugin_versions_handler(self, plugin_id: str, **kwargs: Any) -> Dict[str, Any]:
@@ -1208,7 +1256,9 @@ class SelfManagementPlugin:
         except (RuntimeError, OSError, ValueError, AttributeError) as exc:
             return {"ok": False, "error": f"Version query failed: {exc}"}
 
-    async def _plugin_rollback_handler(self, plugin_id: str, version: str, **kwargs: Any) -> Dict[str, Any]:
+    async def _plugin_rollback_handler(
+        self, plugin_id: str, version: str, **kwargs: Any
+    ) -> Dict[str, Any]:
         """Rollback a profile plugin to a recorded source snapshot and reload it."""
         approved, denial = await self._check_approval("rollback", plugin_id)
         if not approved:
@@ -1248,6 +1298,7 @@ class SelfManagementPlugin:
 
         try:
             from leapflow.plugins import reload_plugin
+
             new_fiber = reload_plugin(plugin_id)
             return {
                 "ok": True,
@@ -1298,6 +1349,7 @@ class SelfManagementPlugin:
             )
         try:
             from leapflow.security.actions import ActionDescriptor
+
             descriptor = ActionDescriptor.platform_action(
                 "plugin_management",
                 action,
@@ -1321,7 +1373,9 @@ class SelfManagementPlugin:
             logger.warning("approval check failed: %s", exc, exc_info=True)
             return False, f"Plugin action '{action}' blocked: approval check error"
 
-    async def _plugin_reload_handler(self, plugin_id: str, version_label: str = "", **kwargs: Any) -> Dict[str, Any]:
+    async def _plugin_reload_handler(
+        self, plugin_id: str, version_label: str = "", **kwargs: Any
+    ) -> Dict[str, Any]:
         """Hot-reload a plugin. REQUIRES approval."""
         approved, denial = await self._check_approval("reload", plugin_id)
         if not approved:
@@ -1406,6 +1460,7 @@ class SelfManagementPlugin:
 
         try:
             from leapflow.plugins import get_scoped_registry
+
             scoped = get_scoped_registry()
             fiber = scoped.dispose_plugin(plugin_id)
 
@@ -1491,6 +1546,7 @@ class SelfManagementPlugin:
                     "requires_approval": False,
                     "summary": "list live plugins and self capability evidence",
                 },
+                provides_capabilities=("plugin.list",),
             ),
             ToolMetadata(
                 name="plugin_status",
@@ -1516,6 +1572,7 @@ class SelfManagementPlugin:
                     "requires_approval": False,
                     "summary": "inspect one plugin's details",
                 },
+                provides_capabilities=("plugin.status",),
             ),
             ToolMetadata(
                 name="plugin_versions",
@@ -1538,6 +1595,7 @@ class SelfManagementPlugin:
                     "requires_approval": False,
                     "summary": "list plugin source versions",
                 },
+                provides_capabilities=("plugin.versions",),
             ),
             ToolMetadata(
                 name="plugin_propose",
@@ -1589,6 +1647,7 @@ class SelfManagementPlugin:
                     "idempotency_scope": "turn",
                     "summary": "create a reviewable plugin proposal without side effects",
                 },
+                provides_capabilities=("plugin.propose",),
             ),
             ToolMetadata(
                 name="assess_compatibility",
@@ -1618,6 +1677,7 @@ class SelfManagementPlugin:
                     "summary": "assess foreign plugin manifest compatibility",
                 },
                 mutates_state=False,
+                provides_capabilities=("plugin.compatibility_check",),
             ),
             ToolMetadata(
                 name="plugin_generate",
@@ -1658,6 +1718,7 @@ class SelfManagementPlugin:
                     "idempotency_scope": "turn",
                     "summary": "generate a new plugin (produces code only, no install)",
                 },
+                provides_capabilities=("plugin.generate",),
             ),
             ToolMetadata(
                 name="plugin_install",
@@ -1707,6 +1768,8 @@ class SelfManagementPlugin:
                     "summary": "install a plugin from validated code or marketplace (approval required)",
                 },
                 mutates_state=True,
+                provides_capabilities=("plugin.install",),
+                requires_platform_capabilities=("file.ops",),
             ),
             ToolMetadata(
                 name="plugin_rollback",
@@ -1739,6 +1802,8 @@ class SelfManagementPlugin:
                     "summary": "rollback a plugin to a recorded version (approval required)",
                 },
                 mutates_state=True,
+                provides_capabilities=("plugin.rollback",),
+                requires_platform_capabilities=("file.ops",),
             ),
             ToolMetadata(
                 name="plugin_reload",
@@ -1773,6 +1838,8 @@ class SelfManagementPlugin:
                     "summary": "hot-reload a plugin (approval required)",
                 },
                 mutates_state=True,
+                provides_capabilities=("plugin.reload",),
+                requires_platform_capabilities=("file.ops",),
             ),
             ToolMetadata(
                 name="plugin_disable",
@@ -1802,6 +1869,9 @@ class SelfManagementPlugin:
                     "summary": "disable a plugin (approval required)",
                 },
                 mutates_state=True,
+                provides_capabilities=("plugin.disable",),
+                requires_capabilities=("plugin.list",),
+                requires_platform_capabilities=("file.ops",),
             ),
             ToolMetadata(
                 name="plugin_remove",
@@ -1835,6 +1905,8 @@ class SelfManagementPlugin:
                     "summary": "remove a plugin and optionally delete its source (approval required)",
                 },
                 mutates_state=True,
+                provides_capabilities=("plugin.remove",),
+                requires_platform_capabilities=("file.ops",),
             ),
             ToolMetadata(
                 name="plugin_enable",
@@ -1863,6 +1935,8 @@ class SelfManagementPlugin:
                     "summary": "re-enable a disabled plugin (approval required)",
                 },
                 mutates_state=True,
+                provides_capabilities=("plugin.enable",),
+                requires_platform_capabilities=("file.ops",),
             ),
         ]
 

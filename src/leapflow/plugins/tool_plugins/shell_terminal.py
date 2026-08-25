@@ -51,7 +51,10 @@ class ShellTerminalPlugin:
                     "properties": {
                         "command": {"type": "string", "description": "Shell command to execute"},
                         "cwd": {"type": "string", "description": "Working directory (optional)"},
-                        "timeout": {"type": "number", "description": "Timeout in seconds (default: 30, max: 120)"},
+                        "timeout": {
+                            "type": "number",
+                            "description": "Timeout in seconds (default: 30, max: 120)",
+                        },
                     },
                     "required": ["command"],
                 },
@@ -71,6 +74,7 @@ class ShellTerminalPlugin:
                 # environment-fit scoring uses to exclude it rather than fail
                 # the call at runtime.
                 requires_platform_capabilities=("shell.exec",),
+                provides_capabilities=("shell.execute",),
             ),
             ToolMetadata(
                 name="terminal_open",
@@ -82,14 +86,31 @@ class ShellTerminalPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "command": {"type": "string", "description": "Optional initial command to run in the session"},
-                        "cwd": {"type": "string", "description": "Working directory (default: current dir)"},
-                        "shell": {"type": "string", "description": "Shell to launch (default: $SHELL or /bin/bash)"},
+                        "command": {
+                            "type": "string",
+                            "description": "Optional initial command to run in the session",
+                        },
+                        "cwd": {
+                            "type": "string",
+                            "description": "Working directory (default: current dir)",
+                        },
+                        "shell": {
+                            "type": "string",
+                            "description": "Shell to launch (default: $SHELL or /bin/bash)",
+                        },
                     },
                 },
                 handler=terminal_open,
-                x_leapflow={"category": "terminal", "risk_level": "high", "schema_cost": "medium", "requires_approval": True, "effect_scope": "external"},
+                x_leapflow={
+                    "category": "terminal",
+                    "risk_level": "high",
+                    "schema_cost": "medium",
+                    "requires_approval": True,
+                    "effect_scope": "external",
+                },
                 mutates_state=True,
+                provides_capabilities=("shell.session_create",),
+                requires_platform_capabilities=("shell.exec",),
             ),
             ToolMetadata(
                 name="terminal_send",
@@ -97,15 +118,29 @@ class ShellTerminalPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "session_id": {"type": "string", "description": "Session id from terminal_open"},
+                        "session_id": {
+                            "type": "string",
+                            "description": "Session id from terminal_open",
+                        },
                         "input": {"type": "string", "description": "Line of input to send"},
-                        "wait": {"type": "number", "description": "Seconds to wait for output before reading (default 0.3, max 10)"},
+                        "wait": {
+                            "type": "number",
+                            "description": "Seconds to wait for output before reading (default 0.3, max 10)",
+                        },
                     },
                     "required": ["session_id"],
                 },
                 handler=terminal_send,
-                x_leapflow={"category": "terminal", "risk_level": "high", "schema_cost": "low", "requires_approval": True, "effect_scope": "external"},
+                x_leapflow={
+                    "category": "terminal",
+                    "risk_level": "high",
+                    "schema_cost": "low",
+                    "requires_approval": True,
+                    "effect_scope": "external",
+                },
                 mutates_state=True,
+                provides_capabilities=("shell.session_input",),
+                requires_platform_capabilities=("shell.exec",),
             ),
             ToolMetadata(
                 name="terminal_read",
@@ -113,13 +148,26 @@ class ShellTerminalPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "session_id": {"type": "string", "description": "Session id from terminal_open"},
-                        "wait": {"type": "number", "description": "Seconds to wait before draining (default 0, max 10)"},
+                        "session_id": {
+                            "type": "string",
+                            "description": "Session id from terminal_open",
+                        },
+                        "wait": {
+                            "type": "number",
+                            "description": "Seconds to wait before draining (default 0, max 10)",
+                        },
                     },
                     "required": ["session_id"],
                 },
                 handler=terminal_read,
-                x_leapflow={"category": "terminal", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+                x_leapflow={
+                    "category": "terminal",
+                    "risk_level": "read_only",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("shell.session_output",),
+                requires_platform_capabilities=("shell.exec",),
             ),
             ToolMetadata(
                 name="terminal_close",
@@ -127,20 +175,37 @@ class ShellTerminalPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "session_id": {"type": "string", "description": "Session id from terminal_open"},
+                        "session_id": {
+                            "type": "string",
+                            "description": "Session id from terminal_open",
+                        },
                     },
                     "required": ["session_id"],
                 },
                 handler=terminal_close,
-                x_leapflow={"category": "terminal", "risk_level": "medium", "schema_cost": "low", "requires_approval": False},
+                x_leapflow={
+                    "category": "terminal",
+                    "risk_level": "medium",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                },
                 mutates_state=True,
+                provides_capabilities=("shell.session_destroy",),
+                requires_platform_capabilities=("shell.exec",),
             ),
             ToolMetadata(
                 name="terminal_list",
                 description="List active persistent terminal sessions.",
                 parameters_schema={"type": "object", "properties": {}},
                 handler=terminal_list,
-                x_leapflow={"category": "terminal", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+                x_leapflow={
+                    "category": "terminal",
+                    "risk_level": "read_only",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("shell.session_list",),
+                requires_platform_capabilities=("shell.exec",),
             ),
         ]
 

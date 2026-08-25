@@ -80,8 +80,7 @@ class OrchestrationPlugin:
                 "available_categories": available,
             }
         expanded_tools = [
-            td for td in catalog
-            if td.get("function", {}).get("name") in matched_names
+            td for td in catalog if td.get("function", {}).get("name") in matched_names
         ]
         return {"ok": True, "category": category, "expanded_tools": expanded_tools}
 
@@ -98,7 +97,11 @@ class OrchestrationPlugin:
                 depth=current_subagent_depth() + 1,
             )
             result = await self._subagent_manager.delegate(config)
-            return {"ok": result.status == "completed", "summary": result.summary, "status": result.status}
+            return {
+                "ok": result.status == "completed",
+                "summary": result.summary,
+                "status": result.status,
+            }
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -138,7 +141,10 @@ class OrchestrationPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "category": {"type": "string", "description": "Capability category name, e.g. hub, gateway, delegate"},
+                        "category": {
+                            "type": "string",
+                            "description": "Capability category name, e.g. hub, gateway, delegate",
+                        },
                     },
                     "required": ["category"],
                 },
@@ -149,6 +155,7 @@ class OrchestrationPlugin:
                     "schema_cost": "low",
                     "requires_approval": False,
                 },
+                provides_capabilities=("system.capability_expand",),
             ),
             ToolMetadata(
                 name="delegate_task",
@@ -160,8 +167,14 @@ class OrchestrationPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "goal": {"type": "string", "description": "Clear description of the task to delegate"},
-                        "context": {"type": "string", "description": "Relevant context for the subagent (optional)"},
+                        "goal": {
+                            "type": "string",
+                            "description": "Clear description of the task to delegate",
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "Relevant context for the subagent (optional)",
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -172,6 +185,7 @@ class OrchestrationPlugin:
                     "schema_cost": "medium",
                     "requires_approval": False,
                 },
+                provides_capabilities=("system.delegate",),
             ),
             ToolMetadata(
                 name="schedule_reentry",
@@ -190,16 +204,37 @@ class OrchestrationPlugin:
                             "enum": ["time", "event"],
                             "description": "time = resume after delay_seconds; event = resume when a matching platform event arrives",
                         },
-                        "reason": {"type": "string", "description": "One concise sentence: what to continue and why (carried into the resumed turn)."},
-                        "delay_seconds": {"type": "number", "description": "kind=time: seconds from now to resume."},
-                        "event_match": {"type": "object", "description": "kind=event: match filter, e.g. platform / chat / keyword."},
-                        "max_reentries": {"type": "integer", "description": "Max times this may resume (default 1)."},
-                        "deadline_seconds": {"type": "number", "description": "Optional: abandon the re-entry after this many seconds."},
+                        "reason": {
+                            "type": "string",
+                            "description": "One concise sentence: what to continue and why (carried into the resumed turn).",
+                        },
+                        "delay_seconds": {
+                            "type": "number",
+                            "description": "kind=time: seconds from now to resume.",
+                        },
+                        "event_match": {
+                            "type": "object",
+                            "description": "kind=event: match filter, e.g. platform / chat / keyword.",
+                        },
+                        "max_reentries": {
+                            "type": "integer",
+                            "description": "Max times this may resume (default 1).",
+                        },
+                        "deadline_seconds": {
+                            "type": "number",
+                            "description": "Optional: abandon the re-entry after this many seconds.",
+                        },
                     },
                     "required": ["kind", "reason"],
                 },
                 handler=self._schedule_reentry_handler,
-                x_leapflow={"category": "memory", "risk_level": "read_only", "schema_cost": "medium", "requires_approval": False},
+                x_leapflow={
+                    "category": "memory",
+                    "risk_level": "read_only",
+                    "schema_cost": "medium",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("system.schedule_reentry",),
             ),
         ]
 

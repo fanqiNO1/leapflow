@@ -188,6 +188,10 @@ class UnixRpcServer:
 
                 approval_queue = asyncio.Queue()
                 route_token = _approval_route.set((approval_queue, request.id))
+                try:
+                    self._service._approval_coordinator.register_route(request.id)
+                except AttributeError:
+                    pass
             try:
                 result = await self._await_with_heartbeat(
                     request.id,
@@ -199,6 +203,7 @@ class UnixRpcServer:
                 if route_token is not None:
                     _approval_route.reset(route_token)
                     try:
+                        self._service._approval_coordinator.unregister_route(request.id)
                         self._service._approval_coordinator.deny_for_request(request.id, reason="command_ended")
                     except AttributeError:
                         pass

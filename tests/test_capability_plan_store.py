@@ -48,3 +48,28 @@ def test_capability_plan_store_corrupt_file_degrades_to_empty(tmp_path) -> None:
 
     assert store.list_records() == []
     assert store.latest() is None
+
+
+def test_capability_plan_store_preserves_closed_loop_metadata(tmp_path) -> None:
+    store = JsonCapabilityPlanStore(tmp_path / "capability_plans.json")
+
+    record = store.add_record(
+        source="closed_loop",
+        record_id="loop-a:after_install",
+        phase="after_install",
+        loop_id="loop-a",
+        mutation={"action": "install", "plugin_id": "json_loop"},
+        registry_version_before=2,
+        registry_version_after=4,
+        decision_delta={"added": {"json.pretty": "json_pretty_loop"}},
+        metadata={"approval": "allowed"},
+    )
+
+    assert record["phase"] == "after_install"
+    assert record["loop_id"] == "loop-a"
+    assert record["mutation"] == {"action": "install", "plugin_id": "json_loop"}
+    assert record["registry_version_before"] == 2
+    assert record["registry_version_after"] == 4
+    assert record["decision_delta"]["added"] == {"json.pretty": "json_pretty_loop"}
+    assert record["metadata"] == {"approval": "allowed"}
+    assert store.latest()["record_id"] == "loop-a:after_install"

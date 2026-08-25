@@ -19,7 +19,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from leapflow.tools.execution_context import resolve_workspace_path, workspace_scope_error
+from leapflow.tools.execution_context import require_workspace_access, resolve_workspace_path
 from leapflow.tools.shell_tools import shell_run
 
 logger = logging.getLogger(__name__)
@@ -101,7 +101,7 @@ def _runner_failed(result: Dict[str, Any]) -> bool:
 async def test_run(params: Dict[str, Any]) -> Dict[str, Any]:
     """Run the project's test suite and return structured pass/fail results."""
     cwd = resolve_workspace_path(params.get("cwd") or ".", default=".")
-    scope_error = workspace_scope_error(cwd, operation="test_run cwd")
+    scope_error = await require_workspace_access(cwd, operation="test_run cwd", effect="execute")
     if scope_error:
         return scope_error
     if not cwd.is_dir():
@@ -144,7 +144,7 @@ async def test_run(params: Dict[str, Any]) -> Dict[str, Any]:
 async def lint_check(params: Dict[str, Any]) -> Dict[str, Any]:
     """Run the project's linter and return a structured clean/issue result."""
     cwd = resolve_workspace_path(params.get("cwd") or ".", default=".")
-    scope_error = workspace_scope_error(cwd, operation="lint_check cwd")
+    scope_error = await require_workspace_access(cwd, operation="lint_check cwd", effect="execute")
     if scope_error:
         return scope_error
     if not cwd.is_dir():

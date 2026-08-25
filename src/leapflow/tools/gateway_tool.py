@@ -791,6 +791,49 @@ def _required_scopes_for_identity(spec: Any) -> List[str]:
     return result
 
 
+def _approval_gate_missing_response(
+    platform: str,
+    action_name: str,
+    capability: str = "",
+) -> Dict[str, Any]:
+    """Fail-closed response for a side-effecting action with no approval gate.
+
+    A send, write, or execute action needs the user's consent, and consent cannot
+    be obtained when no gate is installed. Treating an absent gate as permission
+    would leave outbound messaging and platform writes as the only ungated paths
+    in the product, so the action is refused and the caller is told what to fix.
+    Read actions deliberately still proceed: they carry no outbound effect, and
+    the approval gate is not their permission boundary.
+
+    No ``failure_class`` is set on purpose. This is a wiring defect, not a denied
+    scope, so it must not be classified as a permission failure and routed into
+    the scope-repair flow that tells users to grant permissions in a developer
+    console. ``admin_required`` plus ``retryable=False`` is still enough for
+    ``is_permission_hard_stop_payload`` to stop the turn instead of letting the
+    model retry an action that can never obtain consent.
+    """
+    return {
+        "ok": False,
+        "failure_code": "approval_gate_missing",
+        "error": (
+            f"Action '{action_name}' on platform '{platform}' requires user approval, "
+            "but no approval gate is installed in this session, so consent cannot be "
+            "obtained."
+        ),
+        "recoverability": "admin_required",
+        "retryable": False,
+        "capability": capability or action_name,
+        "platform": platform,
+        "action": action_name,
+        "llm_instruction": (
+            f"STOP: Side-effecting actions on '{platform}' are unavailable because this "
+            "session has no approval gate. Do NOT retry and do NOT attempt the same "
+            "outcome through another tool. Tell the user that outbound actions need an "
+            "approval gate; read-only platform actions still work."
+        ),
+    }
+
+
 # ═══════════════════════════════════════════════════════════════
 # gateway_send handler — proactive outbound messaging
 # ═══════════════════════════════════════════════════════════════
@@ -839,38 +882,42 @@ async def gateway_send_handler(params: Dict[str, Any]) -> Dict[str, Any]:
             delegated.setdefault("source_tool", "gateway_send")
         return delegated
 
-    if _approval_gate is not None:
-        try:
-            from leapflow.security.actions import ActionDescriptor
-            from leapflow.security.approval import ApprovalDecision, ApprovalRequest
+    # Reached only when the platform has no registered im.send_message spec, so
+    # this is a raw adapter send: always side-effecting, never gate-optional.
+    if _approval_gate is None:
+        return _approval_gate_missing_response(platform, "im.send_message")
 
-            action = ActionDescriptor.gateway_send(platform, chat_id, text, metadata={
-                "thread_id": params.get("thread_id", ""),
-            })
-            if hasattr(_approval_gate, "evaluate"):
-                result = await _approval_gate.evaluate(action)
-                if not getattr(result, "approved", False):
-                    error = str(getattr(result, "denial_message", "") or "Outbound message denied by approval gate")
-                    return {"ok": False, "error": error}
-            else:
-                preview = text[:80] + ("…" if len(text) > 80 else "")
-                decision = await _approval_gate.request_approval(ApprovalRequest(
-                    category=action.kind,
-                    detail=f"Send to {platform}/{chat_id}: {preview}",
-                    risk_hint=0.5,
-                    metadata={"platform": platform, "chat_id": chat_id},
-                    action=action,
-                ))
-                if decision not in {
-                    ApprovalDecision.ALLOW,
-                    ApprovalDecision.ALLOW_ONCE,
-                    ApprovalDecision.ALLOW_SESSION,
-                    ApprovalDecision.ALLOW_ALWAYS,
-                }:
-                    return {"ok": False, "error": "Outbound message denied by approval gate"}
-        except Exception:
-            logger.debug("gateway_send approval check failed", exc_info=True)
-            return {"ok": False, "error": "Outbound message approval check failed"}
+    try:
+        from leapflow.security.actions import ActionDescriptor
+        from leapflow.security.approval import ApprovalDecision, ApprovalRequest
+
+        action = ActionDescriptor.gateway_send(platform, chat_id, text, metadata={
+            "thread_id": params.get("thread_id", ""),
+        })
+        if hasattr(_approval_gate, "evaluate"):
+            result = await _approval_gate.evaluate(action)
+            if not getattr(result, "approved", False):
+                error = str(getattr(result, "denial_message", "") or "Outbound message denied by approval gate")
+                return {"ok": False, "error": error}
+        else:
+            preview = text[:80] + ("…" if len(text) > 80 else "")
+            decision = await _approval_gate.request_approval(ApprovalRequest(
+                category=action.kind,
+                detail=f"Send to {platform}/{chat_id}: {preview}",
+                risk_hint=0.5,
+                metadata={"platform": platform, "chat_id": chat_id},
+                action=action,
+            ))
+            if decision not in {
+                ApprovalDecision.ALLOW,
+                ApprovalDecision.ALLOW_ONCE,
+                ApprovalDecision.ALLOW_SESSION,
+                ApprovalDecision.ALLOW_ALWAYS,
+            }:
+                return {"ok": False, "error": "Outbound message denied by approval gate"}
+    except Exception:
+        logger.debug("gateway_send approval check failed", exc_info=True)
+        return {"ok": False, "error": "Outbound message approval check failed"}
 
     return await _gateway_server_ref.send_message(
         platform,
@@ -942,6 +989,14 @@ async def platform_action_handler(params: Dict[str, Any]) -> Dict[str, Any]:
             if not feasibility_check.get("ok"):
                 return feasibility_check
         return {"ok": False, "error": base_err, **{k: v for k, v in failure_info.items() if k != "error"}}
+
+    # Consent is mandatory for side effects, so a missing gate refuses the action
+    # rather than waving it through. Read actions fall through unguarded by
+    # design; do not "fix" this into a blanket denial.
+    if _approval_gate is None and spec.effect in _SIDE_EFFECT_KINDS:
+        return _approval_gate_missing_response(
+            platform, action_name, spec.capability or spec.name
+        )
 
     if _approval_gate is not None:
         try:

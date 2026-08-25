@@ -13,6 +13,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from leapflow.plugins.adaptive_loop import (
+    AdaptiveLoopMutation,
+    AdaptiveLoopRequest,
+    AdaptiveLoopResult,
+    AdaptivePluginLoop,
+    CapabilityDecisionRecorder,
+    SelfManagementLifecycleActor,
+)
+from leapflow.plugins.adaptive_policy import AdaptiveEvolutionPolicy, AdaptivePolicyDecision
 from leapflow.plugins.capability_plan import CapabilityPlan, CapabilityPlanStep
 from leapflow.plugins.capability_resolver import (
     CapabilityCandidate,
@@ -68,6 +77,13 @@ def reload_plugin(plugin_id: str) -> "PluginFiber":
 
 
 __all__ = [
+    "AdaptiveLoopMutation",
+    "AdaptiveLoopRequest",
+    "AdaptiveLoopResult",
+    "AdaptivePluginLoop",
+    "AdaptiveEvolutionPolicy",
+    "AdaptivePolicyDecision",
+    "CapabilityDecisionRecorder",
     "CapabilityCandidate",
     "CapabilityPlan",
     "CapabilityPlanStep",
@@ -75,6 +91,7 @@ __all__ = [
     "CapabilityResolver",
     "ResolverContext",
     "ScopedToolRegistry",
+    "SelfManagementLifecycleActor",
     "ToolMetadata",
     "ToolPlugin",
     "ToolPluginRegistry",

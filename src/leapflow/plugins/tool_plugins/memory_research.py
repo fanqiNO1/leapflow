@@ -126,7 +126,13 @@ class MemoryResearchPlugin:
                     "required": ["query"],
                 },
                 handler=self._memory_search_handler,
-                x_leapflow={"category": "memory", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+                x_leapflow={
+                    "category": "memory",
+                    "risk_level": "read_only",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("memory.search",),
             ),
             ToolMetadata(
                 name="memory_add",
@@ -144,7 +150,13 @@ class MemoryResearchPlugin:
                     "required": ["content"],
                 },
                 handler=self._memory_add_handler,
-                x_leapflow={"category": "write", "risk_level": "medium", "schema_cost": "low", "requires_approval": False},
+                x_leapflow={
+                    "category": "write",
+                    "risk_level": "medium",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("memory.add",),
             ),
             ToolMetadata(
                 name="research_note",
@@ -159,7 +171,13 @@ class MemoryResearchPlugin:
                     "properties": {
                         "kind": {
                             "type": "string",
-                            "enum": ["finding", "open_question", "resolved", "decision", "next_step"],
+                            "enum": [
+                                "finding",
+                                "open_question",
+                                "resolved",
+                                "decision",
+                                "next_step",
+                            ],
                             "description": "finding | open_question | resolved (closes a matching open question) | decision | next_step",
                         },
                         "text": {"type": "string", "description": "One concise sentence."},
@@ -167,7 +185,13 @@ class MemoryResearchPlugin:
                     "required": ["kind", "text"],
                 },
                 handler=self._research_note_handler,
-                x_leapflow={"category": "memory", "risk_level": "read_only", "schema_cost": "medium", "requires_approval": False},
+                x_leapflow={
+                    "category": "memory",
+                    "risk_level": "read_only",
+                    "schema_cost": "medium",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("memory.research_note",),
             ),
         ]
 

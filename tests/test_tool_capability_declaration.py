@@ -114,3 +114,41 @@ def test_shell_run_declares_platform_requirement() -> None:
     shell_run = next(t for t in plugin.tools if t.name == "shell_run")
 
     assert Capability.SHELL_EXEC.value in shell_run.requires_platform_capabilities
+
+
+def _is_builtin_plugin(plugin: Any) -> bool:
+    """Return whether a plugin comes from the built-in tool plugin package."""
+    if getattr(plugin, "__leapflow_plugin_path__", ""):
+        return False
+    module_name = str(getattr(plugin.__class__, "__module__", ""))
+    return module_name.startswith("leapflow.plugins.tool_plugins.")
+
+
+def test_builtin_tools_declare_provided_capabilities() -> None:
+    """Built-in tools expose declarative capability tags for adaptive selection."""
+    from leapflow.plugins.tool_plugins import get_all_plugins
+
+    missing = [
+        (plugin.plugin_id, tool.name)
+        for plugin in get_all_plugins()
+        if _is_builtin_plugin(plugin)
+        for tool in plugin.tools
+        if not tool.provides_capabilities
+    ]
+
+    assert missing == []
+
+
+def test_builtin_mutating_tools_declare_platform_requirements() -> None:
+    """Mutating built-in tools expose host requirements for environment scoring."""
+    from leapflow.plugins.tool_plugins import get_all_plugins
+
+    missing = [
+        (plugin.plugin_id, tool.name)
+        for plugin in get_all_plugins()
+        if _is_builtin_plugin(plugin)
+        for tool in plugin.tools
+        if tool.mutates_state and not tool.requires_platform_capabilities
+    ]
+
+    assert missing == []

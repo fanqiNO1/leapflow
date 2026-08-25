@@ -32,6 +32,18 @@ layout:
                 props:
                   label: "Executable"
                   value: "{{ capability_plan.plan.executable }}"
+              - type: Stat
+                props:
+                  label: "Loop phase"
+                  value: "{{ capability_plan.phase }}"
+              - type: Stat
+                props:
+                  label: "Mutation"
+                  value: "{{ capability_plan.mutation.action }}"
+              - type: Stat
+                props:
+                  label: "Registry delta"
+                  value: "{{ capability_plan.registry_version_before }} → {{ capability_plan.registry_version_after }}"
           - type: Table
             props:
               title: "Requirements"
@@ -64,3 +76,60 @@ layout:
                 - "{{ step.plugin_id }}"
                 - "{{ step.execution_policy }}"
                 - "{{ step.requires_approval }}"
+          - type: Table
+            props:
+              title: "Selection delta"
+              columns:
+                - "Capability"
+                - "Before"
+                - "After"
+            repeat:
+              path: "capability_plan.decision_delta.changed"
+              as: "delta"
+            bind:
+              row:
+                - "{{ delta.key }}"
+                - "{{ delta.before }}"
+                - "{{ delta.after }}"
+      - type: Section
+        props:
+          title: "Autonomous governance"
+          subtitle: "Observation backlog, proposal state, policy decisions, and lifecycle outcomes."
+        children:
+          - type: Grid
+            props:
+              cols: 4
+            children:
+              - type: Stat
+                props:
+                  label: "Observations"
+                  value: "{{ capability_plan.observation_count }}"
+              - type: Stat
+                props:
+                  label: "Proposal"
+                  value: "{{ capability_plan.proposal.proposal_id }}"
+              - type: Stat
+                props:
+                  label: "Proposal status"
+                  value: "{{ capability_plan.proposal.status }}"
+              - type: Stat
+                props:
+                  label: "Autonomy"
+                  value: "{{ capability_plan.policy_decision.autonomy_level }}"
+          - type: Table
+            props:
+              title: "Lifecycle timeline"
+              columns:
+                - "Action"
+                - "Plugin"
+                - "Trust"
+                - "Failures"
+            repeat:
+              path: "capability_plan.governance_results"
+              as: "event"
+            bind:
+              row:
+                - "{{ event.action }}"
+                - "{{ event.plugin_id }}"
+                - "{{ event.trust_level }}"
+                - "{{ event.failure_streak }}"

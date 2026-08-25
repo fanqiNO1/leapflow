@@ -314,7 +314,7 @@ def test_shell_gate_allows_search_list_variables(tmp_path, monkeypatch) -> None:
         reset_tool_context,
         set_tool_context,
     )
-    from leapflow.tools.shell_tools import _command_workspace_escape
+    from leapflow.tools.shell_tools import _command_workspace_escape_path
 
     workspace = tmp_path / "work"
     workspace.mkdir()
@@ -330,12 +330,11 @@ def test_shell_gate_allows_search_list_variables(tmp_path, monkeypatch) -> None:
             "export PATH=$PATH:/usr/local/bin && make",
             "PATH=$PATH:./node_modules/.bin npm test",
         ):
-            assert _command_workspace_escape(command, cwd=workspace) is None, command
+            assert _command_workspace_escape_path(command, cwd=workspace) is None, command
 
-        # A single-path variable must still be gated.
-        blocked = _command_workspace_escape("cat $LEAP_TEST_HOME/secret", cwd=workspace)
-        assert blocked is not None
-        assert blocked["error_type"] == "outside_workspace"
+        # A single-path variable must still be detected as an escape target.
+        blocked = _command_workspace_escape_path("cat $LEAP_TEST_HOME/secret", cwd=workspace)
+        assert blocked == (tmp_path / "outside" / "secret").resolve()
     finally:
         reset_tool_context(token)
 
@@ -345,13 +344,18 @@ def test_shell_gate_redirects_leapflow_config_targets(tmp_path) -> None:
 
     Without the redirect the model only learns "not here" and moves the same
     probe to another spelling, which is the loop the config tools exist to end.
+
+    Detection and refusal are now separate steps — the shell gate reports the
+    escaping path and the shared refusal builder carries the hint — so both are
+    asserted here.
     """
     from leapflow.tools.execution_context import (
         ToolExecutionContext,
         reset_tool_context,
         set_tool_context,
+        workspace_scope_refusal,
     )
-    from leapflow.tools.shell_tools import _command_workspace_escape
+    from leapflow.tools.shell_tools import _command_workspace_escape_path
     from leapflow.config import get_settings
 
     workspace = tmp_path / "work"
@@ -362,7 +366,9 @@ def test_shell_gate_redirects_leapflow_config_targets(tmp_path) -> None:
         ToolExecutionContext.from_strings(workspace_root=str(workspace), session_id="sess-hint")
     )
     try:
-        error = _command_workspace_escape(f"cat {config_path}", cwd=workspace)
+        escaping = _command_workspace_escape_path(f"cat {config_path}", cwd=workspace)
+        assert escaping == config_path.resolve()
+        error = workspace_scope_refusal(escaping, operation="shell_run command")
     finally:
         reset_tool_context(token)
 

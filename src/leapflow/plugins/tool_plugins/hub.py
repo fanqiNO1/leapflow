@@ -34,19 +34,32 @@ class HubToolsPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "skill_name": {"type": "string", "description": "Name of the local skill to push"},
+                        "skill_name": {
+                            "type": "string",
+                            "description": "Name of the local skill to push",
+                        },
                         "visibility": {
                             "type": "string",
                             "enum": ["private", "public", "internal"],
                             "description": "Repository visibility (default: private)",
                         },
-                        "version": {"type": "string", "description": "Version string (default: auto-detect from skill)"},
+                        "version": {
+                            "type": "string",
+                            "description": "Version string (default: auto-detect from skill)",
+                        },
                     },
                     "required": ["skill_name"],
                 },
                 handler=hub_push_tool,
-                x_leapflow={"category": "hub", "risk_level": "medium", "schema_cost": "high", "requires_approval": True},
+                x_leapflow={
+                    "category": "hub",
+                    "risk_level": "medium",
+                    "schema_cost": "high",
+                    "requires_approval": True,
+                },
                 mutates_state=True,
+                provides_capabilities=("hub.push",),
+                requires_platform_capabilities=("file.ops",),
             ),
             ToolMetadata(
                 name="hub_pull",
@@ -54,14 +67,27 @@ class HubToolsPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "repo_id": {"type": "string", "description": "Repository identifier (e.g. 'owner/leapflow-skill-name')"},
-                        "version": {"type": "string", "description": "Specific version to pull (default: latest)"},
+                        "repo_id": {
+                            "type": "string",
+                            "description": "Repository identifier (e.g. 'owner/leapflow-skill-name')",
+                        },
+                        "version": {
+                            "type": "string",
+                            "description": "Specific version to pull (default: latest)",
+                        },
                     },
                     "required": ["repo_id"],
                 },
                 handler=hub_pull_tool,
-                x_leapflow={"category": "hub", "risk_level": "medium", "schema_cost": "high", "requires_approval": True},
+                x_leapflow={
+                    "category": "hub",
+                    "risk_level": "medium",
+                    "schema_cost": "high",
+                    "requires_approval": True,
+                },
                 mutates_state=True,
+                provides_capabilities=("hub.pull",),
+                requires_platform_capabilities=("file.ops",),
             ),
             ToolMetadata(
                 name="hub_search",
@@ -69,12 +95,21 @@ class HubToolsPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "Free-text search query for finding skills"},
+                        "query": {
+                            "type": "string",
+                            "description": "Free-text search query for finding skills",
+                        },
                     },
                     "required": ["query"],
                 },
                 handler=hub_search_tool,
-                x_leapflow={"category": "hub", "risk_level": "read_only", "schema_cost": "high", "requires_approval": False},
+                x_leapflow={
+                    "category": "hub",
+                    "risk_level": "read_only",
+                    "schema_cost": "high",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("hub.search",),
             ),
             ToolMetadata(
                 name="hub_sync",
@@ -87,12 +122,22 @@ class HubToolsPlugin:
                             "enum": ["full", "push-only", "pull-only"],
                             "description": "Sync mode (default: full)",
                         },
-                        "dry_run": {"type": "boolean", "description": "If true, only shows the plan (default: true)"},
+                        "dry_run": {
+                            "type": "boolean",
+                            "description": "If true, only shows the plan (default: true)",
+                        },
                     },
                 },
                 handler=hub_sync_tool,
-                x_leapflow={"category": "hub", "risk_level": "medium", "schema_cost": "high", "requires_approval": True},
+                x_leapflow={
+                    "category": "hub",
+                    "risk_level": "medium",
+                    "schema_cost": "high",
+                    "requires_approval": True,
+                },
                 mutates_state=True,
+                provides_capabilities=("hub.sync",),
+                requires_platform_capabilities=("file.ops",),
             ),
         ]
 

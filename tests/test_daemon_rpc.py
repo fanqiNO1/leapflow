@@ -737,7 +737,7 @@ class _ApprovalCommandService(_FakeService):
         super().__init__()
         from leapflow.daemon.approval_coordinator import ApprovalCoordinator
 
-        self._approval_coordinator = ApprovalCoordinator(ttl_s=5.0)
+        self._approval_coordinator = ApprovalCoordinator()
 
     async def command_execute(self, name: str, args: str = "", session_id: str = "") -> dict[str, Any]:
         from leapflow.daemon.approval_route import approval_route

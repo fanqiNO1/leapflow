@@ -48,9 +48,17 @@ from leapflow.engine.intent_classifier import Intent, IntentClassifier
 from leapflow.engine.message_healer import MessageHealer
 from leapflow.engine.message_sanitizer import MessageSanitizer
 from leapflow.engine.prompt_cache import CacheStrategy
-from leapflow.engine.stale_stream import StaleStreamError, stale_guarded_stream, build_continuation_prompt
+from leapflow.engine.stale_stream import (
+    StaleStreamError,
+    stale_guarded_stream,
+    build_continuation_prompt,
+)
 from leapflow.engine.turn_recovery import TurnRecoveryState
-from leapflow.engine.turn_usage import TurnUsageTracker, cost_ceiling_exceeded, build_adaptive_learning_signal
+from leapflow.engine.turn_usage import (
+    TurnUsageTracker,
+    cost_ceiling_exceeded,
+    build_adaptive_learning_signal,
+)
 from leapflow.engine.recovery_coordinator import RecoveryCoordinator
 from leapflow.engine.recovery_budget import RecoveryBudget
 from leapflow.engine.unified_classifier import UnifiedErrorClassifier
@@ -110,6 +118,7 @@ def _default_tool_registry() -> ToolRegistry:
     """Return the runtime tool registry, rebuilding when late-registered tools arrive."""
     global _registry_cache
     from leapflow.plugins import get_registry
+
     _plugin_registry = get_registry()
     from leapflow.tools.name_resolver import TOOL_NAME_ALIASES
 
@@ -123,7 +132,8 @@ def _default_tool_registry() -> ToolRegistry:
         return _registry_cache[3]
     # Rebuild
     registry = ToolRegistry.from_definitions(
-        td, th,
+        td,
+        th,
         aliases=TOOL_NAME_ALIASES,
     )
     _registry_cache = (*size_key, registry)
@@ -253,22 +263,48 @@ def _tool_result_metadata(
             if key in result:
                 metadata[key] = result[key]
         for key in (
-            "error_type", "retryable", "resolution_status", "resolution_confidence",
-            "already_executed", "duplicate_suppressed", "execution_reused", "execution_skipped",
-            "counts_as_failure", "counts_as_tool_attempt", "ui_hidden", "skipped_reason",
-            "blocked_by_tool", "blocked_by_error", "execution_id", "idempotency_key", "execution_status",
-            "execution_policy", "tool_call_id",
+            "error_type",
+            "retryable",
+            "resolution_status",
+            "resolution_confidence",
+            "already_executed",
+            "duplicate_suppressed",
+            "execution_reused",
+            "execution_skipped",
+            "counts_as_failure",
+            "counts_as_tool_attempt",
+            "ui_hidden",
+            "skipped_reason",
+            "blocked_by_tool",
+            "blocked_by_error",
+            "execution_id",
+            "idempotency_key",
+            "execution_status",
+            "execution_policy",
+            "tool_call_id",
             # Must reach the model: a failed side effect whose fate is unknown
             # needs verification, not a blind retry.
-            "side_effect_uncertain", "retry_guidance",
+            "side_effect_uncertain",
+            "retry_guidance",
         ):
             if key in result:
                 metadata[key] = result[key]
         # App Connector authorization failure metadata
         for key in (
-            "failure_class", "failure_code", "recoverability", "blocks_approval",
-            "platform", "action", "capability", "missing_scopes", "required_scopes",
-            "scope_relation", "scope_source", "console_url", "next_steps", "skip_approval",
+            "failure_class",
+            "failure_code",
+            "recoverability",
+            "blocks_approval",
+            "platform",
+            "action",
+            "capability",
+            "missing_scopes",
+            "required_scopes",
+            "scope_relation",
+            "scope_source",
+            "console_url",
+            "next_steps",
+            "skip_approval",
         ):
             if key in result:
                 metadata[key] = result[key]
@@ -289,7 +325,9 @@ def _tool_result_metadata(
         # App Connector recovery metadata for TUI transparency
         recovery_hint = result.get("recovery_hint")
         if recovery_hint:
-            metadata["recovery_hint"] = _single_line_preview(recovery_hint, limit=_TOOL_RESULT_PREVIEW_LIMIT)
+            metadata["recovery_hint"] = _single_line_preview(
+                recovery_hint, limit=_TOOL_RESULT_PREVIEW_LIMIT
+            )
         onboarding_state = result.get("onboarding_state")
         if isinstance(onboarding_state, dict) and onboarding_state.get("stage"):
             metadata["onboarding_stage"] = str(onboarding_state["stage"])
@@ -309,8 +347,10 @@ def _tool_result_metadata(
 
 def _is_retryable_unknown_tool_result(result: Any) -> bool:
     """Return whether a tool result can drive a one-shot name correction retry."""
-    return isinstance(result, dict) and result.get("error_type") == "unknown_tool" and bool(
-        result.get("retryable", False)
+    return (
+        isinstance(result, dict)
+        and result.get("error_type") == "unknown_tool"
+        and bool(result.get("retryable", False))
     )
 
 
@@ -369,7 +409,9 @@ def _is_permission_hard_stop_payload(payload: Dict[str, Any]) -> bool:
     return is_permission_hard_stop_payload(payload)
 
 
-_SIDE_EFFECT_STOP_POLICIES = frozenset({"external_side_effect", "mutating_once", "mutating_idempotent"})
+_SIDE_EFFECT_STOP_POLICIES = frozenset(
+    {"external_side_effect", "mutating_once", "mutating_idempotent"}
+)
 
 
 def _tool_result_counts_as_failure(payload: Dict[str, Any]) -> bool:
@@ -383,7 +425,11 @@ def _tool_result_counts_as_failure(payload: Dict[str, Any]) -> bool:
 
 def _tool_result_is_control_signal(payload: Dict[str, Any]) -> bool:
     """Return whether a tool payload is execution control metadata, not an attempt result."""
-    return bool(payload.get("already_executed") or payload.get("duplicate_suppressed") or payload.get("execution_skipped"))
+    return bool(
+        payload.get("already_executed")
+        or payload.get("duplicate_suppressed")
+        or payload.get("execution_skipped")
+    )
 
 
 def _tool_failure_text(payload: Dict[str, Any]) -> str:
@@ -433,7 +479,9 @@ def _interaction_metadata(decision: Any) -> Dict[str, Any]:
     return {
         "interaction": {
             "request_id": interaction.request_id,
-            "interaction_type": getattr(interaction.interaction_type, "value", str(interaction.interaction_type)),
+            "interaction_type": getattr(
+                interaction.interaction_type, "value", str(interaction.interaction_type)
+            ),
             "severity": getattr(interaction.severity, "value", str(interaction.severity)),
             "title": interaction.title,
             "description": interaction.description,
@@ -573,7 +621,7 @@ def _truncate_result_for_budget(payload: Any, budget: int) -> str:
             orig_len = len(v)
             # Estimate target entry count from a small sample to minimise
             # iterations; then fine-tune with a tight while-loop.
-            sample = json.dumps(v[:min(4, orig_len)], default=str, ensure_ascii=False)
+            sample = json.dumps(v[: min(4, orig_len)], default=str, ensure_ascii=False)
             chars_per = max(1, len(sample) / min(4, orig_len))
             empty_payload = {**shrunk, key: [], key + "_omitted": orig_len}
             overhead = len(json.dumps(empty_payload, default=str, ensure_ascii=False))
@@ -608,20 +656,26 @@ def _truncate_result_for_budget(payload: Any, budget: int) -> str:
 
         # Sentinel: emit minimal valid JSON rather than a raw string cut that
         # leaves the LLM with an unparseable fragment.
-        sentinel = json.dumps({
-            "ok": payload.get("ok"),
-            "kind": payload.get("kind", ""),
-            "truncated": True,
-            "original_chars": len(text),
-            "budget_chars": budget,
-        }, default=str, ensure_ascii=False)
+        sentinel = json.dumps(
+            {
+                "ok": payload.get("ok"),
+                "kind": payload.get("kind", ""),
+                "truncated": True,
+                "original_chars": len(text),
+                "budget_chars": budget,
+            },
+            default=str,
+            ensure_ascii=False,
+        )
         return sentinel
 
     # Non-dict: hard string cut is unavoidable; the LLM sees a partial raw value.
     return text[:budget]
 
 
-def _skipped_after_failure_result(blocking_tool: str, blocking_result: Dict[str, Any]) -> Dict[str, Any]:
+def _skipped_after_failure_result(
+    blocking_tool: str, blocking_result: Dict[str, Any]
+) -> Dict[str, Any]:
     """Build a non-failure result for a tool skipped because an earlier side effect failed."""
     return {
         "ok": True,
@@ -656,7 +710,11 @@ def _build_permission_recovery_text(failure: Dict[str, Any]) -> str:
     """
     platform = str(failure.get("platform") or "")
     capability = str(failure.get("capability") or "")
-    where = f"`{platform}.{capability}`" if platform and capability else (capability or platform or "this action")
+    where = (
+        f"`{platform}.{capability}`"
+        if platform and capability
+        else (capability or platform or "this action")
+    )
     missing_scopes: List[str] = [str(s) for s in (failure.get("missing_scopes") or []) if s]
     required_scopes: List[str] = [str(s) for s in (failure.get("required_scopes") or []) if s]
     scope_relation = str(failure.get("scope_relation") or "all_required")
@@ -809,7 +867,9 @@ def _last_tool_failures_recovery_message(messages: List[Dict[str, Any]]) -> str:
     elif failure_code == "missing_required_fields" or "Missing required fields" in error:
         # TODO: migrate to failure_code-only once all producers emit
         # failure_code="missing_required_fields" instead of bare error text.
-        lines.append(f"Action parameter incomplete: {error}. Please provide the missing field(s) and retry.")
+        lines.append(
+            f"Action parameter incomplete: {error}. Please provide the missing field(s) and retry."
+        )
     elif error:
         lines.append(f"Action failed: {error}")
 
@@ -851,7 +911,9 @@ def _app_onboarding_recovery_message(messages: List[Dict[str, Any]]) -> str:
         if isinstance(steps, list) and steps:
             lines.append("Next steps:")
             lines.extend(f"- {step}" for step in steps[:4])
-        lines.append("After completing the missing step, continue the same onboarding flow; LeapFlow will reuse the pending App Connector state.")
+        lines.append(
+            "After completing the missing step, continue the same onboarding flow; LeapFlow will reuse the pending App Connector state."
+        )
         return "\n".join(lines)
     return ""
 
@@ -860,9 +922,7 @@ def _estimate_text_tokens(text: str) -> int:
     """Approximate token count for status display when provider usage is absent."""
     if not text:
         return 0
-    cjk_count = sum(
-        1 for ch in text if "\u4e00" <= ch <= "\u9fff" or "\u3000" <= ch <= "\u303f"
-    )
+    cjk_count = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff" or "\u3000" <= ch <= "\u303f")
     latin_chars = len(text) - cjk_count
     return max(1, cjk_count + latin_chars // 4)
 
@@ -981,13 +1041,13 @@ def _extract_json_object(text: str) -> Dict[str, Any]:
 
 def _keywords_from_query(q: str) -> list[str]:
     tokens: list[str] = []
-    for segment in re.findall(r'[\u4e00-\u9fff]+|[\w\-./]+', q):
-        if re.match(r'[\u4e00-\u9fff]', segment):
+    for segment in re.findall(r"[\u4e00-\u9fff]+|[\w\-./]+", q):
+        if re.match(r"[\u4e00-\u9fff]", segment):
             if len(segment) == 1:
                 tokens.append(segment)
             else:
                 for i in range(len(segment) - 1):
-                    tokens.append(segment[i:i+2])
+                    tokens.append(segment[i : i + 2])
         elif len(segment) >= 2:
             tokens.append(segment)
     return tokens[:12]
@@ -1010,8 +1070,15 @@ class StreamEvent:
     """
 
     type: Literal[
-        "chunk", "final", "tool_start", "tool_complete",
-        "thinking", "status", "error", "approval_request", "approval_response",
+        "chunk",
+        "final",
+        "tool_start",
+        "tool_complete",
+        "thinking",
+        "status",
+        "error",
+        "approval_request",
+        "approval_response",
     ]
     content: str
     metadata: Optional[Dict[str, Any]] = None
@@ -1132,7 +1199,8 @@ class AgentEngine:
 
         # Tool concurrency policy (None = sequential fallback)
         self._concurrency_policy: Optional[ToolConcurrencyPolicy] = (
-            concurrency_policy if concurrency_policy is not None
+            concurrency_policy
+            if concurrency_policy is not None
             else DefaultConcurrencyPolicy(spec_lookup=_concurrency_spec_lookup)
         )
 
@@ -1171,6 +1239,7 @@ class AgentEngine:
         # Wire plugin learning sink (process-global; graceful no-op if unavailable)
         try:
             from leapflow.engine.session_factory import _wire_plugin_stats_sink
+
             _wire_plugin_stats_sink(self._usage_tracker)
         except (ImportError, RuntimeError, AttributeError):
             pass
@@ -1247,6 +1316,10 @@ class AgentEngine:
         # so this dedicated, reset-per-turn attribute is the actual source of
         # truth — never derived from re-parsing text.
         self._last_turn_tool_categories: frozenset[str] = frozenset()
+        from leapflow.learning.capability_observation import CapabilityObservationBuffer
+
+        self._capability_observation_buffer = CapabilityObservationBuffer()
+        self._active_capability_plan: dict[str, Any] | None = None
         self._manifests_by_name: Dict[str, Any] | None = None
         # Semantic desktop schema cache. The plugin is re-resolved from the tool
         # registry on every read, and cache keys carry (plugin identity, version)
@@ -1260,6 +1333,7 @@ class AgentEngine:
         # Capability discovery resolves the live catalog through this engine, so
         # runtime-injected categories (desktop) become expandable.
         from leapflow.plugins import get_registry
+
         _plugin_registry = get_registry()
         _plugin_registry.set_capability_catalog_provider(self._unified_tool_catalog)
         self._healer = MessageHealer()
@@ -1287,6 +1361,7 @@ class AgentEngine:
         """
         try:
             from leapflow.tools.shell_tools import set_max_shell_timeout
+
             set_max_shell_timeout(self._settings.max_shell_timeout_s)
         except Exception:  # noqa: BLE001 - optional; defaults remain if import fails
             logger.debug("_configure_tool_defaults: shell_tools not available")
@@ -1403,7 +1478,7 @@ class AgentEngine:
 
         if rec.should_fallback and recovery.try_provider_failover():
             llm = self._llm
-            if hasattr(llm, '_failover'):
+            if hasattr(llm, "_failover"):
                 llm._failover("recovery: provider failover")
             logger.info("recovery: provider failover triggered")
             if budget.remaining > 0:
@@ -1426,9 +1501,14 @@ class AgentEngine:
 
         return None
 
-    _DEFAULT_LIVE_SIGNAL_KINDS = frozenset({
-        "app.focus_change", "fs.change", "context.change", "intent.signal",
-    })
+    _DEFAULT_LIVE_SIGNAL_KINDS = frozenset(
+        {
+            "app.focus_change",
+            "fs.change",
+            "context.change",
+            "intent.signal",
+        }
+    )
 
     def _inject_live_signals(self, messages: list, watermark: list) -> None:
         """Inject high-priority WM events arrived since ``watermark[0]``.
@@ -1439,12 +1519,13 @@ class AgentEngine:
         """
         since_ts = watermark[0]
         raw = getattr(self._settings, "live_signal_kinds", "")
-        signal_kinds = frozenset(k.strip() for k in raw.split(",") if k.strip()) if raw else self._DEFAULT_LIVE_SIGNAL_KINDS
+        signal_kinds = (
+            frozenset(k.strip() for k in raw.split(",") if k.strip())
+            if raw
+            else self._DEFAULT_LIVE_SIGNAL_KINDS
+        )
         recent = self._wm.get_events_since(since_ts)
-        relevant = [
-            e for e in recent
-            if e.get("_event_kind") in signal_kinds
-        ]
+        relevant = [e for e in recent if e.get("_event_kind") in signal_kinds]
         if not relevant:
             return
         lines = []
@@ -1465,9 +1546,12 @@ class AgentEngine:
             content = msg.get("content")
             if isinstance(content, list):
                 text_parts = [
-                    p for p in content
-                    if isinstance(p, dict) and p.get("type") != "image_url"
-                    and p.get("type") != "input_image" and p.get("type") != "image"
+                    p
+                    for p in content
+                    if isinstance(p, dict)
+                    and p.get("type") != "image_url"
+                    and p.get("type") != "input_image"
+                    and p.get("type") != "image"
                 ]
                 if len(text_parts) < len(content):
                     if text_parts:
@@ -1534,19 +1618,24 @@ class AgentEngine:
         frame = self._active_frame
         stalled = bool(frame is not None and getattr(frame, "stalled_rounds", 0) >= 1)
         if violation.severity == "halt" and stalled:
-            messages.append(build_user_message_text(
-                f"SYSTEM GUARDRAIL: {violation.reason}. {violation.suggestion}"
-            ))
+            messages.append(
+                build_user_message_text(
+                    f"SYSTEM GUARDRAIL: {violation.reason}. {violation.suggestion}"
+                )
+            )
             return "halt"
         if not stalled:
             return None  # productive: neither halt nor nudge
-        messages.append(build_user_message_text(
-            f"SYSTEM WARNING: {violation.reason}. {violation.suggestion}"
-        ))
+        messages.append(
+            build_user_message_text(f"SYSTEM WARNING: {violation.reason}. {violation.suggestion}")
+        )
         return None
 
     def _evaluate_tool_failures(
-        self, failed_items: List[tuple[str, Dict[str, Any]]], *, turn_id: int,
+        self,
+        failed_items: List[tuple[str, Dict[str, Any]]],
+        *,
+        turn_id: int,
     ) -> Optional[str]:
         """Single recovery decision point for tool-result failures.
 
@@ -1572,17 +1661,23 @@ class AgentEngine:
             if not isinstance(result, dict):
                 continue
             envelope = self._unified_classifier.classify_tool_result(
-                result, tool_name=tool_name,
+                result,
+                tool_name=tool_name,
                 execution_policy=result.get("execution_policy", "read_only"),
             )
             if envelope is None:
                 continue
             if envelope.recoverability == Recoverability.NON_RECOVERABLE:
                 decision = coordinator.evaluate(envelope)
-                self._audit_sink.record(create_audit_entry(
-                    envelope, decision, coordinator.budget,
-                    session_id=session_id, turn_id=turn_id,
-                ))
+                self._audit_sink.record(
+                    create_audit_entry(
+                        envelope,
+                        decision,
+                        coordinator.budget,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                    )
+                )
                 return decision.reason or f"Non-recoverable tool failure ({envelope.category})"
             # Recoverable: fed back to the agent (zero-cost, no recovery budget spent).
             feedback = RecoveryDecision.create(
@@ -1592,10 +1687,15 @@ class AgentEngine:
                 strategy_key="tool_feedback",
                 budget_cost=0,
             )
-            self._audit_sink.record(create_audit_entry(
-                feedback.envelope, feedback, coordinator.budget,
-                session_id=session_id, turn_id=turn_id,
-            ))
+            self._audit_sink.record(
+                create_audit_entry(
+                    feedback.envelope,
+                    feedback,
+                    coordinator.budget,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                )
+            )
         return None
 
     def _save_halt_checkpoint(
@@ -1621,7 +1721,7 @@ class AgentEngine:
         interaction = getattr(decision, "interaction", None)
         try:
             checkpoint = RecoveryCheckpoint(
-                session_id=getattr(self, '_current_session_id', '') or '',
+                session_id=getattr(self, "_current_session_id", "") or "",
                 turn_id=budget_used,
                 failure_envelope_data={
                     "envelope_id": envelope.envelope_id,
@@ -1631,9 +1731,7 @@ class AgentEngine:
                     "source": envelope.source.value,
                     "side_effect_state": envelope.side_effect_state.value,
                 },
-                interaction_request_id=(
-                    interaction.request_id if interaction is not None else ""
-                ),
+                interaction_request_id=(interaction.request_id if interaction is not None else ""),
                 messages_snapshot=list(messages),
                 context_data={
                     "resumption_key": getattr(interaction, "resumption_key", "") or "",
@@ -1684,6 +1782,7 @@ class AgentEngine:
         if self._session is None or self._session.mode != SessionMode.LEARNING:
             return
         from leapflow.domain.events import SystemEvent
+
         event = SystemEvent(
             event_type="chat.interaction",
             source="leapflow.engine",
@@ -1692,9 +1791,12 @@ class AgentEngine:
         )
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._event_bus.handle_event(
-                event.event_type, event.payload,
-            ))
+            loop.create_task(
+                self._event_bus.handle_event(
+                    event.event_type,
+                    event.payload,
+                )
+            )
         except RuntimeError:
             pass
 
@@ -1847,6 +1949,7 @@ class AgentEngine:
             self._research_ledger.reset()
         try:
             from leapflow.plugins import get_registry
+
             _plugin_registry = get_registry()
             _plugin_registry.set_research_ledger(self._research_ledger)
             _plugin_registry.set_reentry_scheduler(self._schedule_reentry)
@@ -1858,15 +1961,14 @@ class AgentEngine:
         self._tool_execution_ledger.reset(store=self._conversation_store)
         try:
             from leapflow.tools.gateway_tool import reset_platform_action_scope
+
             reset_platform_action_scope()
         except ImportError:
             pass
 
     def _build_task_contract(self, user_text: str) -> TaskContract:
         workspace_root = (
-            Path(getattr(self._settings, "workspace_root", Path.cwd()))
-            .expanduser()
-            .resolve()
+            Path(getattr(self._settings, "workspace_root", Path.cwd())).expanduser().resolve()
         )
         protocol = self._research_protocol_for(user_text, self._settings)
         return TaskContract(
@@ -1894,8 +1996,7 @@ class AgentEngine:
         and difficulty score handle escalation.
         """
         threshold = (
-            getattr(settings, 'research_protocol_length_threshold', 120)
-            if settings else 120
+            getattr(settings, "research_protocol_length_threshold", 120) if settings else 120
         )
         if len(user_text.strip()) > threshold:
             return AgentEngine._LARGE_TASK_PROTOCOL
@@ -1956,7 +2057,9 @@ class AgentEngine:
             base = self._strip_task_contract_block(content)
             if not inserted:
                 updated = dict(message)
-                updated["content"] = f"{base.rstrip()}\n\n{block}\n" if base.strip() else f"{block}\n"
+                updated["content"] = (
+                    f"{base.rstrip()}\n\n{block}\n" if base.strip() else f"{block}\n"
+                )
                 prepared.append(updated)
                 inserted = True
             elif base.strip():
@@ -1976,7 +2079,9 @@ class AgentEngine:
         """
         resolution = self._reference_resolver.resolve(user_text, self._focus_state)
         self._last_reference_resolution = resolution
-        visible_resolution = resolution if (resolution.target_id or resolution.needs_clarification) else None
+        visible_resolution = (
+            resolution if (resolution.target_id or resolution.needs_clarification) else None
+        )
         return self._focus_state.render_prompt_context(visible_resolution)
 
     def _focus_turn_id(self) -> int:
@@ -2021,7 +2126,7 @@ class AgentEngine:
         # Primary path: check tool manifest metadata (declarative)
         spec = _default_tool_registry().specs.get(name)
         if spec is not None:
-            declared_plane = getattr(spec, 'context_plane', None)
+            declared_plane = getattr(spec, "context_plane", None)
             if declared_plane:
                 return {"context_plane": declared_plane}
 
@@ -2029,7 +2134,8 @@ class AgentEngine:
         if name.startswith("config_"):
             logger.debug(
                 "context_plane inferred from prefix for %s "
-                "(deprecated; declare x_leapflow.context_plane)", name,
+                "(deprecated; declare x_leapflow.context_plane)",
+                name,
             )
             metadata: Dict[str, Any] = {"context_plane": ContextPlane.CONTROL_PLANE.value}
             if isinstance(result, dict):
@@ -2040,7 +2146,8 @@ class AgentEngine:
         if name in self._EVIDENCE_TOOL_NAMES:
             logger.debug(
                 "context_plane inferred from name set for %s "
-                "(deprecated; declare x_leapflow.context_plane)", name,
+                "(deprecated; declare x_leapflow.context_plane)",
+                name,
             )
             return {"context_plane": ContextPlane.TOOL_EVIDENCE.value}
         return {}
@@ -2084,6 +2191,7 @@ class AgentEngine:
             context_posture=str(self._last_context_snapshot.get("context_posture") or "baseline"),
             recent_failure=bool(self._last_context_snapshot.get("forced_final_answer")),
             last_turn_tool_categories=self._recent_tool_categories(),
+            active_capability_plan=self._active_capability_plan,
         )
         try:
             plan = self._disclosure_planner.plan(tool_definitions, runtime)
@@ -2104,9 +2212,7 @@ class AgentEngine:
         skill_section = self._build_skill_section(include_skills=plan.level != DisclosureLevel.CORE)
         app_connector_section = self._build_app_connector_section()
         focus_context = self._semantic_focus_context(user_text)
-        memory_context = "\n\n".join(
-            part for part in (focus_context, memory_context) if part
-        )
+        memory_context = "\n\n".join(part for part in (focus_context, memory_context) if part)
         system = UNIFIED_SYSTEM_TEMPLATE.format(
             tool_catalog=tool_catalog,
             app_connector_section=app_connector_section,
@@ -2157,7 +2263,9 @@ class AgentEngine:
         self._last_turn_tool_categories = frozenset(categories)
 
     @staticmethod
-    def _expand_tools_kwarg_full(tools_kwarg: Dict[str, Any], tool_definitions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _expand_tools_kwarg_full(
+        tools_kwarg: Dict[str, Any], tool_definitions: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
         """Expand this turn's native tool schema to the full catalog.
 
         Structural failure-recovery gate: once an unknown_tool result proves
@@ -2168,7 +2276,8 @@ class AgentEngine:
 
     @staticmethod
     def _merge_expanded_tool_schemas(
-        tools_kwarg: Dict[str, Any], results: List[Dict[str, Any]],
+        tools_kwarg: Dict[str, Any],
+        results: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Merge capability_expand results into this turn's native tool schema.
 
@@ -2203,7 +2312,7 @@ class AgentEngine:
         """
         messages = self._wm.as_chat_messages()
         summary_lines: list[str] = []
-        for message in messages[-max(0, max_messages):]:
+        for message in messages[-max(0, max_messages) :]:
             role = str(message.get("role") or "").strip()
             if role not in {"user", "assistant"}:
                 continue
@@ -2255,10 +2364,11 @@ class AgentEngine:
         """Return bounded prior conversation turns according to the disclosure plan."""
         wm_history = self._wm.as_chat_messages()
         prior_turns: List[Dict[str, Any]] = [
-            message for message in wm_history
+            message
+            for message in wm_history
             if isinstance(message.get("role"), str) and message["role"] in ("user", "assistant")
         ]
-        return prior_turns[-max(0, plan.max_prior_turns):]
+        return prior_turns[-max(0, plan.max_prior_turns) :]
 
     @staticmethod
     def _planned_enable_thinking(plan: PromptAssemblyPlan, requested: bool) -> bool:
@@ -2289,7 +2399,7 @@ class AgentEngine:
                 continue
             # Prefer structured JSON check over substring sniffing
             _skip = False
-            if content.lstrip().startswith('{'):
+            if content.lstrip().startswith("{"):
                 try:
                     parsed = json.loads(content)
                     if isinstance(parsed, dict) and parsed.get("ok") is False:
@@ -2306,11 +2416,11 @@ class AgentEngine:
     @staticmethod
     def _extract_compact_finding(content: str, max_chars: int = 400) -> str:
         """Extract a compact summary from a tool result."""
-        lines = content.split('\n')
+        lines = content.split("\n")
         # Look for file path in first few lines
         path_line = ""
         for line in lines[:5]:
-            if '/' in line and ('.' in line.split('/')[-1]):
+            if "/" in line and ("." in line.split("/")[-1]):
                 path_line = line.strip()[:120]
                 break
         if not path_line:
@@ -2323,12 +2433,12 @@ class AgentEngine:
         if not path_line:
             return ""
         # Take first substantial paragraph as context
-        body = content[:max_chars - len(path_line) - 20].strip()
+        body = content[: max_chars - len(path_line) - 20].strip()
         # Truncate to last complete line
-        last_newline = body.rfind('\n')
+        last_newline = body.rfind("\n")
         if last_newline > 100:
             body = body[:last_newline]
-        return f"[auto-extracted] {path_line}: {body[:max_chars - len(path_line) - 30]}"
+        return f"[auto-extracted] {path_line}: {body[: max_chars - len(path_line) - 30]}"
 
     def _prepare_llm_messages(
         self,
@@ -2347,9 +2457,8 @@ class AgentEngine:
         if len(prepared) < len(messages) and pre_compression_findings:
             for finding in pre_compression_findings:
                 self._research_ledger.note("finding", finding)
-        if (
-            getattr(self._settings, "agent_compression_writeback", False)
-            and len(prepared) < len(messages)
+        if getattr(self._settings, "agent_compression_writeback", False) and len(prepared) < len(
+            messages
         ):
             # E-3 (CL-8): persist the structural compression so append-only frozen
             # segments stay byte-stable across rounds -> continuous prefix-cache
@@ -2377,7 +2486,8 @@ class AgentEngine:
         )
         open_questions = self._ledger_open_questions()
         convergence = self._context_governance_controller.convergence_notice(
-            round_number, open_questions=open_questions,
+            round_number,
+            open_questions=open_questions,
         )
         checkpoint_msg = self._context_governance_controller.checkpoint_notice(round_number)
         cost_notice = self._cost_ceiling_notice()
@@ -2446,7 +2556,9 @@ class AgentEngine:
         enabled = bool(getattr(self._settings, "agent_calibration_enabled", False))
         if not enabled or store is None:
             return CalibrationResult(
-                self._baseline_scale_k, self._budget_config.scale_k, False,
+                self._baseline_scale_k,
+                self._budget_config.scale_k,
+                False,
                 "calibration disabled" if not enabled else "no evolution store",
             )
         try:
@@ -2454,17 +2566,24 @@ class AgentEngine:
         except Exception:
             logger.debug("difficulty calibration: report build failed", exc_info=True)
             return CalibrationResult(
-                self._baseline_scale_k, self._budget_config.scale_k, False, "report build failed",
+                self._baseline_scale_k,
+                self._budget_config.scale_k,
+                False,
+                "report build failed",
             )
         result = apply_calibration(
-            self._baseline_scale_k, report, enabled=True,
+            self._baseline_scale_k,
+            report,
+            enabled=True,
             min_confidence=float(getattr(self._settings, "agent_calibration_min_confidence", 0.3)),
         )
         if result.applied:
             self._budget_config = replace(self._budget_config, scale_k=result.effective_k)
             logger.info(
                 "difficulty calibration applied: scale_k %.3f -> %.3f (%s)",
-                self._baseline_scale_k, result.effective_k, result.reason,
+                self._baseline_scale_k,
+                result.effective_k,
+                result.reason,
             )
         return result
 
@@ -2491,7 +2610,9 @@ class AgentEngine:
         enabled = bool(getattr(self._settings, "agent_calibration_enabled", False))
         if not enabled or store is None:
             return CalibrationResult(
-                baseline, current, False,
+                baseline,
+                current,
+                False,
                 "calibration disabled" if not enabled else "no evolution store",
             )
         try:
@@ -2500,16 +2621,21 @@ class AgentEngine:
             logger.debug("threshold calibration: report build failed", exc_info=True)
             return CalibrationResult(baseline, current, False, "report build failed")
         result = apply_calibration(
-            baseline, report, enabled=True,
+            baseline,
+            report,
+            enabled=True,
             min_confidence=float(getattr(self._settings, "agent_calibration_min_confidence", 0.3)),
-            k_min=0.6, k_max=0.98,
+            k_min=0.6,
+            k_max=0.98,
         )
         if result.applied:
             self._calibrated_finalizing_ratio = result.effective_k
             self._context_governance_controller = self._new_governance()
             logger.info(
                 "threshold calibration applied: finalizing_ratio %.3f -> %.3f (%s)",
-                baseline, result.effective_k, result.reason,
+                baseline,
+                result.effective_k,
+                result.reason,
             )
         return result
 
@@ -2829,7 +2955,8 @@ class AgentEngine:
                 **self._last_context_snapshot,
                 "provider_prompt_tokens": provider_prompt,
                 "total_tokens": provider_prompt,
-                "ratio": provider_prompt / max(1, int(self._last_context_snapshot.get("context_length") or 1)),
+                "ratio": provider_prompt
+                / max(1, int(self._last_context_snapshot.get("context_length") or 1)),
             }
         if self._model_capabilities and model and usage:
             self._model_capabilities.update_from_usage(model, usage)
@@ -2853,7 +2980,9 @@ class AgentEngine:
         except Exception:  # noqa: BLE001 - calibration must never break a turn
             logger.debug("budget estimator calibration failed", exc_info=True)
 
-    def _compact_tool_result(self, tool_name: str, arguments: Dict[str, Any] | None, result: Any) -> Any:
+    def _compact_tool_result(
+        self, tool_name: str, arguments: Dict[str, Any] | None, result: Any
+    ) -> Any:
         """Return compact tool evidence for LLM replay."""
         return self._context_governance_controller.compact_tool_result(tool_name, arguments, result)
 
@@ -2943,7 +3072,9 @@ class AgentEngine:
             self._inject_pending_skill_reminder()
             self._wm.remember_chat(build_user_message_text(user_text))
             logger.debug("route.slash command=%s", user_text.split()[0])
-            async for chunk in self._unified_tool_loop_stream(user_text, enable_thinking=enable_thinking):
+            async for chunk in self._unified_tool_loop_stream(
+                user_text, enable_thinking=enable_thinking
+            ):
                 yield chunk
             return
 
@@ -2963,7 +3094,9 @@ class AgentEngine:
             self._wm.remember_chat(build_assistant_message(msg))
             yield StreamEvent(type="final", content=msg)
             return
-        async for chunk in self._unified_tool_loop_stream(user_text, enable_thinking=enable_thinking):
+        async for chunk in self._unified_tool_loop_stream(
+            user_text, enable_thinking=enable_thinking
+        ):
             yield chunk
 
     def _build_app_connector_section(self) -> str:
@@ -2981,13 +3114,15 @@ class AgentEngine:
     def _new_compressor(self) -> ContextCompressor:
         """Fresh context compressor (per engine, or per isolated child frame)."""
         ctx_len = self._settings.llm_context_length
-        return ContextCompressor(CompressorConfig(
-            token_budget=max(1, int(ctx_len * self._settings.context_hard_limit_ratio)),
-            context_length=ctx_len,
-            threshold=self._settings.compress_threshold,
-            keep_tail=self._settings.compress_keep_tail,
-            max_output_chars=self._settings.max_tool_output_chars,
-        ))
+        return ContextCompressor(
+            CompressorConfig(
+                token_budget=max(1, int(ctx_len * self._settings.context_hard_limit_ratio)),
+                context_length=ctx_len,
+                threshold=self._settings.compress_threshold,
+                keep_tail=self._settings.compress_keep_tail,
+                max_output_chars=self._settings.max_tool_output_chars,
+            )
+        )
 
     def _new_governance(self) -> ContextGovernanceController:
         """Fresh context-governance controller (per engine, or per child frame)."""
@@ -3020,6 +3155,7 @@ class AgentEngine:
         tracker = TurnUsageTracker()
         try:
             from leapflow.engine.session_factory import _wire_plugin_stats_sink
+
             _wire_plugin_stats_sink(tracker)
         except (ImportError, RuntimeError, AttributeError):
             pass
@@ -3135,12 +3271,19 @@ class AgentEngine:
         from contaminating the parent turn's state.
         """
         frame = self._build_child_frame(
-            goal, depth=depth, tool_filter=tool_filter, enable_thinking=enable_thinking,
+            goal,
+            depth=depth,
+            tool_filter=tool_filter,
+            enable_thinking=enable_thinking,
         )
         return await self._run_child_frame(frame)
 
     def _build_frame(
-        self, user_text: str, enable_thinking: bool, budget: Any, recovery: Any,
+        self,
+        user_text: str,
+        enable_thinking: bool,
+        budget: Any,
+        recovery: Any,
     ) -> AgentLoopFrame:
         """Bundle per-frame state around the given budget/recovery.
 
@@ -3166,14 +3309,13 @@ class AgentEngine:
     def _build_root_frame(self, user_text: str, *, enable_thinking: bool = False) -> AgentLoopFrame:
         """Build the top-level (depth-0) agent-loop frame for a turn."""
         return self._build_frame(
-            user_text, enable_thinking,
+            user_text,
+            enable_thinking,
             IterationBudget.for_react(self._budget_config),
             TurnRecoveryState(),
         )
 
-    async def _unified_tool_loop(
-        self, user_text: str, *, enable_thinking: bool = False
-    ) -> str:
+    async def _unified_tool_loop(self, user_text: str, *, enable_thinking: bool = False) -> str:
         """Entry adapter: build the root frame and run the unified agent loop."""
         return await self._run_agent_loop(
             self._build_root_frame(user_text, enable_thinking=enable_thinking)
@@ -3196,7 +3338,7 @@ class AgentEngine:
         # Detect slash command → inject skill context
         if user_text.startswith("/"):
             slash_name = user_text.split()[0][1:]  # Remove leading /
-            remaining = user_text[len(slash_name) + 1:].strip()
+            remaining = user_text[len(slash_name) + 1 :].strip()
             if self._skill_injector:
                 injection = self._skill_injector.build_injection_message(slash_name, remaining)
                 if injection:
@@ -3209,7 +3351,8 @@ class AgentEngine:
         tool_handlers = self._unified_tool_handlers()
         if frame.tool_filter is not None:
             tool_defs = [
-                td for td in tool_defs
+                td
+                for td in tool_defs
                 if td.get("function", {}).get("name", "") in frame.tool_filter
             ]
             tool_handlers = {
@@ -3278,7 +3421,8 @@ class AgentEngine:
                         break  # absolute hard cap reached
                     logger.info(
                         "unified_loop: budget extended (progress-gated) to %d (stalled=%d)",
-                        budget.effective_max, frame.stalled_rounds,
+                        budget.effective_max,
+                        frame.stalled_rounds,
                     )
                     status = budget.status()
                 else:
@@ -3298,25 +3442,30 @@ class AgentEngine:
 
             try:
                 resp = await self._llm.achat(
-                    compressed, stream=False, enable_thinking=planned_enable_thinking,
+                    compressed,
+                    stream=False,
+                    enable_thinking=planned_enable_thinking,
                     **tools_kwarg,
                 )
             except Exception as exc:
                 _clear_indicator()
                 classified = self._error_classifier.classify(exc)
-                category_str = classified.value if hasattr(classified, 'value') else str(classified)
+                category_str = classified.value if hasattr(classified, "value") else str(classified)
                 recovery.record_api_error(category_str)
 
                 # Classify through unified coordinator and execute recovery
                 envelope = self._unified_classifier.classify_llm_error(
-                    exc, provider=getattr(self._llm, 'provider', ''),
-                    model=getattr(self._llm, 'model', ''),
+                    exc,
+                    provider=getattr(self._llm, "provider", ""),
+                    model=getattr(self._llm, "model", ""),
                 )
                 # Always with the traceback: this used to be the only record of a
                 # failed round, and it was not written anywhere.
                 logger.error(
                     "unified_loop: llm call failed (%s/%s)",
-                    envelope.category, envelope.failure_code, exc_info=True,
+                    envelope.category,
+                    envelope.failure_code,
+                    exc_info=True,
                 )
                 coordinator = self._recovery_coordinator
                 try:
@@ -3325,17 +3474,23 @@ class AgentEngine:
                     logger.error("recovery_coordinator.evaluate() failed: %s", coord_exc)
                     fatal_error = f"Internal recovery error: {coord_exc}"
                     break
-                self._audit_sink.record(create_audit_entry(
-                    envelope, decision, coordinator.budget,
-                    session_id=getattr(self, '_current_session_id', '') or '',
-                    turn_id=budget.used,
-                ))
+                self._audit_sink.record(
+                    create_audit_entry(
+                        envelope,
+                        decision,
+                        coordinator.budget,
+                        session_id=getattr(self, "_current_session_id", "") or "",
+                        turn_id=budget.used,
+                    )
+                )
 
                 # Execute decision via coordinator
                 if decision.action == RecoveryAction.RETRY_WITH_BACKOFF:
                     if decision.retry_semantics.backoff_config:
                         await asyncio.sleep(
-                            jittered_backoff(budget.used, base=decision.retry_semantics.backoff_config.base_delay)
+                            jittered_backoff(
+                                budget.used, base=decision.retry_semantics.backoff_config.base_delay
+                            )
                         )
                     continue
 
@@ -3356,22 +3511,28 @@ class AgentEngine:
                     continue
 
                 elif decision.action == RecoveryAction.FAILOVER:
-                    if hasattr(self._llm, '_failover'):
+                    if hasattr(self._llm, "_failover"):
                         self._llm._failover(f"recovery: {decision.reason}")
                     coordinator.on_strategy_outcome(decision.decision_id, True)
                     continue
 
-                elif decision.action in (RecoveryAction.HALT_CLEAN, RecoveryAction.HALT_WITH_CHECKPOINT):
+                elif decision.action in (
+                    RecoveryAction.HALT_CLEAN,
+                    RecoveryAction.HALT_WITH_CHECKPOINT,
+                ):
                     if decision.action == RecoveryAction.HALT_WITH_CHECKPOINT:
                         self._save_halt_checkpoint(
-                            decision, envelope, messages,
+                            decision,
+                            envelope,
+                            messages,
                             budget_used=budget.used,
                             tools_kwarg=tools_kwarg,
                             use_native_tools=use_native_tools,
                         )
                     fatal_error = _terminal_failure_text(decision)
                     self._audit_sink.update_outcome(
-                        decision.decision_id, "failure",
+                        decision.decision_id,
+                        "failure",
                         reason="Terminal halt",
                     )
                     break
@@ -3382,7 +3543,10 @@ class AgentEngine:
                     # surfacing only decision.reason would drop it.
                     if decision.action == RecoveryAction.HALT_WITH_CHECKPOINT:
                         self._save_halt_checkpoint(
-                            decision, envelope, messages, budget_used=budget.used,
+                            decision,
+                            envelope,
+                            messages,
+                            budget_used=budget.used,
                         )
                     fatal_error = _terminal_failure_text(decision)
                     break
@@ -3394,7 +3558,7 @@ class AgentEngine:
                 content = self._sanitizer.sanitize(content)
 
             # Length continuation: if LLM hit max_tokens, attempt continuation
-            finish = getattr(resp, 'finish_reason', None)
+            finish = getattr(resp, "finish_reason", None)
             if finish in ("length", "max_tokens") and recovery.try_length_continuation():
                 logger.info("unified_loop: length continuation (finish_reason=%s)", finish)
                 messages.append(build_assistant_message(content))
@@ -3411,17 +3575,26 @@ class AgentEngine:
                     {
                         "id": tc.id,
                         "type": "function",
-                        "function": {"name": tc.name, "arguments": json.dumps(tc.arguments, ensure_ascii=False)},
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                        },
                     }
                     for tc in native_calls
                 ]
                 messages.append(assistant_msg)
-                self._persist_message(session_id, "assistant", "", tool_calls=assistant_msg.get("tool_calls"))
+                self._persist_message(
+                    session_id, "assistant", "", tool_calls=assistant_msg.get("tool_calls")
+                )
 
                 results = await self._execute_tools_concurrent(
-                    native_calls, tool_handlers, trace=trace, messages=messages,
+                    native_calls,
+                    tool_handlers,
+                    trace=trace,
+                    messages=messages,
                 )
                 self._record_tool_call_categories(native_calls)
+                self._observe_capability_results(results)
                 tools_kwarg = self._merge_expanded_tool_schemas(tools_kwarg, results)
 
                 permission_hard_stop = _permission_hard_stop_from_results(results)
@@ -3429,7 +3602,9 @@ class AgentEngine:
                     logger.info(
                         "unified_loop: permission hard-stop after %s/%s",
                         permission_hard_stop.get("platform", "platform"),
-                        permission_hard_stop.get("capability") or permission_hard_stop.get("action") or "action",
+                        permission_hard_stop.get("capability")
+                        or permission_hard_stop.get("action")
+                        or "action",
                     )
                     break
 
@@ -3445,14 +3620,17 @@ class AgentEngine:
                     unknown_tool_retry_used = True
                     tools_kwarg = self._expand_tools_kwarg_full(tools_kwarg, tool_defs)
                     use_native_tools = bool(tools_kwarg)
-                    messages.append(build_user_message_text(_unknown_tool_retry_prompt(retryable_unknown)))
+                    messages.append(
+                        build_user_message_text(_unknown_tool_retry_prompt(retryable_unknown))
+                    )
                     continue
 
                 halt_reason = self._evaluate_tool_failures(
                     [
                         (item.get("name") or "", item["result"])
                         for item in results
-                        if isinstance(item.get("result"), dict) and _tool_result_counts_as_failure(item["result"])
+                        if isinstance(item.get("result"), dict)
+                        and _tool_result_counts_as_failure(item["result"])
                     ],
                     turn_id=budget.used,
                 )
@@ -3464,20 +3642,26 @@ class AgentEngine:
                 if self._check_guardrail(messages) == "halt":
                     break
 
-                self._wm.remember_chat(build_assistant_message(
-                    f"[Called: {', '.join(tc.name for tc in native_calls)}]"
-                ))
+                self._wm.remember_chat(
+                    build_assistant_message(
+                        f"[Called: {', '.join(tc.name for tc in native_calls)}]"
+                    )
+                )
 
                 if status == BudgetStatus.SOFT_LIMIT and not self._should_extend_budget(frame):
-                    messages.append(build_user_message_text(
-                        "SYSTEM: Approaching limit. Provide final answer now."
-                    ))
+                    messages.append(
+                        build_user_message_text(
+                            "SYSTEM: Approaching limit. Provide final answer now."
+                        )
+                    )
                 elif _has_completed_side_effect(results):
-                    messages.append(build_user_message_text(
-                        "SYSTEM: Side-effect action completed (result has completed:true). "
-                        "Do not re-invoke it with the same parameters. "
-                        "If all user-requested actions are done, provide the final answer."
-                    ))
+                    messages.append(
+                        build_user_message_text(
+                            "SYSTEM: Side-effect action completed (result has completed:true). "
+                            "Do not re-invoke it with the same parameters. "
+                            "If all user-requested actions are done, provide the final answer."
+                        )
+                    )
                 continue
 
             self._persist_message(session_id, "assistant", content)
@@ -3496,20 +3680,34 @@ class AgentEngine:
 
             messages.append(build_assistant_message(content))
             tool_arguments = normalized_tool_call.get("arguments")
-            self._emit_chat_event("tool_call", {
-                "tool_name": tool_name,
-                "arguments_summary": json.dumps(tool_arguments, default=str, ensure_ascii=False)[:300] if tool_arguments else "",
-            })
+            self._emit_chat_event(
+                "tool_call",
+                {
+                    "tool_name": tool_name,
+                    "arguments_summary": json.dumps(
+                        tool_arguments, default=str, ensure_ascii=False
+                    )[:300]
+                    if tool_arguments
+                    else "",
+                },
+            )
             _show_progress("executing", tool_name)
             result = await self._execute_tool_with_ledger(
-                normalized_tool_call, tool_handlers, tool_call_id=f"text-{budget.used}",
+                normalized_tool_call,
+                tool_handlers,
+                tool_call_id=f"text-{budget.used}",
             )
             _clear_indicator()
-            self._emit_chat_event("tool_result", {
-                "tool_name": tool_name,
-                "ok": bool(result.get("ok")) if isinstance(result, dict) else True,
-                "summary": json.dumps(result, default=str, ensure_ascii=False)[:300] if isinstance(result, dict) else str(result)[:300],
-            })
+            self._emit_chat_event(
+                "tool_result",
+                {
+                    "tool_name": tool_name,
+                    "ok": bool(result.get("ok")) if isinstance(result, dict) else True,
+                    "summary": json.dumps(result, default=str, ensure_ascii=False)[:300]
+                    if isinstance(result, dict)
+                    else str(result)[:300],
+                },
+            )
             _print_tool_result(tool_name, result, enabled=self._settings.verbose_progress)
             trace.record(
                 ExecutionMode.ACTING,
@@ -3523,15 +3721,19 @@ class AgentEngine:
             else:
                 recovery.record_tool_success()
             self._record_tool_focus(tool_name, tool_arguments, result)
+            self._observe_capability_result(result)
             result_payload = self._compact_tool_result(tool_name, tool_arguments, result)
             result_text = _truncate_result_for_budget(result_payload, result_budget)
-            messages.append(build_user_message_text(
-                f"Tool result ({tool_name}):\n{result_text}"
-            ))
+            messages.append(build_user_message_text(f"Tool result ({tool_name}):\n{result_text}"))
             self._persist_message(
-                session_id, "tool", result_text,
-                tool_name=tool_name, tool_call_id=f"text-{budget.used}",
-                metadata=self._tool_execution_metadata_with_focus(tool_name, tool_arguments, result),
+                session_id,
+                "tool",
+                result_text,
+                tool_name=tool_name,
+                tool_call_id=f"text-{budget.used}",
+                metadata=self._tool_execution_metadata_with_focus(
+                    tool_name, tool_arguments, result
+                ),
             )
 
             if _is_permission_hard_stop_payload(result):
@@ -3548,7 +3750,9 @@ class AgentEngine:
                 continue
 
             if is_error:
-                halt_reason = self._evaluate_tool_failures([(tool_name, result)], turn_id=budget.used)
+                halt_reason = self._evaluate_tool_failures(
+                    [(tool_name, result)], turn_id=budget.used
+                )
                 if halt_reason:
                     fatal_error = halt_reason
                     break
@@ -3556,22 +3760,28 @@ class AgentEngine:
             if self._check_guardrail(messages) == "halt":
                 break
 
-            if status == BudgetStatus.SOFT_LIMIT and not self._should_extend_budget(self._active_frame):
-                messages.append(build_user_message_text(
-                    "SYSTEM: Approaching limit. Provide final answer now."
-                ))
+            if status == BudgetStatus.SOFT_LIMIT and not self._should_extend_budget(
+                self._active_frame
+            ):
+                messages.append(
+                    build_user_message_text("SYSTEM: Approaching limit. Provide final answer now.")
+                )
 
         # Turn-end learning/memory-sync are top-level-turn concerns; a recursive
         # child frame (subagent) must not pollute the parent's evolution/memory
         # (its result flows back via SubagentResult) nor leak background tasks.
-        if getattr(self._active_frame, "is_root", True) and self._memory_manager and self._settings.memory_integration_enabled:
+        if (
+            getattr(self._active_frame, "is_root", True)
+            and self._memory_manager
+            and self._settings.memory_integration_enabled
+        ):
             asyncio.create_task(self._sync_turn_safe(messages))
 
         if getattr(self._active_frame, "is_root", True) and self._evolution is not None and content:
             asyncio.create_task(self._post_turn_review(messages, content))
 
         llm = self._llm
-        if hasattr(llm, 'try_restore_primary'):
+        if hasattr(llm, "try_restore_primary"):
             llm.try_restore_primary()
 
         logger.info("turn_usage: %s", self._usage_tracker.format_log_line())
@@ -3592,9 +3802,7 @@ class AgentEngine:
         self._emit_chat_event("response", {"content": fallback[:500]})
         return fallback
 
-    async def _post_turn_review(
-        self, messages: List[Dict[str, Any]], final_content: str
-    ) -> None:
+    async def _post_turn_review(self, messages: List[Dict[str, Any]], final_content: str) -> None:
         """Background post-turn review: detect memorable patterns and persist episodes.
 
         Scans the turn's tool calls for interesting patterns (successes, failures)
@@ -3605,23 +3813,27 @@ class AgentEngine:
             tool_actions: List[Dict[str, Any]] = []
             for msg in messages:
                 if msg.get("role") == "assistant":
-                    for tc in (msg.get("tool_calls") or []):
+                    for tc in msg.get("tool_calls") or []:
                         fn = tc.get("function", {})
-                        tool_actions.append({
-                            "tool": fn.get("name", ""),
-                            "args_preview": fn.get("arguments", "")[:100],
-                        })
+                        tool_actions.append(
+                            {
+                                "tool": fn.get("name", ""),
+                                "args_preview": fn.get("arguments", "")[:100],
+                            }
+                        )
 
             if not tool_actions:
                 return
 
             has_success = any(
                 '"ok": true' in m.get("content", "") or '"ok":true' in m.get("content", "")
-                for m in messages if m.get("role") in ("tool", "user")
+                for m in messages
+                if m.get("role") in ("tool", "user")
             )
             has_failure = any(
                 '"ok": false' in m.get("content", "") or '"ok":false' in m.get("content", "")
-                for m in messages if m.get("role") in ("tool", "user")
+                for m in messages
+                if m.get("role") in ("tool", "user")
             )
 
             reward = 0.5
@@ -3633,7 +3845,9 @@ class AgentEngine:
             skill_name = tool_actions[0]["tool"] if tool_actions else "unknown"
             episode_context = {"final_content_preview": final_content[:200]}
             episode_context.update(self._usage_tracker.to_learning_signal())
-            episode_context.update(build_adaptive_learning_signal(self._last_context_snapshot or {}))
+            episode_context.update(
+                build_adaptive_learning_signal(self._last_context_snapshot or {})
+            )
             episode = self._evolution.record_episode(
                 skill_name=f"turn_{skill_name}",
                 actions=tool_actions[:10],
@@ -3643,7 +3857,9 @@ class AgentEngine:
             )
 
             self._persist_episode(episode)
-            self._bridge_to_experience_store(episode, tool_actions, reward, has_success, has_failure)
+            self._bridge_to_experience_store(
+                episode, tool_actions, reward, has_success, has_failure
+            )
             self._emit_episode_event(episode, reward)
         except Exception:
             logger.debug("post_turn_review failed", exc_info=True)
@@ -3666,8 +3882,12 @@ class AgentEngine:
             logger.debug("evolution_store.save_episode failed", exc_info=True)
 
     def _bridge_to_experience_store(
-        self, episode: Any, tool_actions: List[Dict[str, Any]],
-        reward: float, has_success: bool, has_failure: bool,
+        self,
+        episode: Any,
+        tool_actions: List[Dict[str, Any]],
+        reward: float,
+        has_success: bool,
+        has_failure: bool,
     ) -> None:
         """Bridge tool-loop outcomes to ExperienceStore for world-model trajectory."""
         if self._experience_store is None or episode is None:
@@ -3694,15 +3914,17 @@ class AgentEngine:
             return
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._event_bus.handle_event(
-                "learning.episode_recorded",
-                {
-                    "skill_name": episode.skill_name,
-                    "reward": episode.reward,
-                    "actions": [a.get("tool", "") for a in episode.actions[:5]],
-                    "outcome": episode.outcome,
-                },
-            ))
+            loop.create_task(
+                self._event_bus.handle_event(
+                    "learning.episode_recorded",
+                    {
+                        "skill_name": episode.skill_name,
+                        "reward": episode.reward,
+                        "actions": [a.get("tool", "") for a in episode.actions[:5]],
+                        "outcome": episode.outcome,
+                    },
+                )
+            )
         except RuntimeError:
             pass
 
@@ -3718,7 +3940,7 @@ class AgentEngine:
         # Reuse the same setup logic as _unified_tool_loop
         if user_text.startswith("/"):
             slash_name = user_text.split()[0][1:]
-            remaining = user_text[len(slash_name) + 1:].strip()
+            remaining = user_text[len(slash_name) + 1 :].strip()
             if self._skill_injector:
                 injection = self._skill_injector.build_injection_message(slash_name, remaining)
                 if injection:
@@ -3815,7 +4037,9 @@ class AgentEngine:
             if use_native_tools and tools_kwarg:
                 try:
                     resp = await self._llm.achat(
-                        compressed, stream=False, enable_thinking=planned_enable_thinking,
+                        compressed,
+                        stream=False,
+                        enable_thinking=planned_enable_thinking,
                         **tools_kwarg,
                     )
                 except Exception as exc:
@@ -3824,32 +4048,44 @@ class AgentEngine:
 
                     # Classify through unified coordinator
                     envelope = self._unified_classifier.classify_llm_error(
-                        exc, provider=getattr(self._llm, 'provider', ''),
-                        model=getattr(self._llm, 'model', ''),
+                        exc,
+                        provider=getattr(self._llm, "provider", ""),
+                        model=getattr(self._llm, "model", ""),
                     )
                     # The native-tools round previously logged nothing here, so a
                     # repeating failure left no trace at all in the daemon log.
                     logger.error(
                         "unified_loop_stream: llm call failed (%s/%s)",
-                        envelope.category, envelope.failure_code, exc_info=True,
+                        envelope.category,
+                        envelope.failure_code,
+                        exc_info=True,
                     )
                     coordinator = self._recovery_coordinator
                     try:
                         decision = coordinator.evaluate(envelope)
                     except Exception as coord_exc:
                         logger.error("recovery_coordinator.evaluate() failed: %s", coord_exc)
-                        yield StreamEvent(type="error", content=f"Internal recovery error: {coord_exc}")
+                        yield StreamEvent(
+                            type="error", content=f"Internal recovery error: {coord_exc}"
+                        )
                         break
-                    self._audit_sink.record(create_audit_entry(
-                        envelope, decision, coordinator.budget,
-                        session_id=getattr(self, '_current_session_id', '') or '',
-                        turn_id=budget.used,
-                    ))
+                    self._audit_sink.record(
+                        create_audit_entry(
+                            envelope,
+                            decision,
+                            coordinator.budget,
+                            session_id=getattr(self, "_current_session_id", "") or "",
+                            turn_id=budget.used,
+                        )
+                    )
 
                     if decision.action == RecoveryAction.RETRY_WITH_BACKOFF:
                         if decision.retry_semantics.backoff_config:
                             await asyncio.sleep(
-                                jittered_backoff(budget.used, base=decision.retry_semantics.backoff_config.base_delay)
+                                jittered_backoff(
+                                    budget.used,
+                                    base=decision.retry_semantics.backoff_config.base_delay,
+                                )
                             )
                         continue
                     elif decision.action == RecoveryAction.TRANSFORM_AND_RETRY:
@@ -3861,7 +4097,7 @@ class AgentEngine:
                         coordinator.on_strategy_outcome(decision.decision_id, True)
                         continue
                     elif decision.action == RecoveryAction.FAILOVER:
-                        if hasattr(self._llm, '_failover'):
+                        if hasattr(self._llm, "_failover"):
                             self._llm._failover(f"recovery: {decision.reason}")
                         coordinator.on_strategy_outcome(decision.decision_id, True)
                         continue
@@ -3869,7 +4105,9 @@ class AgentEngine:
                         # Terminal: HALT_CLEAN, HALT_WITH_CHECKPOINT, ASK_USER
                         if decision.action == RecoveryAction.HALT_WITH_CHECKPOINT:
                             self._save_halt_checkpoint(
-                                decision, envelope, messages,
+                                decision,
+                                envelope,
+                                messages,
                                 budget_used=budget.used,
                                 tools_kwarg=tools_kwarg,
                                 use_native_tools=use_native_tools,
@@ -3889,12 +4127,12 @@ class AgentEngine:
                     content = self._sanitizer.sanitize(content)
 
                 # Surface provider reasoning/thinking to TUI
-                thinking = getattr(resp, 'thinking_content', None)
+                thinking = getattr(resp, "thinking_content", None)
                 if thinking and thinking.strip():
                     yield StreamEvent(type="thinking", content=thinking.strip())
 
                 # Length continuation for native tool path
-                finish = getattr(resp, 'finish_reason', None)
+                finish = getattr(resp, "finish_reason", None)
                 if finish in ("length", "max_tokens") and turn_recovery.try_length_continuation():
                     logger.info("unified_loop_stream: length continuation")
                     messages.append(build_assistant_message(content))
@@ -3914,18 +4152,25 @@ class AgentEngine:
                         {
                             "id": tc.id,
                             "type": "function",
-                            "function": {"name": tc.name, "arguments": json.dumps(tc.arguments, ensure_ascii=False)},
+                            "function": {
+                                "name": tc.name,
+                                "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                            },
                         }
                         for tc in native_calls
                     ]
                     messages.append(assistant_msg)
                     self._persist_message(
-                        session_id, "assistant", "",
+                        session_id,
+                        "assistant",
+                        "",
                         tool_calls=assistant_msg.get("tool_calls"),
                     )
 
                     for tc in native_calls:
-                        resolved_call = _normalize_tool_call({"name": tc.name, "arguments": tc.arguments})
+                        resolved_call = _normalize_tool_call(
+                            {"name": tc.name, "arguments": tc.arguments}
+                        )
                         normalized_name = str(resolved_call["name"])
                         original_name = str(resolved_call.get("original_tool_name") or tc.name)
                         yield StreamEvent(
@@ -3942,6 +4187,7 @@ class AgentEngine:
                         native_calls, tool_handlers, trace=trace, messages=messages
                     )
                     self._record_tool_call_categories(native_calls)
+                    self._observe_capability_results(results)
                     tools_kwarg = self._merge_expanded_tool_schemas(tools_kwarg, results)
                     result_by_id = {str(item.get("id")): item for item in results}
                     retryable_unknown = next(
@@ -3967,7 +4213,9 @@ class AgentEngine:
                                     original_tool_name=original_name,
                                     tool_call_id=str(tc.id),
                                 ),
-                                **self._tool_context_metadata(normalized_name, tc.arguments, item.get("result")),
+                                **self._tool_context_metadata(
+                                    normalized_name, tc.arguments, item.get("result")
+                                ),
                             },
                         )
 
@@ -3976,7 +4224,9 @@ class AgentEngine:
                         logger.info(
                             "unified_loop_stream: permission hard-stop after %s/%s",
                             permission_hard_stop.get("platform", "platform"),
-                            permission_hard_stop.get("capability") or permission_hard_stop.get("action") or "action",
+                            permission_hard_stop.get("capability")
+                            or permission_hard_stop.get("action")
+                            or "action",
                         )
                         break
 
@@ -3984,13 +4234,16 @@ class AgentEngine:
                         unknown_tool_retry_used = True
                         tools_kwarg = self._expand_tools_kwarg_full(tools_kwarg, tool_defs)
                         use_native_tools = bool(tools_kwarg)
-                        messages.append(build_user_message_text(_unknown_tool_retry_prompt(retryable_unknown)))
+                        messages.append(
+                            build_user_message_text(_unknown_tool_retry_prompt(retryable_unknown))
+                        )
                         continue
                     halt_reason = self._evaluate_tool_failures(
                         [
                             (item.get("name") or "", item["result"])
                             for item in results
-                            if isinstance(item.get("result"), dict) and _tool_result_counts_as_failure(item["result"])
+                            if isinstance(item.get("result"), dict)
+                            and _tool_result_counts_as_failure(item["result"])
                         ],
                         turn_id=budget.used,
                     )
@@ -4001,19 +4254,27 @@ class AgentEngine:
                     if self._check_guardrail(messages) == "halt":
                         break
 
-                    self._wm.remember_chat(build_assistant_message(
-                        f"[Called: {', '.join(tc.name for tc in native_calls)}]"
-                    ))
-                    if status == BudgetStatus.SOFT_LIMIT and not self._should_extend_budget(self._active_frame):
-                        messages.append(build_user_message_text(
-                            "SYSTEM: Approaching limit. Provide final answer now."
-                        ))
+                    self._wm.remember_chat(
+                        build_assistant_message(
+                            f"[Called: {', '.join(tc.name for tc in native_calls)}]"
+                        )
+                    )
+                    if status == BudgetStatus.SOFT_LIMIT and not self._should_extend_budget(
+                        self._active_frame
+                    ):
+                        messages.append(
+                            build_user_message_text(
+                                "SYSTEM: Approaching limit. Provide final answer now."
+                            )
+                        )
                     elif _has_completed_side_effect(results):
-                        messages.append(build_user_message_text(
-                            "SYSTEM: Side-effect action completed (result has completed:true). "
-                            "Do not re-invoke it with the same parameters. "
-                            "If all user-requested actions are done, provide the final answer."
-                        ))
+                        messages.append(
+                            build_user_message_text(
+                                "SYSTEM: Side-effect action completed (result has completed:true). "
+                                "Do not re-invoke it with the same parameters. "
+                                "If all user-requested actions are done, provide the final answer."
+                            )
+                        )
                     continue
 
             else:
@@ -4022,10 +4283,12 @@ class AgentEngine:
                     try:
                         _clear_indicator()
                         raw_stream = self._llm.achat_stream(
-                            compressed, enable_thinking=planned_enable_thinking,
+                            compressed,
+                            enable_thinking=planned_enable_thinking,
                         )
                         guarded = stale_guarded_stream(
-                            raw_stream, timeout_s=self._stale_stream_timeout_s,
+                            raw_stream,
+                            timeout_s=self._stale_stream_timeout_s,
                         )
                         async for chunk in guarded:
                             content_parts.append(chunk)
@@ -4035,12 +4298,14 @@ class AgentEngine:
                         _clear_indicator()
                         partial = stale_exc.partial_text or "".join(content_parts)
                         if partial.strip() and turn_recovery.try_length_continuation():
-                            logger.warning("stale_stream: recovering with %d chars partial", len(partial))
+                            logger.warning(
+                                "stale_stream: recovering with %d chars partial", len(partial)
+                            )
                             content = partial.strip()
                             messages.append(build_assistant_message(content))
-                            messages.append(build_user_message_text(
-                                build_continuation_prompt(content)
-                            ))
+                            messages.append(
+                                build_user_message_text(build_continuation_prompt(content))
+                            )
                             continue
                         yield StreamEvent(type="error", content=str(stale_exc))
                         break
@@ -4049,25 +4314,35 @@ class AgentEngine:
                         turn_recovery.record_api_error()
                         # Classify through unified coordinator
                         envelope = self._unified_classifier.classify_llm_error(
-                            exc, provider=getattr(self._llm, 'provider', ''),
-                            model=getattr(self._llm, 'model', ''),
+                            exc,
+                            provider=getattr(self._llm, "provider", ""),
+                            model=getattr(self._llm, "model", ""),
                         )
                         coordinator = self._recovery_coordinator
                         try:
                             decision = coordinator.evaluate(envelope)
                         except Exception as coord_exc:
                             logger.error("recovery_coordinator.evaluate() failed: %s", coord_exc)
-                            yield StreamEvent(type="error", content=f"Internal recovery error: {coord_exc}")
+                            yield StreamEvent(
+                                type="error", content=f"Internal recovery error: {coord_exc}"
+                            )
                             break
-                        self._audit_sink.record(create_audit_entry(
-                            envelope, decision, coordinator.budget,
-                            session_id=getattr(self, '_current_session_id', '') or '',
-                            turn_id=budget.used,
-                        ))
+                        self._audit_sink.record(
+                            create_audit_entry(
+                                envelope,
+                                decision,
+                                coordinator.budget,
+                                session_id=getattr(self, "_current_session_id", "") or "",
+                                turn_id=budget.used,
+                            )
+                        )
                         if decision.action == RecoveryAction.RETRY_WITH_BACKOFF:
                             if decision.retry_semantics.backoff_config:
                                 await asyncio.sleep(
-                                    jittered_backoff(budget.used, base=decision.retry_semantics.backoff_config.base_delay)
+                                    jittered_backoff(
+                                        budget.used,
+                                        base=decision.retry_semantics.backoff_config.base_delay,
+                                    )
                                 )
                             continue
                         elif decision.action == RecoveryAction.TRANSFORM_AND_RETRY:
@@ -4075,17 +4350,22 @@ class AgentEngine:
                             coordinator.on_strategy_outcome(decision.decision_id, True)
                             continue
                         elif decision.action == RecoveryAction.FAILOVER:
-                            if hasattr(self._llm, '_failover'):
+                            if hasattr(self._llm, "_failover"):
                                 self._llm._failover(f"recovery: {decision.reason}")
                             coordinator.on_strategy_outcome(decision.decision_id, True)
                             continue
                         else:
                             if decision.action == RecoveryAction.HALT_WITH_CHECKPOINT:
                                 self._save_halt_checkpoint(
-                                    decision, envelope, messages, budget_used=budget.used,
+                                    decision,
+                                    envelope,
+                                    messages,
+                                    budget_used=budget.used,
                                 )
                             fatal_error = _terminal_failure_text(decision)
-                            logger.error("unified_loop_stream: unrecoverable %s: %s", envelope.category, exc)
+                            logger.error(
+                                "unified_loop_stream: unrecoverable %s: %s", envelope.category, exc
+                            )
                             yield StreamEvent(
                                 type="error",
                                 content=fatal_error,
@@ -4099,32 +4379,44 @@ class AgentEngine:
                 else:
                     try:
                         resp = await self._llm.achat(
-                            compressed, stream=False, enable_thinking=planned_enable_thinking,
+                            compressed,
+                            stream=False,
+                            enable_thinking=planned_enable_thinking,
                         )
                     except Exception as exc:
                         _clear_indicator()
                         turn_recovery.record_api_error()
                         # Classify through unified coordinator
                         envelope = self._unified_classifier.classify_llm_error(
-                            exc, provider=getattr(self._llm, 'provider', ''),
-                            model=getattr(self._llm, 'model', ''),
+                            exc,
+                            provider=getattr(self._llm, "provider", ""),
+                            model=getattr(self._llm, "model", ""),
                         )
                         coordinator = self._recovery_coordinator
                         try:
                             decision = coordinator.evaluate(envelope)
                         except Exception as coord_exc:
                             logger.error("recovery_coordinator.evaluate() failed: %s", coord_exc)
-                            yield StreamEvent(type="error", content=f"Internal recovery error: {coord_exc}")
+                            yield StreamEvent(
+                                type="error", content=f"Internal recovery error: {coord_exc}"
+                            )
                             break
-                        self._audit_sink.record(create_audit_entry(
-                            envelope, decision, coordinator.budget,
-                            session_id=getattr(self, '_current_session_id', '') or '',
-                            turn_id=budget.used,
-                        ))
+                        self._audit_sink.record(
+                            create_audit_entry(
+                                envelope,
+                                decision,
+                                coordinator.budget,
+                                session_id=getattr(self, "_current_session_id", "") or "",
+                                turn_id=budget.used,
+                            )
+                        )
                         if decision.action == RecoveryAction.RETRY_WITH_BACKOFF:
                             if decision.retry_semantics.backoff_config:
                                 await asyncio.sleep(
-                                    jittered_backoff(budget.used, base=decision.retry_semantics.backoff_config.base_delay)
+                                    jittered_backoff(
+                                        budget.used,
+                                        base=decision.retry_semantics.backoff_config.base_delay,
+                                    )
                                 )
                             continue
                         elif decision.action == RecoveryAction.TRANSFORM_AND_RETRY:
@@ -4132,17 +4424,22 @@ class AgentEngine:
                             coordinator.on_strategy_outcome(decision.decision_id, True)
                             continue
                         elif decision.action == RecoveryAction.FAILOVER:
-                            if hasattr(self._llm, '_failover'):
+                            if hasattr(self._llm, "_failover"):
                                 self._llm._failover(f"recovery: {decision.reason}")
                             coordinator.on_strategy_outcome(decision.decision_id, True)
                             continue
                         else:
                             if decision.action == RecoveryAction.HALT_WITH_CHECKPOINT:
                                 self._save_halt_checkpoint(
-                                    decision, envelope, messages, budget_used=budget.used,
+                                    decision,
+                                    envelope,
+                                    messages,
+                                    budget_used=budget.used,
                                 )
                             fatal_error = _terminal_failure_text(decision)
-                            logger.error("unified_loop_stream: unrecoverable %s: %s", envelope.category, exc)
+                            logger.error(
+                                "unified_loop_stream: unrecoverable %s: %s", envelope.category, exc
+                            )
                             yield StreamEvent(
                                 type="error",
                                 content=fatal_error,
@@ -4156,13 +4453,16 @@ class AgentEngine:
                         content = self._sanitizer.sanitize(content)
 
                     # Surface provider reasoning/thinking to TUI
-                    thinking = getattr(resp, 'thinking_content', None)
+                    thinking = getattr(resp, "thinking_content", None)
                     if thinking and thinking.strip():
                         yield StreamEvent(type="thinking", content=thinking.strip())
 
                     # Length continuation for non-stream path
-                    finish = getattr(resp, 'finish_reason', None)
-                    if finish in ("length", "max_tokens") and turn_recovery.try_length_continuation():
+                    finish = getattr(resp, "finish_reason", None)
+                    if (
+                        finish in ("length", "max_tokens")
+                        and turn_recovery.try_length_continuation()
+                    ):
                         messages.append(build_assistant_message(content))
                         messages.append(build_user_message_text(build_continuation_prompt(content)))
                         continue
@@ -4181,7 +4481,8 @@ class AgentEngine:
                         "unified_loop_stream: empty LLM response "
                         "(model=%s provider=%s stream=%s); retrying once",
                         getattr(self._llm, "model", ""),
-                        getattr(self._llm, "active_provider_name", "") or getattr(self._llm, "provider", ""),
+                        getattr(self._llm, "active_provider_name", "")
+                        or getattr(self._llm, "provider", ""),
                         self._settings.stream_output,
                     )
                     messages.append(build_user_message_text(_EMPTY_RESPONSE_RETRY_PROMPT))
@@ -4212,10 +4513,17 @@ class AgentEngine:
 
             messages.append(build_assistant_message(content))
             tool_arguments = normalized_tool_call.get("arguments")
-            self._emit_chat_event("tool_call", {
-                "tool_name": tool_name,
-                "arguments_summary": json.dumps(tool_arguments, default=str, ensure_ascii=False)[:300] if tool_arguments else "",
-            })
+            self._emit_chat_event(
+                "tool_call",
+                {
+                    "tool_name": tool_name,
+                    "arguments_summary": json.dumps(
+                        tool_arguments, default=str, ensure_ascii=False
+                    )[:300]
+                    if tool_arguments
+                    else "",
+                },
+            )
             yield StreamEvent(
                 type="tool_start",
                 content=tool_name,
@@ -4226,14 +4534,21 @@ class AgentEngine:
                 ),
             )
             result = await self._execute_tool_with_ledger(
-                normalized_tool_call, tool_handlers, tool_call_id=f"text-{budget.used}",
+                normalized_tool_call,
+                tool_handlers,
+                tool_call_id=f"text-{budget.used}",
             )
             _clear_indicator()
-            self._emit_chat_event("tool_result", {
-                "tool_name": tool_name,
-                "ok": bool(result.get("ok")) if isinstance(result, dict) else True,
-                "summary": json.dumps(result, default=str, ensure_ascii=False)[:300] if isinstance(result, dict) else str(result)[:300],
-            })
+            self._emit_chat_event(
+                "tool_result",
+                {
+                    "tool_name": tool_name,
+                    "ok": bool(result.get("ok")) if isinstance(result, dict) else True,
+                    "summary": json.dumps(result, default=str, ensure_ascii=False)[:300]
+                    if isinstance(result, dict)
+                    else str(result)[:300],
+                },
+            )
             yield StreamEvent(
                 type="tool_complete",
                 content=tool_name,
@@ -4265,15 +4580,19 @@ class AgentEngine:
                 turn_recovery.record_tool_success()
 
             self._record_tool_focus(tool_name, tool_arguments, result)
+            self._observe_capability_result(result)
             result_payload = self._compact_tool_result(tool_name, tool_arguments, result)
             result_text = _truncate_result_for_budget(result_payload, result_budget)
-            messages.append(build_user_message_text(
-                f"Tool result ({tool_name}):\n{result_text}"
-            ))
+            messages.append(build_user_message_text(f"Tool result ({tool_name}):\n{result_text}"))
             self._persist_message(
-                session_id, "tool", result_text,
-                tool_name=tool_name, tool_call_id=f"text-{budget.used}",
-                metadata=self._tool_execution_metadata_with_focus(tool_name, tool_arguments, result),
+                session_id,
+                "tool",
+                result_text,
+                tool_name=tool_name,
+                tool_call_id=f"text-{budget.used}",
+                metadata=self._tool_execution_metadata_with_focus(
+                    tool_name, tool_arguments, result
+                ),
             )
 
             if _is_permission_hard_stop_payload(result):
@@ -4290,7 +4609,9 @@ class AgentEngine:
                 continue
 
             if is_error:
-                halt_reason = self._evaluate_tool_failures([(tool_name, result)], turn_id=budget.used)
+                halt_reason = self._evaluate_tool_failures(
+                    [(tool_name, result)], turn_id=budget.used
+                )
                 if halt_reason:
                     fatal_error = halt_reason
                     break
@@ -4298,22 +4619,28 @@ class AgentEngine:
             if self._check_guardrail(messages) == "halt":
                 break
 
-            if status == BudgetStatus.SOFT_LIMIT and not self._should_extend_budget(self._active_frame):
-                messages.append(build_user_message_text(
-                    "SYSTEM: Approaching limit. Provide final answer now."
-                ))
+            if status == BudgetStatus.SOFT_LIMIT and not self._should_extend_budget(
+                self._active_frame
+            ):
+                messages.append(
+                    build_user_message_text("SYSTEM: Approaching limit. Provide final answer now.")
+                )
 
         # Turn-end learning/memory-sync are top-level-turn concerns; a recursive
         # child frame (subagent) must not pollute the parent's evolution/memory
         # (its result flows back via SubagentResult) nor leak background tasks.
-        if getattr(self._active_frame, "is_root", True) and self._memory_manager and self._settings.memory_integration_enabled:
+        if (
+            getattr(self._active_frame, "is_root", True)
+            and self._memory_manager
+            and self._settings.memory_integration_enabled
+        ):
             asyncio.create_task(self._sync_turn_safe(messages))
 
         if getattr(self._active_frame, "is_root", True) and self._evolution is not None and content:
             asyncio.create_task(self._post_turn_review(messages, content))
 
         llm = self._llm
-        if hasattr(llm, 'try_restore_primary'):
+        if hasattr(llm, "try_restore_primary"):
             llm.try_restore_primary()
 
         logger.info("turn_usage: %s", self._usage_tracker.format_log_line())
@@ -4333,7 +4660,6 @@ class AgentEngine:
             self._emit_chat_event("response", {"content": fallback[:500]})
             yield StreamEvent(type="final", content=fallback)
 
-
     # ── Unified Loop Helpers ───────────────────────────────────────────────
 
     def _semantic_tool_schemas(self) -> List[Dict[str, Any]]:
@@ -4348,6 +4674,7 @@ class AgentEngine:
         ports and re-activation of the same instance.
         """
         from leapflow.plugins import get_registry
+
         _plugin_registry = get_registry()
 
         dp = _plugin_registry.get_desktop_semantic_plugin()
@@ -4368,13 +4695,16 @@ class AgentEngine:
         plugin disable or reload does.
         """
         from leapflow.plugins import get_registry
+
         _plugin_registry = get_registry()
 
         dp = _plugin_registry.get_desktop_semantic_plugin()
         dp_key = (id(dp), dp.version) if dp is not None else None
         cache_key = (dp_key, len(_plugin_registry.tool_definitions))
         if self._unified_catalog_key != cache_key:
-            self._unified_catalog = list(_plugin_registry.tool_definitions) + self._semantic_tool_schemas()
+            self._unified_catalog = (
+                list(_plugin_registry.tool_definitions) + self._semantic_tool_schemas()
+            )
             self._unified_catalog_key = cache_key
             # Downstream caches are keyed on the catalog contents.
             self._manifests_by_name = None
@@ -4393,6 +4723,7 @@ class AgentEngine:
         the new handlers.
         """
         from leapflow.plugins import get_registry
+
         _plugin_registry = get_registry()
 
         handlers: Dict[str, Any] = dict(_plugin_registry.tool_handlers)
@@ -4412,6 +4743,7 @@ class AgentEngine:
         if not semantic_requires_approval(name):
             return True, ""
         from leapflow.plugins import get_registry
+
         _plugin_registry = get_registry()
 
         gate = _plugin_registry.get_desktop_gate()
@@ -4447,9 +4779,7 @@ class AgentEngine:
             func = td.get("function", {})
             name = func.get("name", td.get("name", "unknown"))
             desc = func.get("description", td.get("description", ""))
-            params = ", ".join(
-                func.get("parameters", {}).get("properties", {}).keys()
-            )
+            params = ", ".join(func.get("parameters", {}).get("properties", {}).keys())
             manifest = manifests.get(name)
             tag = (
                 f" [capability_expand category: {manifest.category}]"
@@ -4493,7 +4823,9 @@ class AgentEngine:
         tc_wrappers = [
             ConcurrentToolCall(
                 id=tc.id,
-                name=str(_normalize_tool_call({"name": tc.name, "arguments": tc.arguments})["name"]),
+                name=str(
+                    _normalize_tool_call({"name": tc.name, "arguments": tc.arguments})["name"]
+                ),
                 arguments=tc.arguments,
             )
             for tc in native_calls
@@ -4502,22 +4834,36 @@ class AgentEngine:
         if not self._concurrency_policy or len(tc_wrappers) <= 1:
             for i, tc in enumerate(native_calls):
                 original_name = str(tc.name)
-                tool_call_dict = _normalize_tool_call({"name": original_name, "arguments": tc.arguments})
+                tool_call_dict = _normalize_tool_call(
+                    {"name": original_name, "arguments": tc.arguments}
+                )
                 normalized_name = str(tool_call_dict["name"])
-                self._emit_chat_event("tool_call", {
-                    "tool_name": normalized_name,
-                    "arguments_summary": json.dumps(tc.arguments, default=str, ensure_ascii=False)[:300],
-                })
+                self._emit_chat_event(
+                    "tool_call",
+                    {
+                        "tool_name": normalized_name,
+                        "arguments_summary": json.dumps(
+                            tc.arguments, default=str, ensure_ascii=False
+                        )[:300],
+                    },
+                )
                 _show_progress("executing", normalized_name, step=i + 1, total=len(native_calls))
                 result = await self._execute_tool_with_ledger(
-                    tool_call_dict, handlers, tool_call_id=str(tc.id),
+                    tool_call_dict,
+                    handlers,
+                    tool_call_id=str(tc.id),
                 )
                 _clear_indicator()
-                self._emit_chat_event("tool_result", {
-                    "tool_name": normalized_name,
-                    "ok": bool(result.get("ok")) if isinstance(result, dict) else True,
-                    "summary": json.dumps(result, default=str, ensure_ascii=False)[:300] if isinstance(result, dict) else str(result)[:300],
-                })
+                self._emit_chat_event(
+                    "tool_result",
+                    {
+                        "tool_name": normalized_name,
+                        "ok": bool(result.get("ok")) if isinstance(result, dict) else True,
+                        "summary": json.dumps(result, default=str, ensure_ascii=False)[:300]
+                        if isinstance(result, dict)
+                        else str(result)[:300],
+                    },
+                )
                 _print_tool_result(normalized_name, result, enabled=self._settings.verbose_progress)
                 trace.record(
                     ExecutionMode.ACTING,
@@ -4529,28 +4875,45 @@ class AgentEngine:
                 result_text = _truncate_result_for_budget(result_payload, result_budget)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
                 self._persist_message(
-                    self._current_session_id, "tool", result_text,
-                    tool_name=normalized_name, tool_call_id=str(tc.id),
-                    metadata=self._tool_execution_metadata_with_focus(normalized_name, tc.arguments, result),
+                    self._current_session_id,
+                    "tool",
+                    result_text,
+                    tool_name=normalized_name,
+                    tool_call_id=str(tc.id),
+                    metadata=self._tool_execution_metadata_with_focus(
+                        normalized_name, tc.arguments, result
+                    ),
                 )
-                executed.append({
-                    "id": tc.id,
-                    "name": normalized_name,
-                    "original_tool_name": str(tool_call_dict.get("original_tool_name") or original_name),
-                    "arguments": tc.arguments,
-                    "result": result,
-                })
-                if isinstance(result, dict) and _should_stop_after_tool_result(normalized_name, result):
-                    for skipped_tc in native_calls[i + 1:]:
-                        skipped_call = _normalize_tool_call({"name": str(skipped_tc.name), "arguments": skipped_tc.arguments})
+                executed.append(
+                    {
+                        "id": tc.id,
+                        "name": normalized_name,
+                        "original_tool_name": str(
+                            tool_call_dict.get("original_tool_name") or original_name
+                        ),
+                        "arguments": tc.arguments,
+                        "result": result,
+                    }
+                )
+                if isinstance(result, dict) and _should_stop_after_tool_result(
+                    normalized_name, result
+                ):
+                    for skipped_tc in native_calls[i + 1 :]:
+                        skipped_call = _normalize_tool_call(
+                            {"name": str(skipped_tc.name), "arguments": skipped_tc.arguments}
+                        )
                         skipped_name = str(skipped_call["name"])
-                        executed.append({
-                            "id": skipped_tc.id,
-                            "name": skipped_name,
-                            "original_tool_name": str(skipped_call.get("original_tool_name") or skipped_tc.name),
-                            "arguments": skipped_tc.arguments,
-                            "result": _skipped_after_failure_result(normalized_name, result),
-                        })
+                        executed.append(
+                            {
+                                "id": skipped_tc.id,
+                                "name": skipped_name,
+                                "original_tool_name": str(
+                                    skipped_call.get("original_tool_name") or skipped_tc.name
+                                ),
+                                "arguments": skipped_tc.arguments,
+                                "result": _skipped_after_failure_result(normalized_name, result),
+                            }
+                        )
                     logger.info(
                         "tool_concurrency: stopping remaining native tool calls after failed side effect from %s",
                         normalized_name,
@@ -4581,7 +4944,9 @@ class AgentEngine:
                 }
                 async with _parallel_sem:
                     return await self._execute_tool_with_ledger(
-                        tool_call_dict, handlers, tool_call_id=str(ctc.id),
+                        tool_call_dict,
+                        handlers,
+                        tool_call_id=str(ctc.id),
                     )
 
             gather_results = await asyncio.gather(
@@ -4601,13 +4966,17 @@ class AgentEngine:
                         "ok": False,
                         "error": f"{type(result).__name__}: {result}",
                     }
-                    _print_tool_result(ctc.name, error_result, enabled=self._settings.verbose_progress)
+                    _print_tool_result(
+                        ctc.name, error_result, enabled=self._settings.verbose_progress
+                    )
                     trace.record(
                         ExecutionMode.ACTING,
                         action=tool_call_dict,
                         observation=error_result,
                     )
-                    result_payload = self._compact_tool_result(ctc.name, ctc.arguments, error_result)
+                    result_payload = self._compact_tool_result(
+                        ctc.name, ctc.arguments, error_result
+                    )
                     result_text = _truncate_result_for_budget(result_payload, result_budget)
                 else:
                     _print_tool_result(ctc.name, result, enabled=self._settings.verbose_progress)
@@ -4622,27 +4991,40 @@ class AgentEngine:
                 self._record_tool_focus(ctc.name, ctc.arguments, effective_result)
                 messages.append({"role": "tool", "tool_call_id": ctc.id, "content": result_text})
                 self._persist_message(
-                    self._current_session_id, "tool", result_text,
-                    tool_name=ctc.name, tool_call_id=str(ctc.id),
-                    metadata=self._tool_execution_metadata_with_focus(ctc.name, ctc.arguments, effective_result),
+                    self._current_session_id,
+                    "tool",
+                    result_text,
+                    tool_name=ctc.name,
+                    tool_call_id=str(ctc.id),
+                    metadata=self._tool_execution_metadata_with_focus(
+                        ctc.name, ctc.arguments, effective_result
+                    ),
                 )
-                executed.append({
-                    "id": ctc.id,
-                    "name": ctc.name,
-                    "original_tool_name": original_name,
-                    "arguments": ctc.arguments,
-                    "result": effective_result,
-                })
-                if isinstance(effective_result, dict) and _should_stop_after_tool_result(ctc.name, effective_result):
+                executed.append(
+                    {
+                        "id": ctc.id,
+                        "name": ctc.name,
+                        "original_tool_name": original_name,
+                        "arguments": ctc.arguments,
+                        "result": effective_result,
+                    }
+                )
+                if isinstance(effective_result, dict) and _should_stop_after_tool_result(
+                    ctc.name, effective_result
+                ):
                     for skipped_ctc in sequential:
-                        skipped_original = original_names_by_id.get(str(skipped_ctc.id), skipped_ctc.name)
-                        executed.append({
-                            "id": skipped_ctc.id,
-                            "name": skipped_ctc.name,
-                            "original_tool_name": skipped_original,
-                            "arguments": skipped_ctc.arguments,
-                            "result": _skipped_after_failure_result(ctc.name, effective_result),
-                        })
+                        skipped_original = original_names_by_id.get(
+                            str(skipped_ctc.id), skipped_ctc.name
+                        )
+                        executed.append(
+                            {
+                                "id": skipped_ctc.id,
+                                "name": skipped_ctc.name,
+                                "original_tool_name": skipped_original,
+                                "arguments": skipped_ctc.arguments,
+                                "result": _skipped_after_failure_result(ctc.name, effective_result),
+                            }
+                        )
                     logger.info(
                         "tool_concurrency: failed side effect returned from concurrent tool %s; skipping sequential group",
                         ctc.name,
@@ -4659,7 +5041,9 @@ class AgentEngine:
                 "normalized_tool_name": ctc.name,
             }
             result = await self._execute_tool_with_ledger(
-                tool_call_dict, handlers, tool_call_id=str(ctc.id),
+                tool_call_dict,
+                handlers,
+                tool_call_id=str(ctc.id),
             )
             _clear_indicator()
             _print_tool_result(ctc.name, result, enabled=self._settings.verbose_progress)
@@ -4673,27 +5057,36 @@ class AgentEngine:
             self._record_tool_focus(ctc.name, ctc.arguments, result)
             messages.append({"role": "tool", "tool_call_id": ctc.id, "content": result_text})
             self._persist_message(
-                self._current_session_id, "tool", result_text,
-                tool_name=ctc.name, tool_call_id=str(ctc.id),
+                self._current_session_id,
+                "tool",
+                result_text,
+                tool_name=ctc.name,
+                tool_call_id=str(ctc.id),
                 metadata=self._tool_execution_metadata_with_focus(ctc.name, ctc.arguments, result),
             )
-            executed.append({
-                "id": ctc.id,
-                "name": ctc.name,
-                "original_tool_name": original_name,
-                "arguments": ctc.arguments,
-                "result": result,
-            })
+            executed.append(
+                {
+                    "id": ctc.id,
+                    "name": ctc.name,
+                    "original_tool_name": original_name,
+                    "arguments": ctc.arguments,
+                    "result": result,
+                }
+            )
             if isinstance(result, dict) and _should_stop_after_tool_result(ctc.name, result):
-                for skipped_ctc in sequential[i + 1:]:
-                    skipped_original = original_names_by_id.get(str(skipped_ctc.id), skipped_ctc.name)
-                    executed.append({
-                        "id": skipped_ctc.id,
-                        "name": skipped_ctc.name,
-                        "original_tool_name": skipped_original,
-                        "arguments": skipped_ctc.arguments,
-                        "result": _skipped_after_failure_result(ctc.name, result),
-                    })
+                for skipped_ctc in sequential[i + 1 :]:
+                    skipped_original = original_names_by_id.get(
+                        str(skipped_ctc.id), skipped_ctc.name
+                    )
+                    executed.append(
+                        {
+                            "id": skipped_ctc.id,
+                            "name": skipped_ctc.name,
+                            "original_tool_name": skipped_original,
+                            "arguments": skipped_ctc.arguments,
+                            "result": _skipped_after_failure_result(ctc.name, result),
+                        }
+                    )
                 logger.info(
                     "tool_concurrency: stopping sequential native tool calls after failed side effect from %s",
                     ctc.name,
@@ -4710,6 +5103,7 @@ class AgentEngine:
 
         try:
             from leapflow.tools.shell_tools import _approval_gate
+
             orchestrator = _approval_gate
         except Exception:  # noqa: BLE001
             orchestrator = None
@@ -4719,7 +5113,7 @@ class AgentEngine:
             allowed_roots=contract.allowed_roots,
             session_id=str(self._current_session_id or ""),
             task_id=contract.task_id,
-            approval_bypass=getattr(self._settings, 'approval_bypass', False),
+            approval_bypass=getattr(self._settings, "approval_bypass", False),
             orchestrator=orchestrator,
         )
 
@@ -4759,7 +5153,9 @@ class AgentEngine:
         if getattr(self._settings, "agent_validate_tool_args", True):
             invalid_args = _validate_tool_arguments(spec, args)
             if invalid_args is not None:
-                logger.info("tool_args_invalid: tool=%s missing=%s", tool_name, invalid_args.get("missing"))
+                logger.info(
+                    "tool_args_invalid: tool=%s missing=%s", tool_name, invalid_args.get("missing")
+                )
                 return invalid_args
         session_id = self._current_session_id or "ephemeral"
         turn_id = self._current_turn_id or f"turn-{self._session_turn_count}"
@@ -4787,14 +5183,18 @@ class AgentEngine:
                     timeout_s=self._tool_timeouts.get(tool_name, self._default_tool_timeout_s),
                 )
             duplicate = ToolExecutionLedger.duplicate_result(existing)
-            duplicate.update({
-                "tool_name": tool_name,
-                "tool_call_id": tool_call_id,
-                "execution_policy": existing.policy,
-            })
+            duplicate.update(
+                {
+                    "tool_name": tool_name,
+                    "tool_call_id": tool_call_id,
+                    "execution_policy": existing.policy,
+                }
+            )
             logger.info(
                 "tool_idempotency: skipped duplicate tool=%s policy=%s key=%s",
-                tool_name, existing.policy, existing.idempotency_key[:12],
+                tool_name,
+                existing.policy,
+                existing.idempotency_key[:12],
             )
             return duplicate
 
@@ -4926,7 +5326,9 @@ class AgentEngine:
 
                     result = await pipeline.execute(call_ctx, _invoke_handler)
                 else:
-                    result = await asyncio.wait_for(invoke_tool_handler(handler, args), timeout=timeout)
+                    result = await asyncio.wait_for(
+                        invoke_tool_handler(handler, args), timeout=timeout
+                    )
             else:
                 # No handler — tool is truly unknown
                 missing_resolution = registry.resolve(original_name, args)
@@ -4971,6 +5373,94 @@ class AgentEngine:
 
         return result
 
+    def _observe_capability_results(self, results: List[Dict[str, Any]]) -> None:
+        """Observe structured tool results without mutating runtime state."""
+        for item in results:
+            result = item.get("result") if isinstance(item, dict) else None
+            self._observe_capability_result(result)
+
+    def _observe_capability_result(self, result: Any) -> None:
+        """Persist an observe-only adaptive capability plan from structured gaps.
+
+        This hook intentionally performs no install, disable, remove, retry, or
+        natural-language classification. It only reflects structured tool-result
+        evidence into the capability plan store so the next disclosure/planning
+        step can see an explicit, reviewable requirement.
+        """
+        if not isinstance(result, dict):
+            return
+        try:
+            buffer = getattr(self, "_capability_observation_buffer", None)
+            if buffer is None:
+                from leapflow.learning.capability_observation import CapabilityObservationBuffer
+
+                buffer = CapabilityObservationBuffer()
+                self._capability_observation_buffer = buffer
+            if not buffer.add_result(result):
+                return
+
+            profile_layout = getattr(self._settings, "profile_layout", None)
+            if profile_layout is None:
+                return
+
+            from leapflow.domain.environment_fingerprint import EnvironmentFingerprint
+            from leapflow.domain.platform import PlatformManifest
+            from leapflow.learning.capability_observation import CapabilityObservationService
+            from leapflow.plugins import get_registry
+            from leapflow.plugins.adaptive_loop import AdaptiveLoopRequest, AdaptivePluginLoop
+            from leapflow.storage.capability_observation_store import JsonCapabilityObservationStore
+            from leapflow.storage.capability_plan_store import JsonCapabilityPlanStore
+
+            registry = get_registry()
+            environment = EnvironmentFingerprint.from_platform_manifest(
+                PlatformManifest.default_darwin(),
+                workspace_root=getattr(self._settings, "workspace_root", ""),
+            )
+            observation_store = JsonCapabilityObservationStore(
+                profile_layout.capability_observations_path
+            )
+            observation_service = CapabilityObservationService(observation_store)
+            observation_record = observation_service.observe_result(
+                result,
+                environment=environment,
+                source="engine_observe",
+                session_id=str(getattr(self, "_current_session_id", "") or ""),
+                turn_id=str(getattr(self, "_current_turn_id", "") or ""),
+                workspace_root=str(getattr(self._settings, "workspace_root", "") or ""),
+            )
+            requirements = observation_service.requirements(min_count=1)
+            if not requirements:
+                return
+            loop_id = "observe-{}-{}".format(
+                str(
+                    getattr(self, "_current_turn_id", "")
+                    or getattr(self, "_current_session_id", "")
+                    or "turn"
+                ),
+                len(buffer.observations()),
+            )
+            store = JsonCapabilityPlanStore(profile_layout.capability_plans_path)
+            loop = AdaptivePluginLoop(registry=registry, plan_store=store)
+            decision = loop.resolve_once(
+                AdaptiveLoopRequest(
+                    environment=environment,
+                    requirements=requirements,
+                    source="engine_observe",
+                    loop_id=loop_id,
+                ),
+                phase="observation",
+                registry_version_before=registry.version,
+                registry_version_after=registry.version,
+                mutation={
+                    "action": "observe",
+                    "error_type": "unknown_tool",
+                    "observation_id": (observation_record or {}).get("observation_id", ""),
+                },
+            )
+            self._active_capability_plan = decision.plan.to_dict()
+        except (ImportError, AttributeError, RuntimeError, OSError, TypeError, ValueError) as exc:
+            logger.debug("capability observation skipped: %s", exc, exc_info=True)
+
     # ── Helpers ──────────────────────────────────────────────────────────
 
     def _budget_exhausted_response(self, messages: List[Dict[str, Any]]) -> str:
@@ -4980,7 +5470,9 @@ class AgentEngine:
         open-question count and next step so the stop is informative and
         continuable (not a bare dead-stop); otherwise the plain notice.
         """
-        base = "I've reached my reasoning step limit. Here's my best answer based on progress so far."
+        base = (
+            "I've reached my reasoning step limit. Here's my best answer based on progress so far."
+        )
         led = self._research_ledger
         if led.is_empty or led.open_question_count == 0:
             return base
@@ -5005,9 +5497,7 @@ class AgentEngine:
     async def _emit_execution_trace(self, trace: ExecutionTrace) -> None:
         """Fire-and-forget: emit trace as learning signal for the evolution ring."""
         try:
-            logger.debug(
-                "emit_trace steps=%d tokens=%d", trace.step_count, trace.total_tokens
-            )
+            logger.debug("emit_trace steps=%d tokens=%d", trace.step_count, trace.total_tokens)
             # Write episode to evolution memory if available
             if self._evolution and self._settings.memory_integration_enabled:
                 actions = [
@@ -5028,7 +5518,9 @@ class AgentEngine:
                         **build_adaptive_learning_signal(self._last_context_snapshot or {}),
                     },
                 )
-                logger.debug("evolution.record_episode outcome=%s actions=%d", outcome, len(actions))
+                logger.debug(
+                    "evolution.record_episode outcome=%s actions=%d", outcome, len(actions)
+                )
         except Exception:
             pass  # never fail the main loop
 
@@ -5046,10 +5538,14 @@ class AgentEngine:
             return None
         try:
             import uuid as _uuid
+
             child_session = f"sub_{_uuid.uuid4().hex[:12]}"
             title = user_text[:80].replace("\n", " ").strip() or "subagent"
             self._conversation_store.create_session(
-                child_session, title=title, model=self._settings.llm_model, source="subagent",
+                child_session,
+                title=title,
+                model=self._settings.llm_model,
+                source="subagent",
             )
             return child_session
         except Exception:
@@ -5062,6 +5558,7 @@ class AgentEngine:
             return None
         try:
             import uuid as _uuid
+
             if self._current_session_id is None:
                 self._current_session_id = _uuid.uuid4().hex[:16]
             # Create the session row if it does not exist yet. This covers a
@@ -5071,8 +5568,10 @@ class AgentEngine:
             if self._conversation_store.get_session(self._current_session_id) is None:
                 title = user_text[:80].replace("\n", " ").strip()
                 self._conversation_store.create_session(
-                    self._current_session_id, title=title,
-                    model=self._settings.llm_model, source="cli",
+                    self._current_session_id,
+                    title=title,
+                    model=self._settings.llm_model,
+                    source="cli",
                     cwd=str(getattr(self._settings, "workspace_root", "") or ""),
                 )
             self._persist_message(self._current_session_id, "user", user_text)
@@ -5088,19 +5587,37 @@ class AgentEngine:
             return {}
         metadata: Dict[str, Any] = {}
         for key in (
-            "execution_id", "idempotency_key", "execution_status", "execution_policy",
-            "already_executed", "duplicate_suppressed", "execution_reused", "execution_skipped",
-            "counts_as_failure", "counts_as_tool_attempt", "ui_hidden", "skipped_reason",
-            "blocked_by_tool", "blocked_by_error", "tool_call_id", "path", "file_path",
-            "bytes_written", "side_effect_uncertain",
+            "execution_id",
+            "idempotency_key",
+            "execution_status",
+            "execution_policy",
+            "already_executed",
+            "duplicate_suppressed",
+            "execution_reused",
+            "execution_skipped",
+            "counts_as_failure",
+            "counts_as_tool_attempt",
+            "ui_hidden",
+            "skipped_reason",
+            "blocked_by_tool",
+            "blocked_by_error",
+            "tool_call_id",
+            "path",
+            "file_path",
+            "bytes_written",
+            "side_effect_uncertain",
         ):
             if key in result:
                 metadata[key] = result[key]
         return metadata
 
     def _persist_message(
-        self, session_id: Optional[str], role: str, content: str,
-        *, tool_name: Optional[str] = None,
+        self,
+        session_id: Optional[str],
+        role: str,
+        content: str,
+        *,
+        tool_name: Optional[str] = None,
         tool_call_id: Optional[str] = None,
         tool_calls: Optional[list] = None,
         metadata: Optional[Dict[str, Any]] = None,
@@ -5110,9 +5627,13 @@ class AgentEngine:
             return
         try:
             self._conversation_store.append_message(
-                session_id, role, content[:8000],
-                tool_name=tool_name, tool_call_id=tool_call_id,
-                tool_calls=tool_calls, metadata=metadata,
+                session_id,
+                role,
+                content[:8000],
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                tool_calls=tool_calls,
+                metadata=metadata,
             )
         except Exception:
             logger.debug("session.persist_message failed", exc_info=True)
@@ -5150,11 +5671,11 @@ class AgentEngine:
                     limit=self._settings.memory_prefetch_limit,
                     workspace_root=(
                         self._current_task_contract.workspace_root
-                        if self._current_task_contract else ""
+                        if self._current_task_contract
+                        else ""
                     ),
                     task_id=(
-                        self._current_task_contract.task_id
-                        if self._current_task_contract else ""
+                        self._current_task_contract.task_id if self._current_task_contract else ""
                     ),
                     scope_keywords=self._task_scope_keywords(user_text),
                     session_scope="",
@@ -5162,12 +5683,14 @@ class AgentEngine:
                 timeout=self._settings.memory_prefetch_timeout_s,
             )
             if entries:
-                parts.append("## Recent Context\n" + "\n".join(
-                    f"- [{e.kind.value}] {e.content[:500]}" for e in entries
-                ))
+                parts.append(
+                    "## Recent Context\n"
+                    + "\n".join(f"- [{e.kind.value}] {e.content[:500]}" for e in entries)
+                )
         except asyncio.TimeoutError:
             logger.debug(
-                "memory.prefetch timed out (%.1fs)", self._settings.memory_prefetch_timeout_s,
+                "memory.prefetch timed out (%.1fs)",
+                self._settings.memory_prefetch_timeout_s,
             )
         except Exception:
             logger.debug("memory.prefetch failed", exc_info=True)
@@ -5194,8 +5717,7 @@ class AgentEngine:
         try:
             assert self._memory_manager is not None
             workspace_root = (
-                self._current_task_contract.workspace_root
-                if self._current_task_contract else ""
+                self._current_task_contract.workspace_root if self._current_task_contract else ""
             )
             await asyncio.wait_for(
                 self._memory_manager.sync_turn(
@@ -5238,7 +5760,9 @@ class AgentEngine:
                     if _tool_result_counts_as_failure(parsed):
                         count += 1
                         continue
-                    if parsed.get("counts_as_failure") is False or _tool_result_is_control_signal(parsed):
+                    if parsed.get("counts_as_failure") is False or _tool_result_is_control_signal(
+                        parsed
+                    ):
                         continue
             except (json.JSONDecodeError, ValueError):
                 pass
@@ -5273,20 +5797,24 @@ class AgentEngine:
         if level in (ConfirmLevel.STEP, ConfirmLevel.CONFIRM):
             logger.info(
                 "audit.trigger_match_deferred skill=%s tier=%s (requires confirmation)",
-                best.name, best.metadata.tier.name,
+                best.name,
+                best.metadata.tier.name,
             )
             return None
 
         logger.info(
             "audit.trigger_match skill=%s confidence=%.2f level=%s",
-            best.name, best.metadata.confidence, level.value,
+            best.name,
+            best.metadata.confidence,
+            level.value,
         )
         result = await self._registry.invoke(best.name, user_goal=user_text)
         if result.ok:
             return str(result.output)
         logger.warning(
             "audit.trigger_match_failed skill=%s error=%s",
-            best.name, result.error,
+            best.name,
+            result.error,
         )
         return None
 
@@ -5300,7 +5828,9 @@ class AgentEngine:
         """
         if intent.label == "conversational":
             if not self._settings.has_llm_credentials:
-                return "LeapFlow ready. Configure LEAPFLOW_LLM_API_KEY to enable full conversations."
+                return (
+                    "LeapFlow ready. Configure LEAPFLOW_LLM_API_KEY to enable full conversations."
+                )
             # Route conversational intent through unified tool loop
             return await self._unified_tool_loop(user_text)
         if intent.label == "file_organize":
@@ -5351,7 +5881,13 @@ class AgentEngine:
         if intent.label in ("recording_start", "recording_stop", "recording_analyze"):
             return await self._handle_recording_intent(intent, user_text)
 
-        if intent.label in ("learn_start", "learn_stop", "learn_pause", "learn_resume", "learn_annotate"):
+        if intent.label in (
+            "learn_start",
+            "learn_stop",
+            "learn_pause",
+            "learn_resume",
+            "learn_annotate",
+        ):
             return await self._handle_learn_intent(intent, user_text)
 
         if intent.label == "skill_list":
@@ -5442,9 +5978,7 @@ class AgentEngine:
         result = sorted(seen.values(), key=lambda e: e["ts"], reverse=True)
         return result
 
-    async def _synthesize_memory_answer(
-        self, user_text: str, events: List[Dict[str, Any]]
-    ) -> str:
+    async def _synthesize_memory_answer(self, user_text: str, events: List[Dict[str, Any]]) -> str:
         """Use LLM to answer the user's question based on collected events."""
         events_json = json.dumps(events, ensure_ascii=False)
         messages = [
@@ -5460,8 +5994,7 @@ class AgentEngine:
                 "- Answer in the same language as the user's question"
             ),
             build_user_message_text(
-                f"Question: {user_text}\n\n"
-                f"Recent events ({len(events)} total):\n{events_json}"
+                f"Question: {user_text}\n\nRecent events ({len(events)} total):\n{events_json}"
             ),
         ]
         try:
@@ -5571,8 +6104,7 @@ class AgentEngine:
         for s in skills:
             meta = s.metadata
             lines.append(
-                f"  - {s.name} (v{meta.version}, {meta.confidence:.0%}) "
-                f"— {s.description[:60]}"
+                f"  - {s.name} (v{meta.version}, {meta.confidence:.0%}) — {s.description[:60]}"
             )
         return "\n".join(lines)
 
@@ -5627,8 +6159,11 @@ class AgentEngine:
         logger.debug("learn.classify label=%s reason=%s", intent.label, intent.reason)
 
         if intent.label in (
-            "learn_start", "learn_stop", "learn_pause",
-            "learn_resume", "learn_annotate",
+            "learn_start",
+            "learn_stop",
+            "learn_pause",
+            "learn_resume",
+            "learn_annotate",
         ):
             return await self._handle_learn_intent(intent, user_text)
 
@@ -5642,8 +6177,7 @@ class AgentEngine:
         if n > 0:
             self._wm.remember_event(
                 "skill_suggestion_reminder",
-                f"[{n} skill update suggestion(s) pending review — "
-                f"say 'review skill suggestions']",
+                f"[{n} skill update suggestion(s) pending review — say 'review skill suggestions']",
             )
 
     def _handle_skill_review(self) -> str:
@@ -5658,8 +6192,7 @@ class AgentEngine:
             rationale = details.get("llm_rationale", "")
             changes = s.proposed_changes
             lines.append(
-                f"  {i}. \"{s.existing_skill_title}\" "
-                f"(similarity: {s.similarity_score:.0%})"
+                f'  {i}. "{s.existing_skill_title}" (similarity: {s.similarity_score:.0%})'
             )
             if rationale:
                 lines.append(f"     LLM: {rationale}")
@@ -5689,26 +6222,16 @@ class AgentEngine:
             s = suggestions[idx]
             if action == "approve":
                 merged = self._skill_merger.apply(s, self._skill_library)
-                results.append(
-                    f"Approved: \"{s.existing_skill_title}\" → v{merged.version}"
-                )
+                results.append(f'Approved: "{s.existing_skill_title}" → v{merged.version}')
             else:
-                self._skill_library.resolve_suggestion(
-                    s.suggestion_id, "rejected"
-                )
-                results.append(f"Rejected: \"{s.existing_skill_title}\"")
+                self._skill_library.resolve_suggestion(s.suggestion_id, "rejected")
+                results.append(f'Rejected: "{s.existing_skill_title}"')
         return "\n".join(results)
 
-    async def _parse_approval(
-        self, user_text: str, suggestions: list
-    ) -> tuple[str, list[int]]:
+    async def _parse_approval(self, user_text: str, suggestions: list) -> tuple[str, list[int]]:
         text_lower = user_text.lower()
-        is_approve = any(
-            w in text_lower for w in ("approve", "accept", "yes", "批准", "接受")
-        )
-        is_reject = any(
-            w in text_lower for w in ("reject", "deny", "no", "拒绝")
-        )
+        is_approve = any(w in text_lower for w in ("approve", "accept", "yes", "批准", "接受"))
+        is_reject = any(w in text_lower for w in ("reject", "deny", "no", "拒绝"))
         action = "approve" if is_approve else ("reject" if is_reject else "approve")
 
         if "all" in text_lower or "全部" in text_lower:
@@ -5729,8 +6252,7 @@ class AgentEngine:
         if (a_type == "memory" or name.startswith("memory_")) and self._memory_manager:
             tool_name = name if name.startswith("memory_") else f"memory_{name}"
             workspace_root = (
-                self._current_task_contract.workspace_root
-                if self._current_task_contract else ""
+                self._current_task_contract.workspace_root if self._current_task_contract else ""
             )
             try:
                 result = await self._memory_manager.handle_tool_call(
@@ -5743,7 +6265,9 @@ class AgentEngine:
 
         if a_type == "skill":
             result = await self._registry.invoke(
-                name, user_goal=user_goal, **payload,
+                name,
+                user_goal=user_goal,
+                **payload,
             )
             if not result.ok:
                 return {"ok": False, "error": result.error}
@@ -5757,8 +6281,10 @@ class AgentEngine:
             pl = self._registry.prediction_loop
             if pl is not None and pl.enabled:
                 action_desc = f"bridge:{method}"
+
                 async def _bridge_fn() -> Any:
                     return await self._rpc.call(method, payload or None)
+
                 output, _ = await pl.wrap_execution(action_desc, _bridge_fn)
                 logger.info("audit.bridge method=%s (predicted)", method)
                 return {"ok": True, "result": output}
@@ -5769,7 +6295,9 @@ class AgentEngine:
         if a_type == "tool":
             tool_call_dict = {"name": name, "arguments": payload}
             result = await self._execute_tool_with_ledger(
-                tool_call_dict, self._unified_tool_handlers(), tool_call_id=f"action-{name}",
+                tool_call_dict,
+                self._unified_tool_handlers(),
+                tool_call_id=f"action-{name}",
             )
             logger.info("audit.tool name=%s ok=%s", name, result.get("ok"))
             return result
@@ -5777,7 +6305,9 @@ class AgentEngine:
         return {"ok": False, "error": f"unsupported_action:{a_type}"}
 
 
-def build_default_registry(rpc: HostRpc, llm: LLMProvider, wm: WorkingMemoryProvider, lt: SemanticMemoryProvider) -> SkillRegistry:
+def build_default_registry(
+    rpc: HostRpc, llm: LLMProvider, wm: WorkingMemoryProvider, lt: SemanticMemoryProvider
+) -> SkillRegistry:
     """Register built-in skills with closures (dependency injection)."""
 
     reg = SkillRegistry()

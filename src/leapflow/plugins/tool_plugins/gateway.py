@@ -40,22 +40,39 @@ class GatewayToolsPlugin:
                     "Capability Index and are addressed as domain.operation, "
                     "e.g. im.send_message or docs.create_markdown. All business fields (chat_id, text, query, etc.) "
                     "MUST be placed inside `payload`, never at the top level. "
-                    "Example: {\"platform\":\"feishu\",\"action\":\"im.send_message\",\"payload\":{\"chat_id\":\"oc_xxx\",\"text\":\"hello\"}}. "
+                    'Example: {"platform":"feishu","action":"im.send_message","payload":{"chat_id":"oc_xxx","text":"hello"}}. '
                     "Do not invent action names, do not use management actions such as list/guide/connect/status here."
                 ),
                 parameters_schema={
                     "type": "object",
                     "properties": {
                         "platform": {"type": "string", "description": "Platform ID, e.g. feishu"},
-                        "action": {"type": "string", "description": "Exact registered business action from the Capability Index, e.g. im.send_message"},
-                        "payload": {"type": "object", "description": "Action payload — all business fields go here (e.g. chat_id, text, query). See Capability Index for required/optional fields per action."},
-                        "backend_kind": {"type": "string", "description": "Optional backend hint: cli/rest/mcp"},
+                        "action": {
+                            "type": "string",
+                            "description": "Exact registered business action from the Capability Index, e.g. im.send_message",
+                        },
+                        "payload": {
+                            "type": "object",
+                            "description": "Action payload — all business fields go here (e.g. chat_id, text, query). See Capability Index for required/optional fields per action.",
+                        },
+                        "backend_kind": {
+                            "type": "string",
+                            "description": "Optional backend hint: cli/rest/mcp",
+                        },
                     },
                     "required": ["platform", "action", "payload"],
                 },
                 handler=platform_action_handler,
-                x_leapflow={"category": "gateway", "risk_level": "high", "schema_cost": "high", "requires_approval": True},
+                x_leapflow={
+                    "category": "gateway",
+                    "risk_level": "high",
+                    "schema_cost": "high",
+                    "requires_approval": True,
+                },
                 mutates_state=True,
+                provides_capabilities=("platform.action",),
+                requires_capabilities=("platform.connect",),
+                requires_platform_capabilities=("file.ops",),
             ),
             ToolMetadata(
                 name="platform_connect",
@@ -70,14 +87,29 @@ class GatewayToolsPlugin:
                     "properties": {
                         "action": {"type": "string", "enum": list(PLATFORM_CONNECT_ACTIONS)},
                         "platform": {"type": "string", "description": "Platform ID"},
-                        "credentials": {"type": "object", "description": "Optional credentials for REST-style backends"},
-                        "options": {"type": "object", "description": "Backend options such as profile, identity, or binary"},
-                        "checkpoint": {"type": "string", "description": "Optional event source resume checkpoint"},
+                        "credentials": {
+                            "type": "object",
+                            "description": "Optional credentials for REST-style backends",
+                        },
+                        "options": {
+                            "type": "object",
+                            "description": "Backend options such as profile, identity, or binary",
+                        },
+                        "checkpoint": {
+                            "type": "string",
+                            "description": "Optional event source resume checkpoint",
+                        },
                     },
                     "required": ["action"],
                 },
                 handler=platform_connect_handler,
-                x_leapflow={"category": "gateway", "risk_level": "medium", "schema_cost": "high", "requires_approval": True},
+                x_leapflow={
+                    "category": "gateway",
+                    "risk_level": "medium",
+                    "schema_cost": "high",
+                    "requires_approval": True,
+                },
+                provides_capabilities=("platform.connect",),
             ),
             ToolMetadata(
                 name="gateway_send",
@@ -91,16 +123,33 @@ class GatewayToolsPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "platform": {"type": "string", "description": "Platform ID (feishu, telegram, dingtalk, etc.)"},
-                        "chat_id": {"type": "string", "description": "Target chat/group/channel ID"},
+                        "platform": {
+                            "type": "string",
+                            "description": "Platform ID (feishu, telegram, dingtalk, etc.)",
+                        },
+                        "chat_id": {
+                            "type": "string",
+                            "description": "Target chat/group/channel ID",
+                        },
                         "text": {"type": "string", "description": "Message text to send"},
-                        "thread_id": {"type": "string", "description": "Thread/topic ID for threaded replies (optional)"},
+                        "thread_id": {
+                            "type": "string",
+                            "description": "Thread/topic ID for threaded replies (optional)",
+                        },
                     },
                     "required": ["platform", "chat_id", "text"],
                 },
                 handler=gateway_send_handler,
-                x_leapflow={"category": "gateway", "risk_level": "high", "schema_cost": "high", "requires_approval": True},
+                x_leapflow={
+                    "category": "gateway",
+                    "risk_level": "high",
+                    "schema_cost": "high",
+                    "requires_approval": True,
+                },
                 mutates_state=True,
+                provides_capabilities=("platform.send_message",),
+                requires_capabilities=("platform.configure",),
+                requires_platform_capabilities=("file.ops",),
             ),
             ToolMetadata(
                 name="gateway_connect",
@@ -125,14 +174,29 @@ class GatewayToolsPlugin:
                                 "'remove' deletes saved credentials entirely."
                             ),
                         },
-                        "platform": {"type": "string", "description": "Platform ID (feishu, dingtalk, telegram, etc.)"},
-                        "credentials": {"type": "object", "description": "Platform credentials (keys vary by platform)"},
-                        "options": {"type": "object", "description": "Optional platform configuration overrides"},
+                        "platform": {
+                            "type": "string",
+                            "description": "Platform ID (feishu, dingtalk, telegram, etc.)",
+                        },
+                        "credentials": {
+                            "type": "object",
+                            "description": "Platform credentials (keys vary by platform)",
+                        },
+                        "options": {
+                            "type": "object",
+                            "description": "Optional platform configuration overrides",
+                        },
                     },
                     "required": ["action"],
                 },
                 handler=gateway_connect_handler,
-                x_leapflow={"category": "gateway", "risk_level": "medium", "schema_cost": "high", "requires_approval": True},
+                x_leapflow={
+                    "category": "gateway",
+                    "risk_level": "medium",
+                    "schema_cost": "high",
+                    "requires_approval": True,
+                },
+                provides_capabilities=("platform.configure",),
             ),
         ]
 
@@ -145,6 +209,7 @@ class GatewayToolsPlugin:
             self._gateway_server = deps["gateway_server"]
             # Propagate to the module-level ref used by handler functions
             from leapflow.tools.gateway_tool import set_gateway_server
+
             set_gateway_server(deps["gateway_server"])
 
 

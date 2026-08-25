@@ -427,6 +427,21 @@ class TestValidatePayloadStructured:
 # Direct gateway handler execution tests
 # ═══════════════════════════════════════════════════════════════
 
+class _AllowGate:
+    """Approving gate double.
+
+    Side-effecting platform actions fail closed without a gate, so tests whose
+    subject is *not* approval must install one to reach execution at all.
+    """
+
+    async def evaluate(self, action):
+        class Result:
+            approved = True
+            denial_message = ""
+
+        return Result()
+
+
 @pytest.mark.asyncio
 async def test_platform_action_direct_handler_does_not_deduplicate_send() -> None:
     """Direct gateway handler calls stay stateless; engine ledger owns idempotency."""
@@ -465,7 +480,7 @@ async def test_platform_action_direct_handler_does_not_deduplicate_send() -> Non
     adapter = FeishuAdapter(backend=backend)
     server._adapters["feishu"] = adapter
     set_gateway_server(server)
-    set_gateway_approval_gate(None)
+    set_gateway_approval_gate(_AllowGate())
     reset_platform_action_scope()
 
     try:
@@ -589,7 +604,7 @@ async def test_reset_platform_action_scope_is_compatibility_noop() -> None:
     adapter = FeishuAdapter(backend=backend)
     server._adapters["feishu"] = adapter
     set_gateway_server(server)
-    set_gateway_approval_gate(None)
+    set_gateway_approval_gate(_AllowGate())
     reset_platform_action_scope()
 
     try:

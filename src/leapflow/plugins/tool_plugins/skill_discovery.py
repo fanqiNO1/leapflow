@@ -27,12 +27,19 @@ class SkillDiscoveryPlugin:
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "Optional keyword filter"},
-                        "category": {"type": "string", "description": "Filter by category (e.g. file-mgmt, apple)"},
-                        "source": {"type": "string", "description": "Filter by source: learned, manual, or hub"},
+                        "category": {
+                            "type": "string",
+                            "description": "Filter by category (e.g. file-mgmt, apple)",
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "Filter by source: learned, manual, or hub",
+                        },
                     },
                 },
                 handler=skills_list,
                 x_leapflow={"category": "read", "plane": "task"},
+                provides_capabilities=("skill.list",),
             ),
             ToolMetadata(
                 name="skill_view",
@@ -46,6 +53,7 @@ class SkillDiscoveryPlugin:
                 },
                 handler=skill_view,
                 x_leapflow={"category": "read", "plane": "task"},
+                provides_capabilities=("skill.view",),
             ),
         ]
 

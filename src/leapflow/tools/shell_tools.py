@@ -20,38 +20,15 @@ from typing import Any, Dict, FrozenSet, Optional, Protocol, runtime_checkable
 
 from leapflow.tools.execution_context import (
     current_tool_context,
+    is_approval_bypass_active,
     is_within_allowed_roots,
-    leapflow_managed_hint,
+    require_workspace_access,
     resolve_workspace_path,
-    workspace_scope_error,
 )
 from leapflow.utils.process_group import ProcessGroup
 from leapflow.utils.shell_lex import split_args
 
 logger = logging.getLogger(__name__)
-
-
-def _is_bypass_active() -> bool:
-    """Check if approval bypass mode is active (config-level or session-level)."""
-    ctx = current_tool_context()
-    if ctx is None:
-        return False
-    if getattr(ctx, 'approval_bypass', False):
-        return True
-    # Session-level bypass: user selected "Allow ALL for this session"
-    orchestrator = getattr(ctx, 'orchestrator', None) or _approval_gate
-    if orchestrator is None:
-        return False
-    # Direct ApprovalOrchestrator → SessionAwareGate
-    gate = getattr(orchestrator, '_gate', None)
-    # SmartApprovalGate wrapper: penetrate _delegate
-    if gate is None:
-        delegate = getattr(orchestrator, '_delegate', None)
-        if delegate is not None:
-            gate = getattr(delegate, '_gate', None)
-    if gate is not None and getattr(gate, '_bypass_all', False):
-        return True
-    return False
 
 
 # Raw capture ceilings. These bound what the tool returns before the context
@@ -171,36 +148,6 @@ async def _approve_command(command: str, cwd: str | None) -> tuple[bool, str]:
         return False, "Dangerous command requires approval (denied)"
 
 
-async def _approve_workspace_escape(command: str, target_path: str, error_info: dict) -> tuple[bool, str]:
-    """Request user approval for a command that accesses paths outside workspace."""
-    from leapflow.security.actions import ActionDescriptor
-
-    ctx = current_tool_context()
-    orchestrator = getattr(ctx, 'orchestrator', None) if ctx else None
-    if orchestrator is None:
-        orchestrator = _approval_gate  # module-level fallback
-    if orchestrator is None or not isinstance(orchestrator, ActionApprovalEvaluator):
-        return False, "No approval gate available"
-
-    action = ActionDescriptor(
-        kind="shell.workspace_escape",
-        summary=f"Allow shell access to {target_path}?",
-        detail=f"shell_run wants to access path outside workspace: {target_path}",
-        effect="access_external",
-        resource=target_path,
-        metadata={"command": command, "error_info": error_info},
-    )
-    try:
-        result = await orchestrator.evaluate(action)
-        if getattr(result, "approved", False):
-            return True, ""
-        reason = str(getattr(result, "denial_message", "") or "User denied workspace escape")
-        return False, reason
-    except Exception:
-        logger.debug("workspace escape approval check failed", exc_info=True)
-        return False, "Workspace escape approval failed"
-
-
 def _expand_operand(token: str) -> str:
     """Return the inspectable path operand carried by a shell token.
 
@@ -237,8 +184,12 @@ def _has_parent_traversal(operand: str) -> bool:
 _WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
-def _command_workspace_escape(command: str, cwd: Path | None = None) -> dict[str, Any] | None:
-    """Reject path operands that resolve outside the active workspace.
+def _command_workspace_escape_path(command: str, cwd: Path | None = None) -> Path | None:
+    """Return the first path operand that resolves outside the workspace.
+
+    Detection only — the caller routes the result through
+    ``require_workspace_access`` so the operand is gated by the same
+    check/bypass/approve sequence as every other path-oriented tool.
 
     Shell is intentionally a broad escape hatch, so this stays a conservative
     guard rather than a full shell parser. It does normalize what the shell
@@ -274,21 +225,7 @@ def _command_workspace_escape(command: str, cwd: Path | None = None) -> dict[str
             continue
         resolved = path.expanduser().resolve()
         if not is_within_allowed_roots(resolved, ctx):
-            return {
-                "ok": False,
-                "error": (
-                    "shell_run command references a path outside the active workspace. "
-                    f"Path: {resolved}; workspace root: {ctx.workspace_root}. "
-                    "Approval is required to access paths outside the workspace."
-                    + leapflow_managed_hint(resolved)
-                ),
-                "error_type": "outside_workspace",
-                "retryable": False,
-                "workspace_root": str(ctx.workspace_root),
-                "resolved_path": str(resolved),
-                "operand": token,
-                "session_id": ctx.session_id,
-            }
+            return resolved
     return None
 
 
@@ -313,23 +250,29 @@ async def shell_run(params: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": f"Working directory blocked by safety policy: {cwd}"}
 
     if cwd_path is not None:
-        scope_error = workspace_scope_error(cwd_path, operation="shell_run cwd")
-        if scope_error and not _is_bypass_active():
-            approved, _ = await _approve_workspace_escape(
-                command, str(cwd_path), scope_error
-            )
-            if not approved:
-                return scope_error
-
-    command_scope_error = _command_workspace_escape(str(command), cwd=cwd_path)
-    if command_scope_error and not _is_bypass_active():
-        approved, _ = await _approve_workspace_escape(
-            command, command_scope_error.get("resolved_path", ""), command_scope_error
+        scope_error = await require_workspace_access(
+            cwd_path,
+            operation="shell_run cwd",
+            effect="execute",
+            detail=command,
+            metadata={"command": command},
         )
-        if not approved:
-            return command_scope_error
+        if scope_error:
+            return scope_error
 
-    if _is_dangerous(command) and not _is_bypass_active():
+    escape_target = _command_workspace_escape_path(str(command), cwd=cwd_path)
+    if escape_target is not None:
+        scope_error = await require_workspace_access(
+            escape_target,
+            operation="shell_run command",
+            effect="execute",
+            detail=command,
+            metadata={"command": command},
+        )
+        if scope_error:
+            return scope_error
+
+    if _is_dangerous(command) and not is_approval_bypass_active():
         approved, message = await _approve_command(command, cwd)
         if not approved:
             return {"ok": False, "error": message}

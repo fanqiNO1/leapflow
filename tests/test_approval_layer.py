@@ -3,7 +3,6 @@ from __future__ import annotations
 import builtins
 from pathlib import Path
 import sys
-import time
 
 import pytest
 
@@ -121,16 +120,33 @@ async def test_orchestrator_reuses_turn_grant(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_prompt_approval_expired_request_denies(monkeypatch) -> None:
+async def test_prompt_approval_waits_without_a_deadline(monkeypatch) -> None:
+    """The prompt has no expiry, so a slow user is not auto-denied.
+
+    ``ApprovalRequest`` deliberately carries no ``expires_at``; the previous
+    design defaulted to Deny after 120s, refusing an action the user had not yet
+    seen. The answer is now awaited with no deadline wrapped around it.
+    """
     from leapflow.cli.approval_view import prompt_approval
     from leapflow.security.approval import ApprovalRequest
 
+    assert not hasattr(ApprovalRequest(category="c", detail="d"), "expires_at")
+
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    request = ApprovalRequest(
-        category="shell.command",
-        detail="echo hello",
-        expires_at=time.time() - 1,
-    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "allow_once")
+    request = ApprovalRequest(category="shell.command", detail="echo hello")
+
+    assert await prompt_approval(request) == ApprovalDecision.ALLOW_ONCE
+
+
+@pytest.mark.asyncio
+async def test_prompt_approval_denies_when_stdin_is_not_a_tty(monkeypatch) -> None:
+    """Without a human to ask, denying beats blocking forever."""
+    from leapflow.cli.approval_view import prompt_approval
+    from leapflow.security.approval import ApprovalRequest
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    request = ApprovalRequest(category="shell.command", detail="echo hello")
 
     assert await prompt_approval(request) == ApprovalDecision.DENY
 

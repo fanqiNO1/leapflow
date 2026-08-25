@@ -54,7 +54,7 @@ from prompt_toolkit.styles import Style as PTStyle
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import TextArea
 
-from leapflow.cli.tui_app.approval_modal import ApprovalModal, request_is_expired
+from leapflow.cli.tui_app.approval_modal import ApprovalModal
 from leapflow.cli.tui_app.command import TuiCommand, TuiCommandStatus, command_key
 from leapflow.cli.tui_app.input import build_completer
 from leapflow.cli.tui_app.paste import (
@@ -302,12 +302,14 @@ class LeapApp:
         self._invalidate()
 
     async def request_approval(self, request: ApprovalRequest) -> ApprovalDecision:
-        """Show a native TUI approval modal and return the selected decision."""
-        if request_is_expired(request):
-            return ApprovalDecision.DENY
+        """Show a native TUI approval modal and return the selected decision.
+
+        Waits for the user without a deadline. The modal stays up until it is
+        answered, the turn is cancelled, or the client goes away — stepping away
+        from the keyboard must not silently deny the action.
+        """
         if self._approval_modal is not None:
             return ApprovalDecision.DENY
-        from leapflow.cli.approval_view import remaining_seconds
 
         modal = ApprovalModal.create(request)
         self._approval_modal = modal
@@ -315,11 +317,7 @@ class LeapApp:
         self._clear_paste_state()
         self._invalidate()
         try:
-            timeout = remaining_seconds(request)
-            return await asyncio.wait_for(asyncio.shield(modal.future), timeout=timeout)
-        except asyncio.TimeoutError:
-            modal.deny()
-            return ApprovalDecision.DENY
+            return await asyncio.shield(modal.future)
         finally:
             if self._approval_modal is modal:
                 self._approval_modal = None

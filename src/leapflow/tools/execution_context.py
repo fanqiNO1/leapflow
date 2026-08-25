@@ -8,9 +8,12 @@ active turn's workspace and reject accidental cross-workspace absolute paths.
 from __future__ import annotations
 
 import contextvars
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -132,11 +135,13 @@ def leapflow_managed_hint(path: Path) -> str:
     return ""
 
 
-def workspace_scope_error(path: Path, *, operation: str) -> dict[str, Any] | None:
-    """Return a structured error when ``path`` escapes the active workspace.
+def workspace_scope_refusal(path: Path, *, operation: str) -> dict[str, Any] | None:
+    """Build the refusal for a path outside the workspace, or None if inside.
 
-    The workspace boundary is gated by the approval orchestrator: the caller
-    routes through _approve_workspace_escape when bypass is inactive.
+    Internal to this module's gate. Callers must use ``require_workspace_access``
+    instead: this function only *describes* a refusal, it never asks anyone, and
+    eleven of twelve call sites once returned it directly — telling the user
+    "Approval is required" while never opening a prompt.
     """
     ctx = current_tool_context()
     if ctx is None or is_within_allowed_roots(path, ctx):
@@ -157,3 +162,115 @@ def workspace_scope_error(path: Path, *, operation: str) -> dict[str, Any] | Non
         "resolved_path": str(path),
         "session_id": ctx.session_id,
     }
+
+
+def _active_orchestrator() -> Any:
+    """Return the approval orchestrator for this turn, if one is reachable.
+
+    The context carries it (the engine copies it in per turn). The module-level
+    shell gate is a lazy fallback for contexts built without one; the import is
+    deferred because ``shell_tools`` imports this module at load time.
+    """
+    ctx = current_tool_context()
+    orchestrator = getattr(ctx, "orchestrator", None) if ctx is not None else None
+    if orchestrator is not None:
+        return orchestrator
+    try:
+        from leapflow.tools.shell_tools import _approval_gate
+
+        return _approval_gate
+    except ImportError:  # pragma: no cover - defensive
+        return None
+
+
+def is_approval_bypass_active() -> bool:
+    """Return whether approval prompts are bypassed for this turn.
+
+    The single predicate every gate consults, so a bypass cannot mean "approved"
+    at one gate and "still ask" at the next. It covers both the config/env level
+    (``approval_bypass``) and the session level (the user picked "Allow ALL for
+    this session", which arms ``SessionAwareGate._bypass_all``).
+
+    The session flag is reached through ``_delegate`` as well as ``_gate``: the
+    in-process CLI installs a wrapper gate, and looking only at ``_gate`` would
+    miss the bypass in exactly that mode.
+    """
+    ctx = current_tool_context()
+    if ctx is None:
+        return False
+    if getattr(ctx, "approval_bypass", False):
+        return True
+    orchestrator = _active_orchestrator()
+    if orchestrator is None:
+        return False
+    gate = getattr(orchestrator, "_gate", None)
+    if gate is None:
+        delegate = getattr(orchestrator, "_delegate", None)
+        if delegate is not None:
+            gate = getattr(delegate, "_gate", None)
+    return bool(gate is not None and getattr(gate, "_bypass_all", False))
+
+
+async def require_workspace_access(
+    path: Path,
+    *,
+    operation: str,
+    effect: str = "read",
+    detail: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Gate access to *path*. Returns None when permitted, else a refusal dict.
+
+    The whole sequence lives here — boundary check, bypass, human approval,
+    refusal — because it used to be spelled out per call site and only the shell
+    path ever got it right. The other eleven returned the refusal directly, so
+    ``file_list``/``code_search`` refused in 39ms with a message claiming approval
+    was required, and ignored a session-wide "Allow ALL" that the shell honoured.
+
+    *effect* is the caller's real effect (``read`` / ``write`` / ``execute``); it
+    drives the risk tier, so a listing is not weighed like a write.
+
+    Fails closed: no orchestrator, a gate that cannot evaluate, or an exception
+    all refuse. A broken gate must not become an open door.
+    """
+    refusal = workspace_scope_refusal(path, operation=operation)
+    if refusal is None:
+        return None
+    if is_approval_bypass_active():
+        return None
+
+    orchestrator = _active_orchestrator()
+    evaluate = getattr(orchestrator, "evaluate", None)
+    if not callable(evaluate):
+        logger.debug(
+            "workspace escape refused for %s: no approval orchestrator in context", operation,
+        )
+        return refusal
+
+    from leapflow.security.actions import ActionDescriptor
+
+    action = ActionDescriptor.workspace_escape(
+        str(path),
+        operation=operation,
+        effect=effect,
+        detail=detail,
+        metadata={
+            "workspace_root": str(refusal.get("workspace_root", "")),
+            **(metadata or {}),
+        },
+    )
+    try:
+        result = await evaluate(action)
+    except Exception:  # noqa: BLE001 - a broken gate must not become an open door
+        logger.warning(
+            "workspace escape approval failed for %s; refusing", operation, exc_info=True,
+        )
+        return refusal
+    if getattr(result, "approved", False):
+        return None
+    denial = str(getattr(result, "denial_message", "") or "")
+    if denial:
+        # Surface the gate's own wording: it states that the user did not consent
+        # and must not be worked around, which a generic scope error does not.
+        return {**refusal, "error": denial}
+    return refusal

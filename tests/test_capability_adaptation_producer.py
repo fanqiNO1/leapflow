@@ -62,3 +62,40 @@ async def test_capability_adaptation_producer_marks_missing_dependencies_notable
 
     assert findings[0].severity is Severity.NOTABLE
     assert "unresolved dependencies" in findings[0].summary
+
+
+@pytest.mark.asyncio
+async def test_capability_adaptation_producer_exposes_closed_loop_metadata(tmp_path) -> None:
+    store = JsonCapabilityPlanStore(tmp_path / "plans.json")
+    store.add_record(
+        resolutions=[{"selected": {"candidate": {"tool_name": "json_pretty_loop"}}}],
+        plan={"plan_id": "plan-json", "executable": True, "steps": []},
+        record_id="loop-a:after_install",
+        phase="after_install",
+        mutation={"action": "install", "plugin_id": "json_loop"},
+        registry_version_before=2,
+        registry_version_after=4,
+        decision_delta={"changed": {"json.pretty": {"before": "", "after": "json_pretty_loop"}}},
+        observation_ids=["obs-1", "obs-2"],
+        proposal={"proposal_id": "prop-1", "status": "PROBATION"},
+        policy_decision={"action": "install", "autonomy_level": "trusted_autonomous"},
+    )
+    producer = CapabilityAdaptationProducer()
+    ctx = ProducerContext(
+        spec=WatchSpec(name="capability", domain="capability_adaptation", watch_id="watch-1"),
+        now=1.0,
+        services=SimpleNamespace(capability_plan_store=store),
+    )
+
+    findings = await producer.observe(ctx)
+
+    evidence = {item.label: item.value for item in findings[0].evidence}
+    assert evidence["loop_phase"] == "after_install"
+    assert evidence["mutation_action"] == "install"
+    assert evidence["registry_delta"] == "2->4"
+    assert "json.pretty" in evidence["selected_delta"]
+    assert evidence["observation_count"] == "2"
+    assert evidence["proposal_id"] == "prop-1"
+    assert evidence["proposal_status"] == "PROBATION"
+    assert evidence["policy_action"] == "install"
+    assert evidence["autonomy_level"] == "trusted_autonomous"

@@ -33,12 +33,22 @@ class CodeIntelPlugin:
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "Source file to analyze"},
-                        "operation": {"type": "string", "enum": ["symbols"], "description": "Analysis operation (default: symbols)"},
+                        "operation": {
+                            "type": "string",
+                            "enum": ["symbols"],
+                            "description": "Analysis operation (default: symbols)",
+                        },
                     },
                     "required": ["path"],
                 },
                 handler=code_intel,
-                x_leapflow={"category": "file", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+                x_leapflow={
+                    "category": "file",
+                    "risk_level": "read_only",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("code.symbols",),
             ),
             ToolMetadata(
                 name="repo_map",
@@ -50,11 +60,20 @@ class CodeIntelPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Repository root (default: current dir)"},
+                        "path": {
+                            "type": "string",
+                            "description": "Repository root (default: current dir)",
+                        },
                     },
                 },
                 handler=repo_map,
-                x_leapflow={"category": "file", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+                x_leapflow={
+                    "category": "file",
+                    "risk_level": "read_only",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("code.repo_map",),
             ),
         ]
 

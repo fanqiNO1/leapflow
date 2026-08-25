@@ -220,14 +220,14 @@ def test_sandbox_refusal_does_not_promise_approval(cfg_home) -> None:
         ToolExecutionContext,
         reset_tool_context,
         set_tool_context,
-        workspace_scope_error,
+        workspace_scope_refusal,
     )
 
     token = set_tool_context(
         ToolExecutionContext.from_strings(workspace_root=str(cfg_home.parent / "ws"))
     )
     try:
-        error = workspace_scope_error(cfg_home / "config" / "user.yaml", operation="file_read")
+        error = workspace_scope_refusal(cfg_home / "config" / "user.yaml", operation="file_read")
     finally:
         reset_tool_context(token)
 
@@ -241,7 +241,7 @@ def test_sandbox_refusal_redirects_config_paths_to_the_tools(cfg_home) -> None:
         ToolExecutionContext,
         reset_tool_context,
         set_tool_context,
-        workspace_scope_error,
+        workspace_scope_refusal,
     )
 
     build_layout(cfg_home).ensure(profile_id="default")
@@ -249,13 +249,13 @@ def test_sandbox_refusal_redirects_config_paths_to_the_tools(cfg_home) -> None:
         ToolExecutionContext.from_strings(workspace_root=str(cfg_home.parent / "ws"))
     )
     try:
-        config_error = workspace_scope_error(
+        config_error = workspace_scope_refusal(
             cfg_home / "config" / "user.yaml", operation="file_read"
         )
-        vault_error = workspace_scope_error(
+        vault_error = workspace_scope_refusal(
             cfg_home / "secrets" / "vault.key", operation="file_read"
         )
-        plain_error = workspace_scope_error(
+        plain_error = workspace_scope_refusal(
             cfg_home.parent / "unrelated" / "notes.txt", operation="file_read"
         )
     finally:

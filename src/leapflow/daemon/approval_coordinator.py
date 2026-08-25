@@ -8,16 +8,36 @@ import uuid
 from typing import Any
 
 from leapflow.daemon.protocol import StreamChunk
+from leapflow.daemon.turn_admission import parked_for_human_decision
 
 logger = logging.getLogger(__name__)
 
 
 class ApprovalCoordinator:
-    """Manages daemon approval lifecycle: pending queue, resolution, TTL cleanup."""
+    """Manages daemon approval lifecycle: pending queue, resolution, cleanup.
 
-    def __init__(self, ttl_s: float = 1800.0) -> None:
+    Pending approvals never expire on a timer. They are released by liveness,
+    not by age: the owning turn ends, its stream closes, the command finishes, or
+    the client's connection drops (a failed heartbeat write cancels the handler,
+    which runs those same release paths within one heartbeat interval).
+    """
+
+    def __init__(self) -> None:
         self._approval_pending: dict[str, dict[str, Any]] = {}
-        self._ttl_s = ttl_s
+        # request_ids that currently have an approval route installed. Registered
+        # by whoever sets the route ContextVar (engine turns and command.execute)
+        # and removed in the same finally, so it tracks live owners rather than
+        # elapsed time.
+        self._live_routes: set[str] = set()
+
+    def register_route(self, request_id: str) -> None:
+        """Mark *request_id* as owning a live approval route."""
+        if request_id:
+            self._live_routes.add(str(request_id))
+
+    def unregister_route(self, request_id: str) -> None:
+        """Drop *request_id* from the live route set."""
+        self._live_routes.discard(str(request_id))
 
     def install_gate(self, ctx: Any, service: Any) -> None:
         """Install the daemon-mode approval gate on ctx.
@@ -192,9 +212,20 @@ class ApprovalCoordinator:
             return None
 
     async def request_approval(self, request: Any, route: "tuple[asyncio.Queue[StreamChunk], str] | None") -> str:
-        """Block until approval decision; called from tool execution.
+        """Block until the human decides; called from tool execution.
 
         *route* is the per-turn (queue, request_id) tuple from the ContextVar.
+
+        There is no timeout. The wait ends only when the user answers, or when
+        the owning turn/stream/command ends and denies the request through
+        ``deny_for_request``/``deny_for_queue``. A deadline here used to auto-deny
+        whatever the user had stepped away from, so an action the user never saw
+        was refused on their behalf.
+
+        The turn's admission slot is handed back for the duration of the wait:
+        human think-time is unbounded, and holding one of N slots would let a few
+        unanswered prompts stop every other workspace from starting a turn and
+        block exclusive maintenance (config reload, daemon stop).
         """
         if route is None:
             return "deny"
@@ -217,14 +248,10 @@ class ApprovalCoordinator:
             event_type="approval_request",
             metadata={"approval": payload, "request_id": request_id},
         ))
-        timeout_s = 120.0
-        if getattr(request, "expires_at", None):
-            timeout_s = max(1.0, float(request.expires_at) - time.time())
         try:
-            result = await asyncio.wait_for(future, timeout=timeout_s)
+            async with parked_for_human_decision():
+                result = await future
             return str(result.get("decision") or "deny")
-        except TimeoutError:
-            return "deny"
         finally:
             self._approval_pending.pop(pending_id, None)
 
@@ -276,23 +303,28 @@ class ApprovalCoordinator:
                 future.set_result({"decision": "deny", "reason": reason})
             self._approval_pending.pop(pending_id, None)
 
-    def prune_stale(self, ttl_s: float | None = None) -> int:
-        """Remove approvals older than TTL. Returns count removed."""
-        if ttl_s is None:
-            ttl_s = self._ttl_s
-        now = time.time()
+    def prune_orphaned(self) -> int:
+        """Release pendings whose owning turn/command is gone. Returns count.
+
+        A backstop for the release paths, keyed on liveness rather than age: a
+        pending is dropped only when its ``request_id`` no longer has a live
+        route. Deliberately conservative — a pending with no request_id is left
+        alone, because guessing here would auto-deny a prompt the user is still
+        looking at, which is exactly the behaviour this design removes.
+        """
         pruned = 0
         for pending_id, pending in list(self._approval_pending.items()):
-            created_at = pending.get("created_at", now)
-            if (now - created_at) < ttl_s:
+            payload = pending.get("request") or {}
+            request_id = str(payload.get("request_id") or "")
+            if not request_id or request_id in self._live_routes:
                 continue
             future = pending.get("future")
             if isinstance(future, asyncio.Future) and not future.done():
-                future.set_result({"decision": "deny", "reason": "timeout"})
+                future.set_result({"decision": "deny", "reason": "owner_gone"})
             self._approval_pending.pop(pending_id, None)
             pruned += 1
         if pruned:
-            logger.info("daemon: pruned %d stale approval(s)", pruned)
+            logger.info("daemon: released %d approval(s) whose owner is gone", pruned)
         return pruned
 
     def _pending_payloads(self) -> list[dict[str, Any]]:

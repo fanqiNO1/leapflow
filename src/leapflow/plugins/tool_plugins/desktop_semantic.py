@@ -233,7 +233,9 @@ def build_semantic_tool_entries(adapter: Any) -> List[SemanticToolEntry]:
         SemanticToolEntry(
             name="shortcut",
             description="Execute a keyboard shortcut",
-            parameters={"keys": "string (required) — shortcut keys, e.g. 'cmd+c', 'cmd+v', 'enter', 'cmd+t'"},
+            parameters={
+                "keys": "string (required) — shortcut keys, e.g. 'cmd+c', 'cmd+v', 'enter', 'cmd+t'"
+            },
             handler=adapter.shortcut,
             mutates_state=True,
         ),
@@ -342,14 +344,18 @@ def build_semantic_tool_entries(adapter: Any) -> List[SemanticToolEntry]:
         SemanticToolEntry(
             name="select_text",
             description="Select all text in a UI element (focus + select-all, for subsequent copy)",
-            parameters={"element_index": "int (required) — element containing text, from observe_ui"},
+            parameters={
+                "element_index": "int (required) — element containing text, from observe_ui"
+            },
             handler=adapter.select_text,
             mutates_state=True,
         ),
         SemanticToolEntry(
             name="right_click",
             description="Right-click a UI element to open its context menu. Returns visible menu items.",
-            parameters={"element_index": "int (required) — element to right-click, from observe_ui"},
+            parameters={
+                "element_index": "int (required) — element to right-click, from observe_ui"
+            },
             handler=adapter.right_click,
             mutates_state=True,
             describer=adapter.describe_element,

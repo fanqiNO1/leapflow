@@ -31,13 +31,29 @@ class DevToolsPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "command": {"type": "string", "description": "Explicit test command (optional; overrides auto-detect)"},
-                        "cwd": {"type": "string", "description": "Working directory (default: current dir)"},
-                        "timeout": {"type": "number", "description": "Timeout seconds (default 120, max 120)"},
+                        "command": {
+                            "type": "string",
+                            "description": "Explicit test command (optional; overrides auto-detect)",
+                        },
+                        "cwd": {
+                            "type": "string",
+                            "description": "Working directory (default: current dir)",
+                        },
+                        "timeout": {
+                            "type": "number",
+                            "description": "Timeout seconds (default 120, max 120)",
+                        },
                     },
                 },
                 handler=test_run,
-                x_leapflow={"category": "dev", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+                x_leapflow={
+                    "category": "dev",
+                    "risk_level": "read_only",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("dev.test",),
+                requires_platform_capabilities=("shell.exec",),
             ),
             ToolMetadata(
                 name="lint_check",
@@ -49,13 +65,29 @@ class DevToolsPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "command": {"type": "string", "description": "Explicit lint command (optional; overrides auto-detect)"},
-                        "cwd": {"type": "string", "description": "Working directory (default: current dir)"},
-                        "timeout": {"type": "number", "description": "Timeout seconds (default 120, max 120)"},
+                        "command": {
+                            "type": "string",
+                            "description": "Explicit lint command (optional; overrides auto-detect)",
+                        },
+                        "cwd": {
+                            "type": "string",
+                            "description": "Working directory (default: current dir)",
+                        },
+                        "timeout": {
+                            "type": "number",
+                            "description": "Timeout seconds (default 120, max 120)",
+                        },
                     },
                 },
                 handler=lint_check,
-                x_leapflow={"category": "dev", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+                x_leapflow={
+                    "category": "dev",
+                    "risk_level": "read_only",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("dev.lint",),
+                requires_platform_capabilities=("shell.exec",),
             ),
         ]
 

@@ -43,13 +43,29 @@ class FileOpsPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Directory path (default: current dir)"},
-                        "pattern": {"type": "string", "description": "Glob pattern for flat listing (default: *; ignored when depth > 0)"},
-                        "depth": {"type": "integer", "description": "Recursion depth: 0 = flat one-level listing (default), 1-5 = recursive tree skipping VCS/deps dirs"},
+                        "path": {
+                            "type": "string",
+                            "description": "Directory path (default: current dir)",
+                        },
+                        "pattern": {
+                            "type": "string",
+                            "description": "Glob pattern for flat listing (default: *; ignored when depth > 0)",
+                        },
+                        "depth": {
+                            "type": "integer",
+                            "description": "Recursion depth: 0 = flat one-level listing (default), 1-5 = recursive tree skipping VCS/deps dirs",
+                        },
                     },
                 },
                 handler=file_list,
-                x_leapflow={"category": "file", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+                x_leapflow={
+                    "category": "file",
+                    "risk_level": "read_only",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("file.list",),
+                requires_platform_capabilities=("file.ops",),
             ),
             ToolMetadata(
                 name="file_read",
@@ -64,9 +80,18 @@ class FileOpsPlugin:
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "File path to read"},
-                        "max_lines": {"type": "integer", "description": "Max lines to return (default: 200)"},
-                        "start_line": {"type": "integer", "description": "1-based line to start reading from (default: 1)"},
-                        "max_chars": {"type": "integer", "description": "Max characters to read before line filtering (default bounded by runtime guard)"},
+                        "max_lines": {
+                            "type": "integer",
+                            "description": "Max lines to return (default: 200)",
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "1-based line to start reading from (default: 1)",
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "description": "Max characters to read before line filtering (default bounded by runtime guard)",
+                        },
                         "mode": {
                             "type": "string",
                             "enum": ["raw", "outline", "symbols"],
@@ -76,7 +101,14 @@ class FileOpsPlugin:
                     "required": ["path"],
                 },
                 handler=file_read,
-                x_leapflow={"category": "file", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+                x_leapflow={
+                    "category": "file",
+                    "risk_level": "read_only",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("file.read",),
+                requires_platform_capabilities=("file.ops",),
             ),
             ToolMetadata(
                 name="file_write",
@@ -86,13 +118,24 @@ class FileOpsPlugin:
                     "properties": {
                         "path": {"type": "string", "description": "Target file path"},
                         "content": {"type": "string", "description": "Content to write"},
-                        "mode": {"type": "string", "enum": ["overwrite", "append"], "description": "Write mode (default: overwrite)"},
+                        "mode": {
+                            "type": "string",
+                            "enum": ["overwrite", "append"],
+                            "description": "Write mode (default: overwrite)",
+                        },
                     },
                     "required": ["path", "content"],
                 },
                 handler=file_write,
-                x_leapflow={"category": "write", "risk_level": "mutating", "schema_cost": "low", "requires_approval": True},
+                x_leapflow={
+                    "category": "write",
+                    "risk_level": "mutating",
+                    "schema_cost": "low",
+                    "requires_approval": True,
+                },
                 mutates_state=True,
+                provides_capabilities=("file.write",),
+                requires_platform_capabilities=("file.ops",),
             ),
             ToolMetadata(
                 name="code_search",
@@ -108,23 +151,51 @@ class FileOpsPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "pattern": {"type": "string", "description": "Regex pattern to search for (REQUIRED \u2014 this tool searches file contents, not file names)"},
+                        "pattern": {
+                            "type": "string",
+                            "description": "Regex pattern to search for (REQUIRED \u2014 this tool searches file contents, not file names)",
+                        },
                         "patterns": {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Additional regex patterns OR-combined with pattern into one search pass",
                         },
-                        "path": {"type": "string", "description": "Base directory (default: current dir)"},
-                        "glob": {"type": "string", "description": "Filter files by glob, e.g. *.py"},
-                        "ignore_case": {"type": "boolean", "description": "Case-insensitive match (default: false)"},
-                        "multiline": {"type": "boolean", "description": "Let . span newlines / match across lines (default: false)"},
-                        "max_results": {"type": "integer", "description": "Max matches to return (default: 200)"},
-                        "context_lines": {"type": "integer", "description": "Lines of context before/after each match (default: 0, max 10)"},
+                        "path": {
+                            "type": "string",
+                            "description": "Base directory (default: current dir)",
+                        },
+                        "glob": {
+                            "type": "string",
+                            "description": "Filter files by glob, e.g. *.py",
+                        },
+                        "ignore_case": {
+                            "type": "boolean",
+                            "description": "Case-insensitive match (default: false)",
+                        },
+                        "multiline": {
+                            "type": "boolean",
+                            "description": "Let . span newlines / match across lines (default: false)",
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Max matches to return (default: 200)",
+                        },
+                        "context_lines": {
+                            "type": "integer",
+                            "description": "Lines of context before/after each match (default: 0, max 10)",
+                        },
                     },
                     "required": [],
                 },
                 handler=code_search,
-                x_leapflow={"category": "file", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+                x_leapflow={
+                    "category": "file",
+                    "risk_level": "read_only",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("file.search",),
+                requires_platform_capabilities=("file.ops",),
             ),
             ToolMetadata(
                 name="file_find",
@@ -135,14 +206,30 @@ class FileOpsPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "glob": {"type": "string", "description": "Glob pattern, recursive (e.g. *.py, **/conftest.py)"},
-                        "path": {"type": "string", "description": "Base directory (default: current dir)"},
-                        "max_results": {"type": "integer", "description": "Max files to return (default: 500)"},
+                        "glob": {
+                            "type": "string",
+                            "description": "Glob pattern, recursive (e.g. *.py, **/conftest.py)",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Base directory (default: current dir)",
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Max files to return (default: 500)",
+                        },
                     },
                     "required": ["glob"],
                 },
                 handler=file_find,
-                x_leapflow={"category": "file", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+                x_leapflow={
+                    "category": "file",
+                    "risk_level": "read_only",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("file.find",),
+                requires_platform_capabilities=("file.ops",),
             ),
             ToolMetadata(
                 name="edit_file",
@@ -164,21 +251,43 @@ class FileOpsPlugin:
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "original_text": {"type": "string", "description": "Exact text to replace (unique unless replace_all)"},
-                                    "new_text": {"type": "string", "description": "Replacement text"},
-                                    "replace_all": {"type": "boolean", "description": "Replace every occurrence (default: false)"},
+                                    "original_text": {
+                                        "type": "string",
+                                        "description": "Exact text to replace (unique unless replace_all)",
+                                    },
+                                    "new_text": {
+                                        "type": "string",
+                                        "description": "Replacement text",
+                                    },
+                                    "replace_all": {
+                                        "type": "boolean",
+                                        "description": "Replace every occurrence (default: false)",
+                                    },
                                 },
                                 "required": ["original_text", "new_text"],
                             },
                         },
-                        "dry_run": {"type": "boolean", "description": "Preview without writing (default: false)"},
-                        "diff": {"type": "string", "description": "Unified diff to apply (alternative to edits; each hunk applied as an anchored edit)"},
+                        "dry_run": {
+                            "type": "boolean",
+                            "description": "Preview without writing (default: false)",
+                        },
+                        "diff": {
+                            "type": "string",
+                            "description": "Unified diff to apply (alternative to edits; each hunk applied as an anchored edit)",
+                        },
                     },
                     "required": ["path"],
                 },
                 handler=edit_file,
-                x_leapflow={"category": "write", "risk_level": "mutating", "schema_cost": "medium", "requires_approval": True},
+                x_leapflow={
+                    "category": "write",
+                    "risk_level": "mutating",
+                    "schema_cost": "medium",
+                    "requires_approval": True,
+                },
                 mutates_state=True,
+                provides_capabilities=("file.edit",),
+                requires_platform_capabilities=("file.ops",),
             ),
         ]
 

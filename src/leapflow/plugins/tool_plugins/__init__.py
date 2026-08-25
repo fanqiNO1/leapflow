@@ -132,9 +132,7 @@ def _discover_all() -> "list[ToolPlugin]":
 
         plugin = getattr(module, "plugin", None)
         if plugin is None:
-            logger.warning(
-                "Plugin module %s does not define a 'plugin' variable", module_path
-            )
+            logger.warning("Plugin module %s does not define a 'plugin' variable", module_path)
             continue
         if plugin.plugin_id in disabled:
             logger.info("Skipping disabled plugin: %s", plugin.plugin_id)

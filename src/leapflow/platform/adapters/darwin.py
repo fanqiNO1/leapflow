@@ -232,7 +232,7 @@ class DarwinExecutionAdapter:
         window_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         # The driver's keystroke scroll path requires pid even without an
-        # element target (verified on 0.19.3 despite the doc marking it
+        # element target (observed behaviour, despite the schema marking it
         # optional) — it must know which process receives the keystrokes.
         params: Dict[str, Any] = {"direction": direction, "amount": amount}
         if node_id:

@@ -380,6 +380,21 @@ class ProfileLayout:
         return self.root / "plugins" / "proposals.json"
 
     @property
+    def capability_observations_path(self) -> Path:
+        # Profile-scoped durable observation backlog for structured capability gaps.
+        return self.root / "plugins" / "capability_observations.json"
+
+    @property
+    def capability_proposal_queue_path(self) -> Path:
+        # Profile-scoped adaptive proposal queue derived from capability observations.
+        return self.root / "plugins" / "proposal_queue.json"
+
+    @property
+    def plugin_outcomes_path(self) -> Path:
+        # Profile-scoped execution outcome audit for adaptive plugin lifecycle governance.
+        return self.root / "plugins" / "outcomes.json"
+
+    @property
     def capability_plans_path(self) -> Path:
         # Profile-scoped adaptive capability decision history: requirements,
         # candidate scores, selected tools, and declarative plans.

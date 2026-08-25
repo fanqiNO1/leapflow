@@ -25,12 +25,14 @@ class SystemInfoPlugin:
                 description="Get current date and time.",
                 parameters_schema={"type": "object", "properties": {}},
                 handler=time_get,
+                provides_capabilities=("system.time",),
             ),
             ToolMetadata(
                 name="env_info",
                 description="Get system environment information (OS, Python version, cwd).",
                 parameters_schema={"type": "object", "properties": {}},
                 handler=env_info,
+                provides_capabilities=("system.info",),
             ),
         ]
 

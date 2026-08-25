@@ -579,7 +579,7 @@ def _file_delete(params: Dict[str, Any]) -> Dict[str, Any]:
 def _launch_app_key(app: str) -> str:
     """Pick the launch_app schema field for an app identifier.
 
-    cua-driver 0.19.3 launch_app accepts ``bundle_id`` (preferred) or
+    cua-driver launch_app accepts ``bundle_id`` (preferred) or
     ``name`` only. AUMIDs (``!``) and reverse-DNS identifiers (at least
     two dots, no path separators or spaces) are bundle ids; everything
     else — display names and executable paths — goes through ``name``.
@@ -627,7 +627,7 @@ def _element_target_args(params: Dict[str, Any]) -> Dict[str, Any]:
     ``element_token`` is preferred (it carries pid/window/snapshot); an
     int-like ``node_id`` is treated as an ``element_index``, anything else
     as a token. Pixel coordinates land as separate ``x``/``y`` fields —
-    0.19.3 has no ``coordinates`` parameter.
+    the click schema has no ``coordinates`` parameter.
     """
     args: Dict[str, Any] = {}
 
@@ -993,16 +993,27 @@ class CuaDriverClient(HostRpc):
             return tool, args
 
         elif method == Methods.SCREEN_CAPTURE_FRAME:
-            # 0.19.3 has no standalone screenshot tool: full-display capture
-            # is get_desktop_state; window capture rides on get_window_state.
-            args = {}
+            # Capture is window-scoped on cua-driver: get_window_state writes the
+            # PNG for a (pid, window_id) pair via screenshot_out_file. The driver
+            # exposes no full-display capture tool, so a targetless request is
+            # refused with the same contract as ax.tree instead of being mapped
+            # onto a tool that does not exist -- the earlier mapping pointed at
+            # get_desktop_state, which only existed in an older driver line and
+            # came back as "Unknown tool" at runtime.
+            if "pid" not in params or "window_id" not in params:
+                raise RpcError(
+                    "invalid_params",
+                    "screen.capture_frame requires pid and window_id (discover "
+                    "them via ax.list); cua-driver has no full-display capture",
+                    {"provided": sorted(params.keys())},
+                )
+            args = {
+                "pid": params["pid"],
+                "window_id": params["window_id"],
+            }
             if "screenshot_out_file" in params:
                 args["screenshot_out_file"] = params["screenshot_out_file"]
-            if "pid" in params and "window_id" in params:
-                args["pid"] = params["pid"]
-                args["window_id"] = params["window_id"]
-                return "get_window_state", args
-            return "get_desktop_state", args
+            return "get_window_state", args
 
         elif method == Methods.RECORDING_START:
             args: Dict[str, Any] = {}

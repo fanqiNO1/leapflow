@@ -80,9 +80,9 @@ class RuntimeLeapService:
         self._build_staleness = StalenessMonitor(self._build_info)
         self._client_count: Callable[[], int] = lambda: 0
         self._client_leases: Callable[[], list[ClientLeaseSnapshot]] = lambda: []
-        self._approval_coordinator = ApprovalCoordinator(
-            ttl_s=float(getattr(settings, "daemon_approval_ttl_s", 1800.0) or 1800.0)
-        )
+        # Pending approvals have no TTL: they are released when their owning
+        # turn/command ends, not after an elapsed deadline.
+        self._approval_coordinator = ApprovalCoordinator()
         self._active_engine_request_id: str = ""
         self._active_engines: dict[str, Any] = {}
         self._observation: Any | None = None
@@ -398,6 +398,7 @@ class RuntimeLeapService:
                 approval_queue: asyncio.Queue[StreamChunk] = asyncio.Queue()
                 previous_request_id = self._active_engine_request_id
                 route_token = _approval_route.set((approval_queue, request_id))
+                self._approval_coordinator.register_route(request_id)
                 self._active_engine_request_id = request_id
                 self._active_engines[request_id] = engine
                 try:
@@ -416,6 +417,7 @@ class RuntimeLeapService:
                     self._prune_engine_request_ledger()
                 finally:
                     _approval_route.reset(route_token)
+                    self._approval_coordinator.unregister_route(request_id)
                     self._active_engine_request_id = previous_request_id
                     self._active_engines.pop(request_id, None)
                     self._approval_coordinator.deny_for_request(request_id, reason="turn_ended")
@@ -656,9 +658,13 @@ class RuntimeLeapService:
         """Backward-compat delegate (used by tests)."""
         self._approval_coordinator.deny_for_request(request_id, reason)
 
-    def _prune_stale_approvals(self, ttl_s: float | None = None) -> int:
-        """Backward-compat delegate (used by tests)."""
-        return self._approval_coordinator.prune_stale(ttl_s)
+    def _release_orphaned_approvals(self) -> int:
+        """Release pendings whose owning turn/command is gone (used by tests).
+
+        Named for what it does: pending approvals have no TTL, so this is a
+        liveness sweep, not a staleness sweep.
+        """
+        return self._approval_coordinator.prune_orphaned()
 
     # ── Delegate: host backend ───────────────────────────────────────
 
@@ -816,7 +822,7 @@ class RuntimeLeapService:
         profile_layout = settings.profile_layout
         workspace_root = Path(str(getattr(settings, "workspace_root", os.getcwd())))
         context_metadata = engine_context_metadata(engine, settings)
-        self._approval_coordinator.prune_stale()
+        self._approval_coordinator.prune_orphaned()
         clients = await asyncio.to_thread(self._safe_client_lease_summaries)
         host = await asyncio.to_thread(host_backend_status, ctx)
         # Non-blocking: returns the last cached verdict (None on the very

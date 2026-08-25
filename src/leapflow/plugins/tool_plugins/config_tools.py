@@ -42,12 +42,24 @@ class ConfigToolsPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "category": {"type": "string", "description": "Optional category filter, e.g. 'LLM Provider' or 'Runtime'"},
-                        "limit": {"type": "integer", "description": "Max fields to return (default 60)"},
+                        "category": {
+                            "type": "string",
+                            "description": "Optional category filter, e.g. 'LLM Provider' or 'Runtime'",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max fields to return (default 60)",
+                        },
                     },
                 },
                 handler=config_list_handler,
-                x_leapflow={"category": "config", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+                x_leapflow={
+                    "category": "config",
+                    "risk_level": "read_only",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("config.list",),
             ),
             ToolMetadata(
                 name="config_get",
@@ -59,12 +71,21 @@ class ConfigToolsPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "key": {"type": "string", "description": "Dot-separated config key, e.g. 'llm.model'"},
+                        "key": {
+                            "type": "string",
+                            "description": "Dot-separated config key, e.g. 'llm.model'",
+                        },
                     },
                     "required": ["key"],
                 },
                 handler=config_get_handler,
-                x_leapflow={"category": "config", "risk_level": "read_only", "schema_cost": "low", "requires_approval": False},
+                x_leapflow={
+                    "category": "config",
+                    "risk_level": "read_only",
+                    "schema_cost": "low",
+                    "requires_approval": False,
+                },
+                provides_capabilities=("config.get",),
             ),
             ToolMetadata(
                 name="config_set",
@@ -78,9 +99,16 @@ class ConfigToolsPlugin:
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "key": {"type": "string", "description": "Dot-separated config key, e.g. 'llm.model'"},
+                        "key": {
+                            "type": "string",
+                            "description": "Dot-separated config key, e.g. 'llm.model'",
+                        },
                         "value": {"description": "New value; coerced to the field's declared type"},
-                        "scope": {"type": "string", "enum": ["profile", "workspace"], "description": "Where to persist (default: profile)"},
+                        "scope": {
+                            "type": "string",
+                            "enum": ["profile", "workspace"],
+                            "description": "Where to persist (default: profile)",
+                        },
                     },
                     "required": ["key", "value"],
                 },
@@ -94,6 +122,8 @@ class ConfigToolsPlugin:
                     "idempotency_scope": "turn",
                 },
                 mutates_state=True,
+                provides_capabilities=("config.set",),
+                requires_platform_capabilities=("file.ops",),
             ),
         ]
 
@@ -106,6 +136,7 @@ class ConfigToolsPlugin:
             self._approval_gate = deps["config_approval_gate"]
             # Propagate to the module-level gate used by config_set_handler
             from leapflow.tools.config_tools import set_config_approval_gate
+
             set_config_approval_gate(deps["config_approval_gate"])
 
 

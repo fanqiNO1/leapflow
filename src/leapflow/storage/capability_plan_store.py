@@ -33,6 +33,17 @@ class JsonCapabilityPlanStore:
         plan: Mapping[str, Any] | None = None,
         source: str = "runtime",
         record_id: str = "",
+        phase: str = "",
+        loop_id: str = "",
+        mutation: Mapping[str, Any] | None = None,
+        registry_version_before: int = 0,
+        registry_version_after: int = 0,
+        decision_delta: Mapping[str, Any] | None = None,
+        observation_ids: list[str] | None = None,
+        proposal: Mapping[str, Any] | None = None,
+        policy_decision: Mapping[str, Any] | None = None,
+        governance_results: list[Mapping[str, Any]] | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Append a decision record and return the stored payload."""
         record = {
@@ -44,6 +55,27 @@ class JsonCapabilityPlanStore:
             "resolutions": [dict(r) for r in (resolutions or [])],
             "plan": dict(plan or {}),
         }
+        if phase:
+            record["phase"] = str(phase)
+        if loop_id:
+            record["loop_id"] = str(loop_id)
+        if mutation:
+            record["mutation"] = dict(mutation)
+        if registry_version_before or registry_version_after:
+            record["registry_version_before"] = int(registry_version_before)
+            record["registry_version_after"] = int(registry_version_after)
+        if decision_delta:
+            record["decision_delta"] = dict(decision_delta)
+        if observation_ids:
+            record["observation_ids"] = [str(item) for item in observation_ids]
+        if proposal:
+            record["proposal"] = dict(proposal)
+        if policy_decision:
+            record["policy_decision"] = dict(policy_decision)
+        if governance_results:
+            record["governance_results"] = [dict(item) for item in governance_results]
+        if metadata:
+            record["metadata"] = dict(metadata)
         payload = self._load_payload()
         payload.setdefault("records", []).append(record)
         self._write_payload(payload)

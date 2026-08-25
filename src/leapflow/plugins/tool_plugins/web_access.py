@@ -44,8 +44,14 @@ class WebAccessPlugin:
                                 "allowed, e.g. 'chart.result.0.meta.regularMarketPrice'"
                             ),
                         },
-                        "timeout": {"type": "number", "description": "Timeout in seconds (default from config)"},
-                        "max_bytes": {"type": "integer", "description": "Response size cap in bytes"},
+                        "timeout": {
+                            "type": "number",
+                            "description": "Timeout in seconds (default from config)",
+                        },
+                        "max_bytes": {
+                            "type": "integer",
+                            "description": "Response size cap in bytes",
+                        },
                     },
                     "required": ["url"],
                 },
@@ -58,6 +64,7 @@ class WebAccessPlugin:
                     "mutates_state": False,
                     "idempotency_scope": "turn",
                 },
+                provides_capabilities=("network.http_get",),
             ),
         ]
 
