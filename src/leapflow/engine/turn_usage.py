@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +120,7 @@ class TurnUsageTracker:
         self._compression_applied: bool = False
         self._provider_name: str = ""
         self._model: str = ""
+        self._plugin_stats_sink: Optional[Any] = None
 
     def record_api_call(
         self,
@@ -140,11 +141,17 @@ class TurnUsageTracker:
         if model:
             self._model = model
 
+    def set_plugin_stats_sink(self, sink: Any) -> None:
+        """Install a cross-turn stats accumulator. Receives all record_tool_call data."""
+        self._plugin_stats_sink = sink
+
     def record_tool_call(
         self, name: str, success: bool, duration_ms: float
     ) -> None:
         """Record a single tool execution."""
         self._tool_records.append(_ToolCallRecord(name, success, duration_ms))
+        if self._plugin_stats_sink is not None:
+            self._plugin_stats_sink.record(name, success, duration_ms)
 
     def mark_compression(self) -> None:
         self._compression_applied = True

@@ -185,13 +185,12 @@ def _make_tool_use_skill_fn(
     perception: Any = None,
 ) -> SkillFn:
     """Create a SkillFn backed by ReAct tool-use execution."""
-    from leapflow.skills.bridge_factory import build_tool_bridge
-    from leapflow.skills.tool_executor import ToolUseSkillExecutor
+    from leapflow.skills.tool_executor import ToolUseSkillExecutor, build_execution_toolset
 
-    bridge = build_tool_bridge(execution, perception)
+    toolset = build_execution_toolset(execution, perception)
     executor = ToolUseSkillExecutor(
         llm=llm,
-        bridge=bridge,
+        toolset=toolset,
         skill_content=skill_content,
         instructions=list(doc.instructions),
         bundle_context=bundle_context,

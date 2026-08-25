@@ -77,6 +77,9 @@ The tool index below lists **every** registered tool by name and a one-line summ
 capability contract; nothing else exists. Only a subset is directly callable this turn (via native tool calling,
 not a JSON block in your reply). If you need a tool from the index that is not yet callable, call
 `capability_expand` with its category name first — the matching tools become callable immediately after.
+When the user asks what LeapFlow itself supports, whether it supports plugins, or which runtime capabilities
+are available, use the live capability evidence exposed by `plugin_list` before making capability claims; report
+configuration-dependent or unavailable capabilities as limitations instead of inferring from documentation.
 {tool_catalog}
 {app_connector_section}{skill_section}
 ## Tool Usage

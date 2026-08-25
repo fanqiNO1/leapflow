@@ -212,3 +212,22 @@ class FeishuAdapter(AdapterLifecycle):
         if not validation.ok:
             return ActionResult(ok=False, error=validation.error)
         return await self._backend.execute(spec, payload)
+
+
+# ── Plugin registration ───────────────────────────────────────
+
+from leapflow.gateway.adapter_registry import BuiltinAdapterPlugin  # noqa: E402
+
+plugin = BuiltinAdapterPlugin(
+    _platform_id="feishu",
+    _display_name="飞书 (Feishu/Lark)",
+    _adapter_module="leapflow.gateway.adapters.feishu",
+    _adapter_class="FeishuAdapter",
+    _config_schema={
+        "profile": {"type": "string", "default": ""},
+        "identity": {"type": "string", "enum": ["bot", "user"], "default": "bot"},
+        "binary": {"type": "string", "default": "lark-cli"},
+        "max_message_length": {"type": "integer", "default": 8000},
+        "events_enabled": {"type": "boolean", "default": False},
+    },
+)

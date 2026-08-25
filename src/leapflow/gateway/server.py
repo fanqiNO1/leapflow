@@ -24,6 +24,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from leapflow.gateway.adapter_registry import GatewayAdapterRegistry
 from leapflow.gateway.capability_health import CapabilityHealthLedger
 from leapflow.gateway.checkpoint_store import CheckpointStore, DeduplicationStore
 from leapflow.gateway.resource_provenance import ResourceProvenancePool
@@ -175,6 +176,7 @@ class GatewayServer:
         on_event: Optional[EventCallback] = None,
         checkpoint_store: Optional[CheckpointStore] = None,
         dedup_store: Optional[DeduplicationStore] = None,
+        adapter_registry: Optional[GatewayAdapterRegistry] = None,
     ) -> None:
         if hasattr(profile_layout, "gateway") and hasattr(profile_layout, "secrets"):
             active_layout = profile_layout
@@ -205,6 +207,22 @@ class GatewayServer:
         self._started = False
         self._capability_health = CapabilityHealthLedger()
         self._resource_provenance = ResourceProvenancePool()
+
+        # Adapter plugin registry — auto-discover built-in plugins
+        if adapter_registry is not None:
+            self._adapter_registry = adapter_registry
+        else:
+            self._adapter_registry = GatewayAdapterRegistry()
+            self._adapter_registry.discover_builtin()
+
+        # Wrap every adapter under a PluginFiber so the gateway subsystem is
+        # uniformly under fiber lifecycle management. Adoption is additive
+        # tracking only — it does not re-register adapters.
+        from leapflow.gateway.scoped_adapter_registry import ScopedGatewayAdapterRegistry
+        self._scoped_adapter_registry = ScopedGatewayAdapterRegistry(
+            self._adapter_registry
+        )
+        self._scoped_adapter_registry.adopt_existing_plugins()
 
     # ── Manifest discovery ───────────────────────────────────
 
@@ -289,9 +307,14 @@ class GatewayServer:
 
         if manifest.adapter:
             try:
-                adapter = self._instantiate_adapter(
-                    manifest, credentials, options or {},
+                # Prefer registry-based instantiation; fall back to manifest path
+                adapter = self._instantiate_adapter_via_registry(
+                    platform_id, credentials, options or {},
                 )
+                if adapter is None:
+                    adapter = self._instantiate_adapter(
+                        manifest, credentials, options or {},
+                    )
                 await adapter.connect(is_reconnect=is_reconnect)
                 self._adapters[platform_id] = adapter
                 self._connected_since[platform_id] = time.time()
@@ -998,6 +1021,21 @@ class GatewayServer:
 
     # ── Internal ─────────────────────────────────────────────
 
+    def _instantiate_adapter_via_registry(
+        self,
+        platform_id: str,
+        credentials: Dict[str, str],
+        options: Dict[str, Any],
+    ) -> Optional[PlatformAdapter]:
+        """Try to instantiate via the adapter plugin registry.
+
+        Returns None if no plugin is registered (falls back to manifest path).
+        """
+        if not self._adapter_registry.has_plugin(platform_id):
+            return None
+        config = {**credentials, **options}
+        return self._adapter_registry.create_adapter(platform_id, config)
+
     @staticmethod
     def _instantiate_adapter(
         manifest: PlatformManifest,
@@ -1028,3 +1066,13 @@ class GatewayServer:
             raise
         cls = getattr(module, manifest.adapter.class_name)
         return cls(**credentials, **options)
+
+    @property
+    def adapter_registry(self) -> GatewayAdapterRegistry:
+        """Expose the adapter registry for external introspection."""
+        return self._adapter_registry
+
+    @property
+    def scoped_adapter_registry(self) -> "Any":
+        """Expose the scoped adapter registry for lifecycle introspection."""
+        return self._scoped_adapter_registry

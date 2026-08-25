@@ -39,7 +39,7 @@ class MonitorCoordinator:
         if not getattr(settings, "scheduler_enabled", True):
             return
         try:
-            from leapflow.monitor import MonitorManager, SessionAnalysisProducer
+            from leapflow.monitor import CapabilityAdaptationProducer, MonitorManager, SessionAnalysisProducer
             from leapflow.monitor.signal_producer import SignalObservationProducer
 
             bus = notification_bus
@@ -52,6 +52,7 @@ class MonitorCoordinator:
             )
             self._monitors.producers.register(SessionAnalysisProducer())
             self._monitors.producers.register(SignalObservationProducer())
+            self._monitors.producers.register(CapabilityAdaptationProducer())
             setattr(ctx, "monitors", self._monitors)
             await self._monitors.start()
 

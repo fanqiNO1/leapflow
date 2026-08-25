@@ -4,7 +4,7 @@ Validates Phase 0.1/0.2 fixes:
 - EpisodicMemoryProvider & SemanticMemoryProvider honour session_scope on search
 - MemoryManager.prefetch() transparently passes session_scope
 - _deny_pending_for_request() cleans orphaned approvals on turn end
-- _prune_stale_approvals() enforces TTL-based cleanup
+- _release_orphaned_approvals() releases pendings by liveness, never by age
 - No accumulation across multiple turns
 """
 from __future__ import annotations
@@ -159,7 +159,6 @@ def _make_service_stub() -> Any:
     settings.daemon_max_concurrent_turns = 1
     settings.daemon_request_ledger_ttl_s = 600.0
     settings.daemon_request_ledger_max_entries = 128
-    settings.daemon_approval_ttl_s = 1800.0
     settings.profile_dir = Path("/tmp/fake-profile")
     settings.runtime_dir = Path("/tmp/fake-runtime")
     settings.data_dir = Path("/tmp/fake-data")
@@ -167,8 +166,8 @@ def _make_service_stub() -> Any:
     settings.enable_reentry = False
 
     svc = object.__new__(RuntimeLeapService)
-    # Wire the coordinator that _deny_pending_for_request / _prune_stale_approvals delegate to
-    svc._approval_coordinator = ApprovalCoordinator(ttl_s=1800.0)
+    # Wire the coordinator that _deny_pending_for_request / _release_orphaned_approvals delegate to
+    svc._approval_coordinator = ApprovalCoordinator()
     # Expose _approval_pending as a convenience alias for tests that inspect state directly
     svc._approval_pending = svc._approval_coordinator._approval_pending
     return svc
@@ -204,50 +203,74 @@ class TestApprovalDenyOnRequestEnd:
         assert future_b.result() == {"decision": "deny", "reason": "turn_ended"}
 
 
-class TestApprovalPruneStale:
-    """_prune_stale_approvals removes entries exceeding TTL."""
+class TestApprovalReleasedWhenOwnerGone:
+    """Orphan cleanup keys on liveness, not age."""
 
     @pytest.mark.asyncio
-    async def test_approval_prune_stale(self) -> None:
-        """Expired approval entries are pruned."""
+    async def test_approval_released_when_owner_gone(self) -> None:
+        """A pending with no live route is released however recent it is."""
         svc = _make_service_stub()
         loop = asyncio.get_running_loop()
 
-        expired_future = loop.create_future()
-        svc._approval_pending["stale-1"] = {
-            "request": {"request_id": "old-req"},
-            "future": expired_future,
-            "created_at": time.time() - 7200,  # 2 hours ago — well beyond 1800s TTL
+        orphan_future = loop.create_future()
+        svc._approval_pending["orphan-1"] = {
+            "request": {"request_id": "gone-req"},
+            "future": orphan_future,
+            "created_at": time.time(),  # brand new, but its owner is gone
         }
 
-        pruned = svc._prune_stale_approvals()
+        pruned = svc._release_orphaned_approvals()
 
         assert pruned == 1
         assert len(svc._approval_pending) == 0
-        assert expired_future.result() == {"decision": "deny", "reason": "timeout"}
+        assert orphan_future.result() == {"decision": "deny", "reason": "owner_gone"}
 
 
-class TestApprovalPruneRespectsTTL:
-    """_prune_stale_approvals does not remove entries within TTL."""
+class TestApprovalSurvivesWhileOwnerLives:
+    """A live prompt must never be released on a timer."""
 
     @pytest.mark.asyncio
-    async def test_approval_prune_respects_ttl(self) -> None:
-        """Fresh approval entries must NOT be pruned."""
+    async def test_approval_survives_while_owner_lives(self) -> None:
+        """A pending whose route is live survives no matter how old it is.
+
+        This is the invariant the no-timeout design rests on: the user may leave
+        an approval prompt open for hours, and nothing may answer it for them.
+        """
         svc = _make_service_stub()
         loop = asyncio.get_running_loop()
 
-        fresh_future = loop.create_future()
-        svc._approval_pending["fresh-1"] = {
-            "request": {"request_id": "new-req"},
-            "future": fresh_future,
-            "created_at": time.time() - 10,  # 10 seconds ago — well within TTL
+        svc._approval_coordinator.register_route("live-req")
+        old_future = loop.create_future()
+        svc._approval_pending["live-1"] = {
+            "request": {"request_id": "live-req"},
+            "future": old_future,
+            "created_at": time.time() - 7200,  # 2 hours old
         }
 
-        pruned = svc._prune_stale_approvals()
+        pruned = svc._release_orphaned_approvals()
 
         assert pruned == 0
         assert len(svc._approval_pending) == 1
-        assert not fresh_future.done()
+        assert not old_future.done()
+
+
+class TestApprovalWithoutRequestIdIsLeftAlone:
+    """Cleanup is conservative when it cannot identify the owner."""
+
+    @pytest.mark.asyncio
+    async def test_approval_without_request_id_is_left_alone(self) -> None:
+        svc = _make_service_stub()
+        loop = asyncio.get_running_loop()
+
+        future = loop.create_future()
+        svc._approval_pending["unknown-1"] = {
+            "request": {"request_id": ""},
+            "future": future,
+            "created_at": time.time() - 7200,
+        }
+
+        assert svc._release_orphaned_approvals() == 0
+        assert not future.done()
 
 
 class TestApprovalMultipleTurnsIsolation:

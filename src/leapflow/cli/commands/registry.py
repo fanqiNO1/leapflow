@@ -130,6 +130,15 @@ COMMAND_REGISTRY: Tuple[CommandDef, ...] = (
     CommandDef("app events", "Inspect or control an app event source", "App Connector", args_hint="[status|start|stop] <platform>", effect=CommandEffect.EXTERNAL, execution=CommandExecution.SHORT_OPERATION),
     CommandDef("app actions", "List App Connector action domains", "App Connector", args_hint="<platform>"),
 
+    # Plugins (self-management)
+    CommandDef("plugin", "List all plugins", "Skills & Tools", aliases=("plugin list",)),
+    CommandDef("plugin status", "Show plugin details and trust level", "Skills & Tools", args_hint="<id>"),
+    CommandDef("plugin plan", "Show adaptive plugin capability decisions and plans", "Skills & Tools", args_hint="[--latest|--limit <n>]", effect=CommandEffect.READ_ONLY),
+    CommandDef("plugin reload", "Hot-reload a plugin (daemon mode, approval required)", "Skills & Tools", args_hint="<id>", requires_host=True, effect=CommandEffect.SESSION, execution=CommandExecution.SHORT_OPERATION),
+    CommandDef("plugin disable", "Disable a plugin (daemon mode, approval required)", "Skills & Tools", args_hint="<id>", requires_host=True, effect=CommandEffect.DESTRUCTIVE, execution=CommandExecution.SHORT_OPERATION),
+    CommandDef("plugin enable", "Re-enable a disabled plugin (daemon mode, approval required)", "Skills & Tools", args_hint="<id>", requires_host=True, effect=CommandEffect.SESSION, execution=CommandExecution.SHORT_OPERATION),
+    CommandDef("plugin generate", "Generate and install a plugin from a natural-language description", "Skills & Tools", args_hint="[--preview|--dry-run|--id <id>] <description>", requires_host=True, effect=CommandEffect.SESSION, execution=CommandExecution.LONG_RUNNING),
+
     # Scheduler
     CommandDef("arm", "Schedule a skill for timed execution", "Scheduler", args_hint="<skill> <cron>"),
     CommandDef("task", "List scheduled tasks", "Scheduler"),

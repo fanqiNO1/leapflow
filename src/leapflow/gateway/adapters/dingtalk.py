@@ -198,3 +198,23 @@ class DingTalkAdapter(AdapterLifecycle):
         if isinstance(content, dict):
             return str(content.get("text") or content.get("content") or "")
         return str(payload.get("msgContent") or "")
+
+
+# ── Plugin registration ───────────────────────────────────────
+
+from leapflow.gateway.adapter_registry import BuiltinAdapterPlugin  # noqa: E402
+
+plugin = BuiltinAdapterPlugin(
+    _platform_id="dingtalk",
+    _display_name="钉钉 (DingTalk)",
+    _adapter_module="leapflow.gateway.adapters.dingtalk",
+    _adapter_class="DingTalkAdapter",
+    _config_schema={
+        "app_key": {"type": "string", "required": True},
+        "app_secret": {"type": "string", "required": True},
+        "robot_code": {"type": "string", "default": ""},
+        "connection_mode": {"type": "string", "enum": ["webhook", "stream"], "default": "webhook"},
+        "host": {"type": "string", "default": "127.0.0.1"},
+        "port": {"type": "integer", "default": 9092},
+    },
+)

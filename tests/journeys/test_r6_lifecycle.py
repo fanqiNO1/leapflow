@@ -51,6 +51,30 @@ async def _turn(client: Any, message: str, workspace: str) -> list[Any]:
     return events
 
 
+async def _status_or_none(client: Any) -> dict[str, Any] | None:
+    """Return daemon.status, tolerating the short restart reconnect window."""
+    try:
+        return await client.status()
+    except DaemonUnavailableError:
+        return None
+
+
+async def _resume_or_none(client: Any) -> dict[str, Any] | None:
+    """Return session_resume, tolerating the short restart reconnect window."""
+    try:
+        return await client.session_resume(SESSION)
+    except DaemonUnavailableError:
+        return None
+
+
+async def _history_or_none(client: Any) -> dict[str, Any] | None:
+    """Return session_history, tolerating the short restart reconnect window."""
+    try:
+        return await client.session_history(session_id=SESSION)
+    except DaemonUnavailableError:
+        return None
+
+
 @pytest.mark.asyncio
 async def test_r6_daemon_lifecycle(journeys: JourneyFactory) -> None:
     """The daemon starts, reports itself, serves work, stops, and recovers cleanly."""
@@ -71,7 +95,11 @@ async def test_r6_daemon_lifecycle(journeys: JourneyFactory) -> None:
         assert info.is_healthy, "the socket exists but is not answering"
         assert journey.daemon.sock_path.exists(), "no Unix socket on disk"
 
-        status = await client.status()
+        status = await await_for(
+            lambda: _status_or_none(client),
+            timeout_s=30.0,
+            what="daemon.status to respond after startup",
+        )
         assert status["pid"] == info.pid, (
             f"status() reports pid {status['pid']} but the pid file says {info.pid}"
         )
@@ -129,7 +157,11 @@ async def test_r6_daemon_lifecycle(journeys: JourneyFactory) -> None:
         try:
             assert restarted.info().is_healthy, "the replacement daemon never became healthy"
             fresh_client = restarted.client()
-            status = await fresh_client.status()
+            status = await await_for(
+                lambda: _status_or_none(fresh_client),
+                timeout_s=30.0,
+                what="daemon.status to respond after restart",
+            )
             assert status["pid"] != old_pid, (
                 "the replacement daemon reports the dead process' pid"
             )
@@ -140,14 +172,22 @@ async def test_r6_daemon_lifecycle(journeys: JourneyFactory) -> None:
             with journey.phase("continuity: a prior session is resumable after restart"):
                 # A fresh daemon holds no live session, so history is only reachable
                 # the way a user reaches it: by resuming explicitly (`leap --resume`).
-                resumed = await fresh_client.session_resume(SESSION)
+                resumed = await await_for(
+                    lambda: _resume_or_none(fresh_client),
+                    timeout_s=30.0,
+                    what="session.resume to respond after restart",
+                )
                 assert resumed.get("found") is True, (
                     f"session {SESSION!r} was not recoverable after a restart: {resumed}"
                 )
                 assert resumed.get("session_id") == SESSION, (
                     f"resume returned a different session than asked for: {resumed}"
                 )
-                history = await fresh_client.session_history(session_id=SESSION)
+                history = await await_for(
+                    lambda: _history_or_none(fresh_client),
+                    timeout_s=30.0,
+                    what="session.history to respond after restart",
+                )
                 blob = str(history.get("messages") or [])
                 assert "Are you there?" in blob, (
                     "the conversation recorded before the restart did not survive it"

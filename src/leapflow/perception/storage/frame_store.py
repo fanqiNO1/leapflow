@@ -2,21 +2,27 @@
 
 Migrated from leapflow.recording.frame_store with extended metadata
 sidecar support for the perception subsystem.
+
+The FrameStore protocol uses typing.Protocol (runtime_checkable) instead of
+ABC to enable duck-typing conformance checks without inheritance.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 
-class FrameStore(ABC):
-    """Abstract frame storage interface."""
+@runtime_checkable
+class FrameStore(Protocol):
+    """Protocol for frame storage backends.
 
-    @abstractmethod
+    Implementations provide async frame save/load/list/cleanup operations.
+    Conformance is checked via duck-typing (no inheritance required).
+    """
+
     async def save_frame(
         self,
         session_id: str,
@@ -29,23 +35,61 @@ class FrameStore(ABC):
         """Save a frame and return its unique reference string."""
         ...
 
-    @abstractmethod
     async def load_frame(self, frame_ref: str) -> bytes:
         """Load frame data by reference."""
         ...
 
-    @abstractmethod
     async def list_frames(self, session_id: str) -> List[Dict[str, Any]]:
         """List frame metadata for a session."""
         ...
 
-    @abstractmethod
     async def cleanup(self, session_id: str) -> int:
         """Remove all frames for a session. Return deleted count."""
         ...
 
 
-class LocalFrameStore(FrameStore):
+class FrameStoreRegistry:
+    """Registry for frame storage backends.
+
+    Manages backend factories by id and instantiates them on demand.
+    """
+
+    def __init__(self) -> None:
+        self._backends: Dict[str, type] = {}
+
+    def register(self, backend_id: str, factory: type) -> None:
+        """Register a backend factory by id.
+
+        Parameters
+        ----------
+        backend_id : str
+            Unique identifier for the backend (e.g., 'local', 's3').
+        factory : type
+            Class or callable that creates FrameStore instances.
+        """
+        if backend_id in self._backends:
+            raise ValueError(f"Duplicate backend_id: {backend_id!r}")
+        self._backends[backend_id] = factory
+
+    def create(self, backend_id: str, **kwargs: Any) -> FrameStore:
+        """Instantiate a backend by id.
+
+        Raises
+        ------
+        KeyError
+            If no backend with the given id is registered.
+        """
+        factory = self._backends.get(backend_id)
+        if factory is None:
+            raise KeyError(f"No FrameStore backend registered with id: {backend_id!r}")
+        return factory(**kwargs)
+
+    def list_available(self) -> List[str]:
+        """List all registered backend ids."""
+        return list(self._backends.keys())
+
+
+class LocalFrameStore:
     """Local filesystem frame storage with metadata sidecars.
 
     Storage layout:

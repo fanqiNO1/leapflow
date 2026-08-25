@@ -115,3 +115,21 @@ class WebhookAdapter(AdapterLifecycle):
             message_id=message_id,
             metadata={"payload_keys": tuple(sorted(str(key) for key in payload.keys()))},
         )
+
+
+# ── Plugin registration ───────────────────────────────────────
+
+from leapflow.gateway.adapter_registry import BuiltinAdapterPlugin  # noqa: E402
+
+plugin = BuiltinAdapterPlugin(
+    _platform_id="webhook",
+    _display_name="Webhook",
+    _adapter_module="leapflow.gateway.adapters.webhook",
+    _adapter_class="WebhookAdapter",
+    _config_schema={
+        "webhook_secret": {"type": "string", "default": ""},
+        "host": {"type": "string", "default": "127.0.0.1"},
+        "port": {"type": "integer", "default": 9090},
+        "path": {"type": "string", "default": "/webhook"},
+    },
+)

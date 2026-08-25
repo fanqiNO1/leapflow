@@ -9,6 +9,7 @@ so the guard keeps holding as the implementation moves.
 Covered contracts:
 - Platform-Neutral Gateway Core (core must not import platform packages)
 - Platform vs App Business Boundary (no vendor endpoints/error shapes in core)
+- Plugin core vs tool implementations (plugin core must not import a tool module)
 - Transport-Lifecycle Separation (one-shot actions vs long-lived observations)
 - Immutable Domain Types (frozen dataclasses for domain objects)
 - Protocol over ABC (extension points are runtime_checkable Protocols)
@@ -27,6 +28,7 @@ import typing
 import pytest
 
 GATEWAY_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "leapflow" / "gateway"
+PLUGINS_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "leapflow" / "plugins"
 
 # Sub-packages that own platform/vendor specifics. Gateway core may define the
 # contracts these implement, but must never depend on them.
@@ -48,6 +50,15 @@ def _imported_modules(path: pathlib.Path) -> list[tuple[str, int]]:
         elif isinstance(node, ast.Import):
             found.extend((alias.name, node.lineno) for alias in node.names)
     return found
+
+
+def _plugin_core_modules() -> list[pathlib.Path]:
+    """Return plugin core modules (contracts, registry, lifecycle).
+
+    ``tool_plugins/`` is excluded on purpose: those modules exist to wrap tool
+    implementations, so they are the one place allowed to import them.
+    """
+    return sorted(p for p in PLUGINS_DIR.glob("*.py"))
 
 
 # ── Platform-Neutral Gateway Core ────────────────────────────────────────
@@ -104,6 +115,73 @@ def test_gateway_core_has_no_vendor_endpoints_or_error_shapes() -> None:
     assert violations == [], "vendor endpoint hardcoded in gateway core: " + ", ".join(violations)
 
 
+# ── Plugin core vs tool implementations ──────────────────────────────────
+
+
+def test_plugin_core_does_not_import_tool_implementations() -> None:
+    """Plugin core owns contracts, discovery, and lifecycle — never behaviour.
+
+    ``leapflow.plugins`` publishes whatever a plugin declares; the moment core
+    reaches into ``leapflow.tools`` the dependency inverts and every new tool
+    becomes a core change. Tool wrappers live in ``tool_plugins/``, which is
+    exactly where that import belongs.
+    """
+    violations: list[str] = []
+    for path in _plugin_core_modules():
+        for module, lineno in _imported_modules(path):
+            if module.startswith("leapflow.tools"):
+                violations.append(f"{path.name}:{lineno} imports {module}")
+
+    assert violations == [], (
+        "plugin core must not depend on tool implementations; declare the tool "
+        "in a tool_plugins/ module or inject it through bind_runtime():\n  "
+        + "\n  ".join(violations)
+    )
+
+
+# ── Plugin subsystem lives under leapflow.plugins, not leapflow.tools ─────
+
+# The plugin subsystem (contracts, registry, scoped lifecycle, marketplace,
+# sandbox) was relocated to ``leapflow.plugins``. The legacy ``leapflow.tools``
+# locations must stay gone: a re-created shim would silently split the single
+# source of truth for the registry and let two divergent registries coexist.
+_RELOCATED_TOOL_MODULES = (
+    "leapflow.tools.plugins",
+    "leapflow.tools.protocol",
+    "leapflow.tools.plugin_registry",
+    "leapflow.tools.scoped_registry",
+    "leapflow.tools.marketplace",
+    "leapflow.tools.sandbox",
+)
+
+_TOOLS_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "leapflow" / "tools"
+_RELOCATED_TOOL_PATHS = (
+    _TOOLS_DIR / "plugins",
+    _TOOLS_DIR / "protocol.py",
+    _TOOLS_DIR / "plugin_registry.py",
+    _TOOLS_DIR / "scoped_registry.py",
+    _TOOLS_DIR / "marketplace",
+    _TOOLS_DIR / "sandbox",
+)
+
+
+def test_legacy_tool_plugin_paths_are_physically_removed() -> None:
+    """The pre-relocation plugin source locations must not exist on disk."""
+    present = [str(p) for p in _RELOCATED_TOOL_PATHS if p.exists()]
+    assert present == [], (
+        "legacy plugin-subsystem source paths were re-created; the subsystem "
+        "lives under src/leapflow/plugins/ and these must stay absent:\n  "
+        + "\n  ".join(present)
+    )
+
+
+@pytest.mark.parametrize("module_name", _RELOCATED_TOOL_MODULES)
+def test_legacy_tool_plugin_modules_are_not_importable(module_name: str) -> None:
+    """Importing a relocated module must fail rather than resolve to a shim."""
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(module_name)
+
+
 # ── Transport-Lifecycle Separation ───────────────────────────────────────
 
 
@@ -139,6 +217,8 @@ def test_long_lived_event_source_exposes_no_action_execution() -> None:
 
 
 _DOMAIN_TYPES = [
+    ("leapflow.domain.capability_requirement", "CapabilityRequirement"),
+    ("leapflow.domain.environment_fingerprint", "EnvironmentFingerprint"),
     ("leapflow.gateway.protocol", "InboundMessage"),
     ("leapflow.gateway.protocol", "OutboundContent"),
     ("leapflow.gateway.protocol", "SendTarget"),
@@ -225,6 +305,8 @@ def test_extension_points_are_runtime_checkable_protocols(
 
 
 _STANDALONE_MODULES = [
+    "leapflow.domain.capability_requirement",
+    "leapflow.domain.environment_fingerprint",
     "leapflow.logging_setup",
     "leapflow.layout",
     "leapflow.config_service",
@@ -239,6 +321,15 @@ _STANDALONE_MODULES = [
     "leapflow.dashboard.service",
     "leapflow.daemon.session_registry",
     "leapflow.daemon.notifications",
+    "leapflow.plugins",
+    "leapflow.plugins.capability_plan",
+    "leapflow.plugins.capability_resolver",
+    "leapflow.plugins.protocol",
+    "leapflow.plugins.registry",
+    "leapflow.plugins.scoped_registry",
+    "leapflow.plugins.tool_plugins",
+    "leapflow.plugins.marketplace",
+    "leapflow.plugins.sandbox",
 ]
 
 

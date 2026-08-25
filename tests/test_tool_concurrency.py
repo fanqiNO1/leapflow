@@ -88,8 +88,8 @@ def test_unknown_tool_defaults_to_sequential() -> None:
 
 
 def test_gp_prefixed_name_resolves_via_lookup_fallback() -> None:
-    # The engine's real spec_lookup strips a gp_ prefix; emulate a lookup that
-    # only knows the plain name and confirm classification still works.
+    # The engine's spec_lookup strips a gp_ prefix as a normalization fallback
+    # (historic audit rows may still carry gp_ prefixed names).
     specs = {"file_read": ToolSpec(name="file_read", risk_level="read_only")}
 
     def lookup(name: str):

@@ -392,7 +392,7 @@ def build_subagent_tool_filter(
         available = available & config.allowed_tools
 
     if config.depth + 1 >= max_depth:
-        available -= {"delegate_task", "gp_delegate_task"}
+        available -= {"delegate_task"}
 
     return sorted(available)
 

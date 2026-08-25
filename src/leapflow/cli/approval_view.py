@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import sys
 import textwrap
-import time
 from dataclasses import dataclass
 
 from leapflow.security.approval import ApprovalDecision, ApprovalRequest
@@ -41,25 +40,24 @@ _CHOICE_DECISIONS = {
 
 
 async def prompt_approval(request: ApprovalRequest) -> ApprovalDecision:
-    """Render an approval prompt and return a user decision."""
+    """Render an approval prompt and return a user decision.
+
+    Waits indefinitely for the answer. The prompt carries no deadline, so a user
+    who steps away comes back to the question still standing instead of to a
+    silently denied action. A non-interactive stdin still denies immediately:
+    there is nobody to ask, so blocking would hang the process forever.
+    """
     if not sys.stdin.isatty():
         return ApprovalDecision.DENY
 
     choices = build_approval_choices(request)
     show_details = False
     while True:
-        if _is_expired(request):
-            return ApprovalDecision.DENY
         _render(request, choices, show_details=show_details)
         try:
-            answer = await asyncio.wait_for(
-                asyncio.get_running_loop().run_in_executor(
-                    None, lambda: input("Select approval choice: ").strip().lower(),
-                ),
-                timeout=remaining_seconds(request),
+            answer = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: input("Select approval choice: ").strip().lower(),
             )
-        except TimeoutError:
-            return ApprovalDecision.DENY
         except (EOFError, KeyboardInterrupt):
             return ApprovalDecision.DENY
 
@@ -139,9 +137,6 @@ def _render(request: ApprovalRequest, choices: list[ApprovalChoice], *, show_det
             for line in textwrap.wrap(reason, width=72) or [reason]:
                 body.append(f"- {line}\n", style="dim")
             body.append("\n")
-        remaining = remaining_seconds(request)
-        if remaining is not None:
-            body.append(f"Defaults to Deny in {int(remaining)}s.\n\n", style="dim")
         for idx, choice in enumerate(choices, start=1):
             body.append(f"  {idx}. {choice.label}\n", style="bold" if choice.key == request.default_choice else "")
         console.print(Panel(
@@ -154,9 +149,6 @@ def _render(request: ApprovalRequest, choices: list[ApprovalChoice], *, show_det
         sys.stderr.write(f"⚠ {title}\n\n{summary}\n\n{detail}\n\n")
         if reason:
             sys.stderr.write(f"Why approval is needed: {reason}\n\n")
-        remaining = remaining_seconds(request)
-        if remaining is not None:
-            sys.stderr.write(f"Defaults to Deny in {int(remaining)}s.\n\n")
         for idx, choice in enumerate(choices, start=1):
             sys.stderr.write(f"  {idx}. {choice.label}\n")
         sys.stderr.flush()
@@ -179,18 +171,6 @@ def risk_reason(request: ApprovalRequest) -> str:
     if request.risk.explanation:
         return request.risk.explanation
     return ", ".join(request.risk.reasons)
-
-
-def remaining_seconds(request: ApprovalRequest) -> float | None:
-    """Return seconds before approval expiry, if the request has a deadline."""
-    if request.expires_at is None:
-        return None
-    return max(0.0, float(request.expires_at) - time.time())
-
-
-def _is_expired(request: ApprovalRequest) -> bool:
-    remaining = remaining_seconds(request)
-    return remaining is not None and remaining <= 0.0
 
 
 def truncate_detail(text: str, *, max_lines: int = 6, width: int = 88) -> str:
@@ -217,10 +197,6 @@ def _title_for(request: ApprovalRequest) -> str:
 
 def _risk_reason(request: ApprovalRequest) -> str:
     return risk_reason(request)
-
-
-def _remaining_seconds(request: ApprovalRequest) -> float | None:
-    return remaining_seconds(request)
 
 
 def _truncate_detail(text: str, *, max_lines: int = 6, width: int = 88) -> str:

@@ -49,8 +49,12 @@ class ApprovalRequest:
     risk: RiskAssessment | None = None
     choices: tuple[str, ...] = ("allow_once", "allow_session", "deny")
     default_choice: str = "deny"
-    expires_at: float | None = None
     display: dict[str, Any] = field(default_factory=dict)
+
+    # There is deliberately no expiry field. An approval prompt has no deadline:
+    # a request waits until the human answers it, or until the turn/stream that
+    # produced it ends. A deadline here auto-denied whatever the user had stepped
+    # away from, which reads as the agent refusing work the user never saw.
 
     @property
     def grant_key(self) -> str:
@@ -70,7 +74,6 @@ class ApprovalRequest:
             "risk": self.risk.to_dict() if self.risk else None,
             "choices": list(self.choices),
             "default_choice": self.default_choice,
-            "expires_at": self.expires_at,
             "display": dict(self.display),
         }
 
@@ -88,7 +91,6 @@ class ApprovalRequest:
             risk=RiskAssessment.from_dict(raw_risk) if isinstance(raw_risk, dict) else None,
             choices=tuple(str(item) for item in data.get("choices") or ("allow_once", "allow_session", "deny")),
             default_choice=str(data.get("default_choice") or "deny"),
-            expires_at=data.get("expires_at"),
             display=dict(data.get("display") or {}),
         )
 

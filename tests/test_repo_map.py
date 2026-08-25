@@ -75,11 +75,14 @@ def test_repo_map_not_a_directory(tmp_path) -> None:
 
 
 def test_repo_map_is_read_only() -> None:
-    from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS, TOOL_HANDLERS, _BRIDGE_TOOLS
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
+    TOOL_DEFINITIONS = _tool_reg.tool_definitions
+    TOOL_HANDLERS = _tool_reg.tool_handlers
     from leapflow.tools.name_resolver import ToolRegistry, TOOL_NAME_ALIASES
     from leapflow.engine.tool_execution import execution_policy_for
 
     reg = ToolRegistry.from_definitions(
-        TOOL_DEFINITIONS, TOOL_HANDLERS, bridge_tools=_BRIDGE_TOOLS, aliases=TOOL_NAME_ALIASES,
+        TOOL_DEFINITIONS, TOOL_HANDLERS, aliases=TOOL_NAME_ALIASES,
     )
     assert execution_policy_for("repo_map", reg.specs.get("repo_map")) == "read_only"

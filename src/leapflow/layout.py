@@ -366,6 +366,46 @@ class ProfileLayout:
         return self.root / "skills"
 
     @property
+    def plugins_dir(self) -> Path:
+        # Profile-scoped directory where self-modification installs plugin code
+        # (via plugin_install) and loads it dynamically. Keeping it under the
+        # profile root — rather than the read-only Python package directory —
+        # means installed plugins are per-profile and never mutate site-packages.
+        return self.root / "plugins"
+
+    @property
+    def plugin_proposals_path(self) -> Path:
+        # Profile-scoped review queue for capability-gap → plugin proposals.
+        # It is durable user/profile state, not runtime scratch.
+        return self.root / "plugins" / "proposals.json"
+
+    @property
+    def capability_observations_path(self) -> Path:
+        # Profile-scoped durable observation backlog for structured capability gaps.
+        return self.root / "plugins" / "capability_observations.json"
+
+    @property
+    def capability_proposal_queue_path(self) -> Path:
+        # Profile-scoped adaptive proposal queue derived from capability observations.
+        return self.root / "plugins" / "proposal_queue.json"
+
+    @property
+    def plugin_outcomes_path(self) -> Path:
+        # Profile-scoped execution outcome audit for adaptive plugin lifecycle governance.
+        return self.root / "plugins" / "outcomes.json"
+
+    @property
+    def capability_plans_path(self) -> Path:
+        # Profile-scoped adaptive capability decision history: requirements,
+        # candidate scores, selected tools, and declarative plans.
+        return self.root / "plugins" / "capability_plans.json"
+
+    @property
+    def plugin_versions_dir(self) -> Path:
+        # Versioned source snapshots and active pointers for profile-installed plugins.
+        return self.root / "plugins" / "versions"
+
+    @property
     def gateway(self) -> GatewayLayout:
         return GatewayLayout(self.root / "gateway", self.gateway_config_path)
 
@@ -426,6 +466,7 @@ class ProfileLayout:
             self.memory_dir,
             self.global_memory_dir,
             self.skills_dir,
+            self.plugins_dir,
             self.audit_dir,
             self.history_dir,
             self.runtime_dir,

@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from leapflow.cli.approval_view import (
     ApprovalChoice,
     build_approval_choices,
-    remaining_seconds,
     resolve_approval_choice,
     risk_reason,
     title_for_approval,
@@ -127,14 +126,6 @@ class ApprovalModal:
             lines.append(_content_line(f"  {t}", inner, "class:approval.dim"))
         return lines
 
-    def _timeout_lines(self, inner: int) -> list[_ContentLine]:
-        remaining = remaining_seconds(self.request)
-        if remaining is None:
-            return []
-        return [_content_line(
-            f"  Auto-deny in {int(remaining)}s", inner, "class:approval.dim",
-        )]
-
     def _choices_lines(self, inner: int) -> list[_ContentLine]:
         lines: list[_ContentLine] = [
             _content_line("", inner, ""),
@@ -156,9 +147,12 @@ class ApprovalModal:
     def fragments(self, *, max_lines: int = 0) -> list[Fragment]:
         """Build fragments for the modal, adapting to height constraints.
 
-        When *max_lines* > 0, variable content (summary, detail, reason,
-        timeout) is progressively trimmed — in ascending priority order —
-        to fit.  Frame borders and choices are never trimmed.
+        When *max_lines* > 0, variable content (summary, detail, reason) is
+        progressively trimmed — in ascending priority order — to fit.  Frame
+        borders and choices are never trimmed.
+
+        There is no countdown line: the prompt has no deadline, so nothing is
+        auto-denied while the user is away.
         """
         width = _modal_width()
         inner = width - 4
@@ -173,7 +167,6 @@ class ApprovalModal:
             self._summary_lines(inner),
             self._detail_lines(inner),
             self._reason_lines(inner),
-            self._timeout_lines(inner),
         ]
 
         budget = (
@@ -215,7 +208,6 @@ class ApprovalModal:
                 self._summary_lines(inner),
                 self._detail_lines(inner),
                 self._reason_lines(inner),
-                self._timeout_lines(inner),
             )
         )
         total = fixed + variable
@@ -276,8 +268,3 @@ def _content_line(text: str, width: int, style: str = "") -> list[Fragment]:
         (style, clipped + padding),
         ("class:approval.border", " │"),
     ]
-
-
-def request_is_expired(request: ApprovalRequest) -> bool:
-    remaining = remaining_seconds(request)
-    return remaining is not None and remaining <= 0.0

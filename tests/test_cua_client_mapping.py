@@ -1,10 +1,17 @@
 """CuaDriverClient method→tool mapping and timeout resolution.
 
-Locks the cua-driver 0.19.3 wire contract: get_window_state takes
-pid+window_id (discovered via ax.list → list_windows), actions target
-element_token/element_index with x/y pixel args, hotkey takes a keys array
-(single keys go to press_key), scroll speaks direction/amount, activation
-is bring_to_front by pid, and launch_app accepts bundle_id/name only.
+Locks the cua-driver wire contract (verified against 0.6.8): get_window_state
+takes pid+window_id (discovered via ax.list → list_windows) and owns screen
+capture, actions target element_token/element_index with x/y pixel args, hotkey
+takes a keys array (single keys go to press_key), scroll speaks
+direction/amount, activation is bring_to_front by pid, and launch_app accepts
+bundle_id/name only.
+
+The verified version is recorded here rather than scattered through source
+comments, where a stale label silently misleads: this file asserts the mapping
+against the schema published by ``cua-driver describe <tool>``, while
+tests/test_darwin_adapter.py is the only file that drives a real driver (and is
+skipped when the binary is absent). Re-check both after a driver upgrade.
 """
 
 from __future__ import annotations
@@ -30,7 +37,8 @@ def test_launch_app_key_recognizes_identifier_kinds() -> None:
     # AUMID (Windows) and reverse-DNS (macOS) are bundle ids.
     assert _launch_app_key("Microsoft.WindowsNotepad_8wekyb3d8bbwe!App") == "bundle_id"
     assert _launch_app_key("com.apple.calculator") == "bundle_id"
-    # Display names and executable paths go through name — 0.19.3 has no path field.
+    # Display names and executable paths go through name — the schema has no
+    # path field.
     assert _launch_app_key("Notepad") == "name"
     assert _launch_app_key(r"C:\Program Files\Edge\msedge.exe") == "name"
     assert _launch_app_key("msedge.exe") == "name"
@@ -201,15 +209,71 @@ def test_type_text_untargeted_uses_desktop_scope() -> None:
 
 # ── screen capture ───────────────────────────────────────────────────────────
 
-def test_screen_capture_maps_to_desktop_or_window_state() -> None:
+def test_screen_capture_frame_maps_to_window_state_with_out_file() -> None:
     client = _client()
-    tool, args = client._map_to_cua_tool(Methods.SCREEN_CAPTURE_FRAME, {})
-    assert (tool, args) == ("get_desktop_state", {})
-
     tool, args = client._map_to_cua_tool(
-        Methods.SCREEN_CAPTURE_FRAME, {"pid": 100, "window_id": 7}
+        Methods.SCREEN_CAPTURE_FRAME,
+        {"pid": 100, "window_id": 7, "screenshot_out_file": "/tmp/shot.png"},
     )
-    assert (tool, args) == ("get_window_state", {"pid": 100, "window_id": 7})
+    assert tool == "get_window_state"
+    assert args == {
+        "pid": 100,
+        "window_id": 7,
+        "screenshot_out_file": "/tmp/shot.png",
+    }
+
+
+def test_screen_capture_frame_without_target_is_refused() -> None:
+    """Targetless capture is refused, not mapped onto a nonexistent tool.
+
+    cua-driver has no full-display capture tool. This mapping used to answer
+    get_desktop_state, which belonged to an older driver line and came back as
+    "Unknown tool" only at runtime, after a round-trip. The previous version of
+    this test asserted that stale mapping, so it kept passing against a wire
+    contract the driver had already dropped.
+    """
+    client = _client()
+    with pytest.raises(RpcError) as excinfo:
+        client._map_to_cua_tool(
+            Methods.SCREEN_CAPTURE_FRAME, {"screenshot_out_file": "/tmp/shot.png"}
+        )
+    assert excinfo.value.code == "invalid_params"
+    assert "pid and window_id" in excinfo.value.message
+    assert excinfo.value.details["provided"] == ["screenshot_out_file"]
+
+
+# ── RpcError carries its own traceback ───────────────────────────────────
+
+def test_rpc_error_accepts_traceback_assignment() -> None:
+    """A Python-level ``__traceback__`` assignment must not raise.
+
+    contextlib, asyncio and pytest all re-raise by assigning ``__traceback__``.
+    While RpcError was a frozen dataclass that assignment raised
+    FrozenInstanceError, which replaced the real error and left the true cause
+    unreadable in the report.
+    """
+    err = RpcError("cua_tool_error", "Unknown tool: get_desktop_state", {"a": 1})
+    err.__traceback__ = None  # must not raise
+    assert str(err) == "cua_tool_error: Unknown tool: get_desktop_state"
+    assert RpcError(*err.args).details == {"a": 1}
+
+
+def test_rpc_error_survives_contextmanager_reraise() -> None:
+    """The exact path that masked the original failure."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def passthrough():
+        yield
+
+    with pytest.raises(RpcError) as excinfo:
+        with passthrough():
+            raise RpcError("cua_tool_error", "Unknown tool: get_desktop_state", {})
+    assert excinfo.value.code == "cua_tool_error"
+
+
+def test_rpc_error_details_default_to_empty_dict() -> None:
+    assert RpcError("code", "message").details == {}
 
 
 # ── dispatch plumbing (pre-existing contracts) ───────────────────────────────

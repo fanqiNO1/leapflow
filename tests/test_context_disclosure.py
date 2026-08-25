@@ -7,7 +7,10 @@ from leapflow.engine.context_disclosure import (
     DisclosureRuntimeState,
     build_capability_manifests,
 )
-from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+from leapflow.plugins import get_registry
+_tool_reg = get_registry()
+
+TOOL_DEFINITIONS = _tool_reg.tool_definitions
 
 
 def _tool_names(plan) -> set[str]:
@@ -75,6 +78,39 @@ def test_disclosure_planner_expands_via_last_turn_tool_category_continuity() -> 
     assert "gateway_send" not in names
 
 
+def test_disclosure_planner_expands_tools_from_capability_plan() -> None:
+    """A structured capability plan can disclose its tools without opening FULL."""
+    from leapflow.plugins.capability_plan import CapabilityPlan
+    from leapflow.plugins.capability_resolver import CapabilityCandidate
+
+    plan_hint = CapabilityPlan.from_candidates(
+        (
+            CapabilityCandidate(
+                plugin_id="shell_terminal",
+                tool_name="shell_run",
+                provides_capabilities=("shell.run",),
+                risk_level="external",
+                requires_approval=True,
+                mutates_state=True,
+            ),
+        ),
+        plan_id="plan-disclosure-test",
+    )
+
+    plan = DisclosurePlanner().plan(
+        TOOL_DEFINITIONS,
+        DisclosureRuntimeState(
+            native_tools_enabled=True,
+            active_capability_plan=plan_hint,
+        ),
+    )
+
+    names = _tool_names(plan)
+    assert plan.level == DisclosureLevel.EXPANDED
+    assert plan.reason == "plan: capability_plan"
+    assert "shell_run" in names
+
+
 def test_disclosure_planner_uses_full_context_for_structural_gates() -> None:
     planner = DisclosurePlanner()
 
@@ -105,6 +141,7 @@ def test_disclosure_planner_never_performs_text_fitting() -> None:
     signature = inspect.signature(DisclosurePlanner.plan)
     assert "user_text" not in signature.parameters
     assert list(signature.parameters)[1:] == ["tool_definitions", "runtime"]
+    assert "active_capability_plan" in DisclosureRuntimeState.__dataclass_fields__
 
 
 def test_capability_manifest_prefers_explicit_tool_metadata() -> None:
@@ -257,17 +294,19 @@ def test_desktop_tools_included_in_full_plan() -> None:
 def test_capability_expand_provider_exposes_desktop_category() -> None:
     import asyncio
 
-    from leapflow.tools import registry_bootstrap as rb
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
+    from leapflow.plugins.tool_plugins.orchestration import plugin as orch_plugin
 
     desktop_defs = _desktop_definitions()
-    rb.set_capability_catalog_provider(lambda: list(TOOL_DEFINITIONS) + desktop_defs)
+    _tool_reg.set_capability_catalog_provider(lambda: list(TOOL_DEFINITIONS) + desktop_defs)
     try:
-        result = asyncio.run(rb._capability_expand_handler({"category": "desktop"}))
+        result = asyncio.run(orch_plugin._capability_expand_handler({"category": "desktop"}))
         assert result["ok"] is True
         expanded_names = {td["function"]["name"] for td in result["expanded_tools"]}
         assert expanded_names == {"observe_ui", "click", "list_apps"}
 
-        unknown = asyncio.run(rb._capability_expand_handler({"category": "nope"}))
+        unknown = asyncio.run(orch_plugin._capability_expand_handler({"category": "nope"}))
         assert unknown["ok"] is False
         assert "desktop" in unknown["available_categories"]
 
@@ -278,15 +317,17 @@ def test_capability_expand_provider_exposes_desktop_category() -> None:
         )
         assert "desktop" in desc
     finally:
-        rb.set_capability_catalog_provider(None)
+        _tool_reg.set_capability_catalog_provider(None)
 
 
 def test_capability_expand_falls_back_to_static_catalog_without_provider() -> None:
     import asyncio
 
-    from leapflow.tools import registry_bootstrap as rb
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
+    from leapflow.plugins.tool_plugins.orchestration import plugin as orch_plugin
 
-    rb.set_capability_catalog_provider(None)
-    result = asyncio.run(rb._capability_expand_handler({"category": "file"}))
+    _tool_reg.set_capability_catalog_provider(None)
+    result = asyncio.run(orch_plugin._capability_expand_handler({"category": "file"}))
     assert result["ok"] is True
     assert result["expanded_tools"]

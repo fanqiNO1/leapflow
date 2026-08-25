@@ -18,7 +18,7 @@ except ModuleNotFoundError:  # pragma: no cover
     tomllib = None  # type: ignore[assignment]
 
 from leapflow.tools.dev_tools import _detect_lint_command, _detect_test_command
-from leapflow.tools.execution_context import resolve_workspace_path, workspace_scope_error
+from leapflow.tools.execution_context import require_workspace_access, resolve_workspace_path
 from leapflow.tools.file_operations import _SEARCH_SKIP_DIRS
 
 logger = logging.getLogger(__name__)
@@ -107,7 +107,7 @@ def _node_manifest(root: Path) -> Dict[str, Any]:
 async def repo_map(params: Dict[str, Any]) -> Dict[str, Any]:
     """Return a compact project orientation map for a repository root (read-only)."""
     root = resolve_workspace_path(params.get("path", ".") or ".", default=".")
-    scope_error = workspace_scope_error(root, operation="repo_map")
+    scope_error = await require_workspace_access(root, operation="repo_map")
     if scope_error:
         return scope_error
     if not root.exists() or not root.is_dir():

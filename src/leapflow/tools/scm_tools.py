@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Sequence
 
 from leapflow.security.redact import redact_sensitive_text
-from leapflow.tools.execution_context import resolve_workspace_path, workspace_scope_error
+from leapflow.tools.execution_context import require_workspace_access, resolve_workspace_path
 
 _MAX_OUTPUT_CHARS = 10_000
 _DEFAULT_TIMEOUT_S = 120.0
@@ -163,7 +163,7 @@ async def scm_sync(params: Dict[str, Any], runner: GitRunner | None = None) -> D
         return {"ok": False, "error": f"Unsupported SCM action: {action}", "failure_code": "unsupported_scm_action"}
 
     cwd = _workspace(params.get("cwd"))
-    scope_error = workspace_scope_error(cwd, operation="scm_sync cwd")
+    scope_error = await require_workspace_access(cwd, operation="scm_sync cwd", effect="write")
     if scope_error:
         return scope_error
     if not cwd.exists():
