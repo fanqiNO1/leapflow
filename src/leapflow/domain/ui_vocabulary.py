@@ -1,7 +1,9 @@
 """Shared UI vocabulary — ActionType ↔ tool name mappings.
 
 This module connects the Recording vocabulary (ActionType enum values)
-with the Execution vocabulary (tool names registered in bridge_factory),
+with the Execution vocabulary (tool names registered by the
+``plugins.tool_plugins.desktop_semantic`` plugin for agent dispatch, and by the
+``skills.tool_executor`` ExecutionToolset for the bounded skill executor),
 keeping learn→run semantic coherence.
 
 Role classification tables were retired with the tree summarizer: the
@@ -19,9 +21,11 @@ from typing import Dict
 #
 # This bidirectional mapping connects the Recording vocabulary
 # (ActionType enum values) with the Execution vocabulary (tool names
-# registered in bridge_factory). This ensures that a SemanticAction
-# recorded during learn can be mechanically translated into a tool call
-# for execution, and vice versa.
+# registered by ``plugins.tool_plugins.desktop_semantic`` — the agent dispatch
+# surface — and the ``skills.tool_executor`` ExecutionToolset — the bounded
+# skill executor). This ensures that a SemanticAction recorded during learn
+# can be mechanically translated into a tool call for execution, and vice
+# versa.
 # ═══════════════════════════════════════════════════════════════════════════
 
 ACTION_TO_TOOL: Dict[str, str] = {

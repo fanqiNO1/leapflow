@@ -42,14 +42,37 @@ class DaemonClient:
         """Return the Unix socket path used by this client."""
         return self._sock_path
 
-    async def request(self, method: str, params: dict[str, Any] | None = None) -> Any:
-        """Send one non-streaming JSON-RPC request and return its result."""
+    async def request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        on_stream_event: Callable[[StreamEvent], Any] | None = None,
+    ) -> Any:
+        """Send one non-streaming JSON-RPC request and return its result.
+
+        Handles server-sent heartbeat notifications transparently: each
+        heartbeat resets the read timeout, keeping the connection alive for
+        long-running handlers without raising ``DaemonUnavailableError``.
+        """
         request = RpcRequest(method=method, params=params or {})
         reader, writer = await self._open()
         try:
             await _send(writer, request.to_json())
             while True:
                 payload = await self._read_payload(reader)
+                # Skip heartbeat notifications sent by the server for
+                # long-running handlers — they carry no result.
+                if payload.get("method") == "stream.chunk":
+                    p = payload.get("params") or {}
+                    if isinstance(p.get("metadata"), dict) and p["metadata"].get("heartbeat"):
+                        continue
+                    if p.get("id") == request.id and on_stream_event is not None:
+                        event = _event_from_params(dict(p))
+                        result = on_stream_event(event)
+                        if hasattr(result, "__await__"):
+                            await result
+                        continue
                 if payload.get("id") != request.id:
                     continue
                 if "error" in payload:
@@ -151,10 +174,33 @@ class DaemonClient:
         client: without it the daemon has no way to know which of several live
         sessions to report, and any session identity it returned would belong to
         somebody else.
+
+        ``daemon.status`` is read-only and idempotent, so it tolerates the short
+        startup/restart window where a socket is not yet accepting, or accepts
+        and closes before the control-plane request is handled.
         """
         params = {"session_id": session_id} if session_id else {}
-        result = await self.request("daemon.status", params)
-        return dict(result or {})
+        last_error: DaemonUnavailableError | None = None
+        retry_budget_s = 30.0 if self._timeout_s > 60.0 else 5.0
+        deadline = asyncio.get_running_loop().time() + min(max(self._timeout_s, 1.0), retry_budget_s)
+        attempt = 0
+        while True:
+            try:
+                result = await self.request("daemon.status", params)
+                return dict(result or {})
+            except DaemonUnavailableError as exc:
+                last_error = exc
+                message = str(exc)
+                transient_startup = (
+                    "closed the connection unexpectedly" in message
+                    or "Cannot connect to leapd" in message
+                )
+                if not transient_startup or asyncio.get_running_loop().time() >= deadline:
+                    raise
+                attempt += 1
+                await asyncio.sleep(min(0.5, 0.05 * attempt))
+        assert last_error is not None
+        raise last_error
 
     async def host_status(self) -> dict[str, Any]:
         """Return daemon-owned host backend status."""
@@ -191,7 +237,14 @@ class DaemonClient:
         result = await self.request("app.command", {"args": args})
         return dict(result or {})
 
-    async def command_execute(self, name: str, args: str = "", session_id: str = "") -> dict[str, Any]:
+    async def command_execute(
+        self,
+        name: str,
+        args: str = "",
+        session_id: str = "",
+        *,
+        on_stream_event: Callable[[StreamEvent], Any] | None = None,
+    ) -> dict[str, Any]:
         """Execute any engine-routed slash command via daemon.
 
         ``session_id`` tells the daemon which client session the command belongs
@@ -199,7 +252,9 @@ class DaemonClient:
         conversation instead of whichever session was last active.
         """
         result = await self.request(
-            "command.execute", {"name": name, "args": args, "session_id": session_id},
+            "command.execute",
+            {"name": name, "args": args, "session_id": session_id},
+            on_stream_event=on_stream_event,
         )
         return dict(result or {})
 

@@ -804,24 +804,27 @@ def test_research_note_tool_handler_roundtrip() -> None:
     import asyncio
 
     from leapflow.engine.research_ledger import ResearchLedger
-    from leapflow.tools import registry_bootstrap as rb
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
 
     led = ResearchLedger()
-    rb.set_research_ledger(led)
+    _tool_reg.set_research_ledger(led)
     try:
-        ok = asyncio.run(rb.TOOL_HANDLERS["research_note"]({"kind": "finding", "text": "cache reuses KV"}))
+        ok = asyncio.run(_tool_reg.tool_handlers["research_note"]({"kind": "finding", "text": "cache reuses KV"}))
         assert ok["ok"] is True
         assert "cache reuses KV" in led.as_dict()["findings"]
-        bad = asyncio.run(rb.TOOL_HANDLERS["research_note"]({"kind": "nope", "text": "x"}))
+        bad = asyncio.run(_tool_reg.tool_handlers["research_note"]({"kind": "nope", "text": "x"}))
         assert bad["ok"] is False
     finally:
-        rb.set_research_ledger(None)                      # avoid leaking global into other tests
-    unset = asyncio.run(rb.TOOL_HANDLERS["research_note"]({"kind": "finding", "text": "y"}))
+        _tool_reg.set_research_ledger(None)                      # avoid leaking global into other tests
+    unset = asyncio.run(_tool_reg.tool_handlers["research_note"]({"kind": "finding", "text": "y"}))
     assert unset["ok"] is False
 
 
 def test_research_note_is_disclosed_tool() -> None:
-    from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
+    TOOL_DEFINITIONS = _tool_reg.tool_definitions
 
     names = {td.get("function", {}).get("name") for td in TOOL_DEFINITIONS}
     assert "research_note" in names
@@ -1083,11 +1086,11 @@ def test_delegate_task_depth_gating_is_default_equivalent() -> None:
         build_subagent_tool_filter,
     )
 
-    tools = ["file_read", "delegate_task", "gp_delegate_task", "shell_run"]
+    tools = ["file_read", "delegate_task", "shell_run"]
     # default max_depth=2: a depth-1 subagent must NOT see delegate_task
     # (byte-equivalent to the previous hard-block => single-level delegation)
     depth1 = build_subagent_tool_filter(tools, SubagentConfig(goal="g", depth=1), max_depth=2)
-    assert "delegate_task" not in depth1 and "gp_delegate_task" not in depth1
+    assert "delegate_task" not in depth1
     assert "file_read" in depth1
     # max_depth=3 unlocks one more level: depth-1 keeps delegate_task, depth-2 drops it
     d1 = build_subagent_tool_filter(tools, SubagentConfig(goal="g", depth=1), max_depth=3)

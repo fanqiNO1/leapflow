@@ -181,11 +181,99 @@ class UnixRpcServer:
 
         result = method(**params)
         if hasattr(result, "__await__"):
-            result = await result
+            approval_queue: asyncio.Queue[StreamChunk] | None = None
+            route_token: contextvars.Token[Any] | None = None
+            if request.method == "command.execute":
+                from leapflow.daemon.approval_route import approval_route as _approval_route
+
+                approval_queue = asyncio.Queue()
+                route_token = _approval_route.set((approval_queue, request.id))
+                try:
+                    self._service._approval_coordinator.register_route(request.id)
+                except AttributeError:
+                    pass
+            try:
+                result = await self._await_with_heartbeat(
+                    request.id,
+                    result,
+                    writer,
+                    approval_queue=approval_queue,
+                )
+            finally:
+                if route_token is not None:
+                    _approval_route.reset(route_token)
+                    try:
+                        self._service._approval_coordinator.unregister_route(request.id)
+                        self._service._approval_coordinator.deny_for_request(request.id, reason="command_ended")
+                    except AttributeError:
+                        pass
         response = RpcResponse.success(request.id, result)
         await _write_json(writer, response.to_json())
         if request.method == "daemon.shutdown" and self._on_shutdown is not None:
             self._on_shutdown()
+
+    async def _await_with_heartbeat(
+        self,
+        request_id: str,
+        coro: Any,
+        writer: asyncio.StreamWriter,
+        *,
+        approval_queue: "asyncio.Queue[StreamChunk] | None" = None,
+    ) -> Any:
+        """Await a coroutine while sending periodic heartbeats to keep the client alive.
+
+        Long-running RPC handlers (e.g. /plugin generate with LLM calls) can
+        exceed the client read timeout. Sending heartbeat notifications at a
+        regular interval resets the client's per-read deadline, preventing
+        spurious timeout disconnections.
+        """
+        task = asyncio.ensure_future(coro)
+        approval_get: asyncio.Task[Any] | None = None
+        while True:
+            wait_set: set[asyncio.Task[Any]] = {task}
+            if approval_queue is not None:
+                if approval_get is None or approval_get.done():
+                    approval_get = asyncio.create_task(approval_queue.get())
+                wait_set.add(approval_get)
+            done, _ = await asyncio.wait(
+                wait_set,
+                timeout=self._stream_heartbeat_s,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if approval_get is not None and approval_get in done:
+                chunk = approval_get.result()
+                approval_get = None
+                try:
+                    await _write_json(writer, chunk.to_notification().to_json())
+                except (ConnectionResetError, BrokenPipeError):
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    raise
+                continue
+            if task in done:
+                if approval_get is not None and not approval_get.done():
+                    approval_get.cancel()
+                return task.result()
+            # Send heartbeat to keep client connection alive
+            heartbeat = StreamChunk(
+                request_id=request_id,
+                content="",
+                event_type="status",
+                metadata={"heartbeat": True},
+            ).to_notification()
+            try:
+                await _write_json(writer, heartbeat.to_json())
+            except (ConnectionResetError, BrokenPipeError):
+                # Client disconnected; cancel the handler and re-raise
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                raise
 
     async def _dispatch_stream(
         self,
@@ -290,7 +378,7 @@ async def serve_daemon(settings: Any, *, mock_host: bool = False) -> int:
 
     runtime_dir = settings.runtime_dir
     sock_path = get_transport().readiness_path(runtime_dir)
-    service = RuntimeLeapService(settings, mock_host=mock_host)
+    service = RuntimeLeapService(settings, mock_host=mock_host, auto_start_deferred=False)
     await service.start()
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
@@ -312,6 +400,8 @@ async def serve_daemon(settings: Any, *, mock_host: bool = False) -> int:
             logger.debug("daemon: signal handlers unsupported on this event loop")
 
     task = asyncio.create_task(server.serve_forever())
+    await _wait_server_listening(server, task)
+    service.start_deferred_init()
     idle_task = asyncio.create_task(
         _watch_idle_shutdown(
             server,
@@ -336,6 +426,14 @@ async def serve_daemon(settings: Any, *, mock_host: bool = False) -> int:
         await service.shutdown()
         cleanup_runtime_dir(runtime_dir)
     return 0
+
+
+async def _wait_server_listening(server: UnixRpcServer, task: asyncio.Task[None]) -> None:
+    """Wait until the RPC server has bound its transport before background init."""
+    while getattr(server, "_server", None) is None:
+        if task.done():
+            await task
+        await asyncio.sleep(0.01)
 
 
 async def _watch_idle_shutdown(

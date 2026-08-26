@@ -23,11 +23,12 @@ logger = logging.getLogger(__name__)
 def build_tool_payload(ctx: "Context") -> dict[str, Any]:
     """Build a serializable tool summary for local or daemon rendering."""
     from leapflow.cli.banner import _categorize_tools
-    from leapflow.tools.registry_bootstrap import _capability_catalog
+    from leapflow.plugins import get_registry
+    _tool_registry = get_registry()
 
     # Live catalog: static registry plus semantic desktop tools while
     # perception is online (falls back to the static list otherwise).
-    tool_groups = _categorize_tools(_capability_catalog())
+    tool_groups = _categorize_tools(_tool_registry.capability_catalog())
     groups = {category: sorted(names) for category, names in tool_groups.items()}
     mcp_count = 0
     if hasattr(ctx.rpc, "connected") and ctx.rpc.connected:
@@ -1090,6 +1091,714 @@ async def handle_app(ctx: "Context", console: "LeapConsole", args: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# /plugin slash command
+# PENDING HUMAN CONFIRMATION per AGENTS.md:
+# This slash command requires a second human confirmation before shipping.
+# The behavior to exercise: /plugin list, /plugin status text_utils,
+# /plugin plan --latest, /plugin reload text_utils (in daemon mode with approval gate).
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _is_plugin_command(canonical: str) -> bool:
+    """Return True for any /plugin subcommand."""
+    return canonical == "plugin" or canonical.startswith("plugin ")
+
+
+# ── /plugin generate helpers ──────────────────────────────────────────
+
+
+def _parse_generate_flags(args: str) -> tuple[bool, bool, str, str]:
+    """Parse --preview, --dry-run, --id <id> from args, returning (preview, dry_run, explicit_id, description)."""
+    preview = False
+    dry_run = False
+    explicit_id = ""
+    tokens = args.split()
+    remaining: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--preview":
+            preview = True
+        elif tok in ("--dry-run", "--dry_run"):
+            dry_run = True
+        elif tok == "--id":
+            if i + 1 >= len(tokens):
+                # Missing value — signal error by returning empty description
+                return preview, dry_run, "", ""
+            i += 1
+            explicit_id = tokens[i]
+        else:
+            remaining.append(tok)
+        i += 1
+    return preview, dry_run, explicit_id, " ".join(remaining)
+
+
+def _slugify_description(desc: str) -> str:
+    """Derive a plugin_id slug from the first few meaningful words."""
+    import re
+
+    stopwords = {"a", "an", "the", "is", "to", "for", "and", "or", "of", "in", "on", "at", "that", "this", "it", "with"}
+    words = re.sub(r"[^a-z0-9\s]", "", desc.lower()).split()
+    meaningful = [w for w in words if w not in stopwords and len(w) > 1][:3]
+    if not meaningful:
+        meaningful = [w for w in words if len(w) > 1][:3]
+    slug = "_".join(meaningful)[:30].rstrip("_")
+    return slug or "generated_plugin"
+
+
+def plugin_generate_start_payload(args: str) -> dict[str, Any] | None:
+    """Return a user-facing progress preamble for /plugin generate.
+
+    The command itself is a non-streaming RPC in daemon mode, so this preamble is
+    rendered before the long call starts. It makes the blocking phase explicit
+    without inventing fake progress percentages.
+    """
+    normalized_args = args.strip()
+    if normalized_args == "generate":
+        normalized_args = ""
+    elif normalized_args.startswith("generate "):
+        normalized_args = normalized_args[len("generate "):].strip()
+    preview, dry_run, explicit_id, description = _parse_generate_flags(normalized_args)
+    if not description.strip():
+        return None
+    plugin_id = explicit_id or _slugify_description(description)
+    mode = "preview" if preview else ("dry-run" if dry_run else "install")
+    return {
+        "plugin_id": plugin_id,
+        "mode": mode,
+        "steps": [
+            "configuration and LLM provider checks",
+            "LLM generation with one bounded repair attempt",
+            "syntax / structure / protocol validation",
+            "profile install and sandbox smoke test" if mode == "install" else "return validated code without installing",
+            "runtime registry activation" if mode == "install" else "operator review",
+        ],
+    }
+
+
+def render_plugin_generate_start(console: "LeapConsole", args: str) -> None:
+    """Render immediate feedback before /plugin generate enters its long RPC."""
+    payload = plugin_generate_start_payload(args)
+    if payload is None:
+        return
+    from rich.panel import Panel
+    from rich.text import Text
+
+    info = Text()
+    info.append(f"Plugin: {payload['plugin_id']}\n")
+    info.append(f"Mode:   {payload['mode']}\n")
+    info.append("Stages:\n")
+    for idx, step in enumerate(payload["steps"], 1):
+        info.append(f"  {idx}. {step}\n")
+    info.append("This can take several minutes; daemon heartbeat keeps the command alive.")
+    console.print(Panel(info, title="Plugin generation started", border_style="yellow"))
+
+
+def _resolve_llm_for_generate(ctx: "Context") -> Any:
+    """Resolve an LLM provider usable for plugin generation."""
+    # Try self_management plugin's bound LLM first (daemon path)
+    try:
+        from leapflow.plugins import get_registry
+
+        reg = get_registry()
+        sm = reg.get_plugin("self_management")
+        if sm is not None:
+            llm = getattr(sm, "_llm_provider", None)
+            if llm is not None:
+                return llm
+    except (ImportError, RuntimeError, AttributeError):
+        pass
+    # Fallback: engine's LLM provider
+    engine = getattr(ctx, "engine", None)
+    if engine is not None:
+        llm = getattr(engine, "llm_provider", None) or getattr(engine, "_llm_provider", None)
+        if llm is not None:
+            return llm
+    return None
+
+
+async def _do_generate_install(ctx: "Context", plugin_id: str, code: str) -> dict[str, Any]:
+    """Write validated code to install_dir, smoke-test, register. Reuses self_management install logic."""
+    from leapflow.plugins import get_registry
+
+    reg = get_registry()
+    sm = reg.get_plugin("self_management")
+    if sm is not None and hasattr(sm, "_install_from_code"):
+        # Reuse the self_management install flow (validates, writes, smokes, registers)
+        try:
+            result = await sm._install_from_code(plugin_id, code)
+            return result
+        except (RuntimeError, OSError, ValueError, AttributeError, ImportError) as exc:
+            return {"ok": False, "error": f"Install failed: {exc}"}
+
+    # Fallback: minimal standalone install when self_management not available
+    from leapflow.learning.plugin_generator import PluginValidator
+
+    validator = PluginValidator()
+    vresult = await validator.validate(plugin_id, code)
+    if not vresult.ok:
+        return {"ok": False, "error": f"Re-validation failed at '{vresult.stage}': {vresult.error}"}
+
+    from leapflow.config import get_settings
+
+    settings = get_settings()
+    profile_layout = getattr(settings, "profile_layout", None)
+    if profile_layout is not None:
+        install_dir = profile_layout.plugins_dir
+    else:
+        install_dir = Path(settings.layout.root) / "plugins"
+    install_dir.mkdir(parents=True, exist_ok=True)
+    target = install_dir / f"{plugin_id}.py"
+    target.write_text(code)
+
+    # Dynamic import and register
+    import importlib.util
+
+    module_name = f"leapflow_gen_plugin_{plugin_id}"
+    spec = importlib.util.spec_from_file_location(module_name, target)
+    if spec is None or spec.loader is None:
+        target.unlink(missing_ok=True)
+        return {"ok": False, "error": "Failed to create module spec for installed plugin"}
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001
+        target.unlink(missing_ok=True)
+        return {"ok": False, "error": f"Plugin import failed after install: {exc}"}
+
+    plugin_obj = getattr(module, "plugin", None)
+    if plugin_obj is None:
+        target.unlink(missing_ok=True)
+        return {"ok": False, "error": "Installed module has no `plugin` attribute"}
+
+    try:
+        reg.register_plugin(plugin_obj)
+    except (TypeError, ValueError, RuntimeError) as exc:
+        target.unlink(missing_ok=True)
+        return {"ok": False, "error": f"Registration failed: {exc}"}
+
+    return {
+        "ok": True,
+        "plugin_id": plugin_id,
+        "tools": [t.name for t in plugin_obj.tools],
+        "message": f"Plugin '{plugin_id}' installed successfully.",
+    }
+
+
+async def _handle_plugin_generate(ctx: "Context", args: str) -> dict[str, Any]:
+    """Handle /plugin generate <description>."""
+    import time as _time
+
+    started = _time.monotonic()
+    steps: list[dict[str, Any]] = []
+
+    def add_step(name: str, status: str, detail: str = "") -> None:
+        steps.append({"name": name, "status": status, "detail": detail})
+
+    def elapsed() -> float:
+        return round(_time.monotonic() - started, 2)
+
+    # 1. Parse flags
+    normalized_args = args.strip()
+    if normalized_args == "generate":
+        normalized_args = ""
+    elif normalized_args.startswith("generate "):
+        normalized_args = normalized_args[len("generate "):].strip()
+    preview, dry_run, explicit_id, description = _parse_generate_flags(normalized_args)
+    if not description.strip():
+        return {"ok": False, "error": "Usage: /plugin generate <description>"}
+    add_step("parse_request", "ok", "Parsed generation flags and description.")
+
+    # 2. Config gate
+    from leapflow.config import get_settings
+
+    settings = get_settings()
+    if not getattr(settings, "plugin_generation_enabled", False):
+        add_step("config_gate", "blocked", "plugin.generation_enabled is false")
+        return {
+            "ok": False,
+            "view": "plugin_generate",
+            "steps": steps,
+            "duration_s": elapsed(),
+            "error": "Plugin generation is disabled. Enable: /config set plugin.generation_enabled true",
+        }
+    add_step("config_gate", "ok", "Plugin generation is enabled.")
+
+    # 3. LLM gate
+    llm_provider = _resolve_llm_for_generate(ctx)
+    if llm_provider is None:
+        add_step("llm_gate", "blocked", "No LLM provider is available.")
+        return {
+            "ok": False,
+            "view": "plugin_generate",
+            "steps": steps,
+            "duration_s": elapsed(),
+            "error": "No LLM provider available. Configure credentials first.",
+        }
+    add_step("llm_gate", "ok", f"Using provider {llm_provider.__class__.__name__}.")
+
+    # 4. Derive plugin_id
+    plugin_id = explicit_id or _slugify_description(description)
+    add_step("plugin_id", "ok", f"Resolved plugin id: {plugin_id}")
+
+    # Check collision
+    from leapflow.plugins import get_registry
+
+    reg = get_registry()
+    if reg.get_plugin(plugin_id) is not None:
+        add_step("collision_check", "blocked", f"Plugin '{plugin_id}' already exists.")
+        return {
+            "ok": False,
+            "view": "plugin_generate",
+            "plugin_id": plugin_id,
+            "steps": steps,
+            "duration_s": elapsed(),
+            "error": f"Plugin '{plugin_id}' already exists. Use --id <new_name> or /plugin reload {plugin_id}.",
+        }
+    add_step("collision_check", "ok", "No existing plugin has that id.")
+
+    # 5. Generate with bounded retry (max 1 refinement on validation failure)
+    from leapflow.learning.plugin_generator import PluginGenerator, PluginGenerationRequest
+
+    generator = PluginGenerator(llm_provider=llm_provider)
+
+    code: str | None = None
+    tools_list: list[str] = []
+    last_error: str | None = None
+
+    for attempt in range(2):
+        desc_for_llm = description
+        if attempt > 0 and last_error:
+            MAX_ERROR_SNIPPET = 512
+            snippet = (last_error or "")[:MAX_ERROR_SNIPPET]
+            desc_for_llm = f"{description}\n\nPrevious attempt failed: {snippet}. Fix the issue."
+
+        request = PluginGenerationRequest(plugin_id=plugin_id, description=desc_for_llm)
+        attempt_started = _time.monotonic()
+        result = await generator.generate_and_validate(request)
+        attempt_duration = round(_time.monotonic() - attempt_started, 2)
+
+        if result.get("ok"):
+            code = result["code"]
+            tools_list = result.get("exposed_tools", [])
+            add_step(
+                f"generate_attempt_{attempt + 1}",
+                "ok",
+                f"Generated and validated {len(tools_list)} tool(s) in {attempt_duration}s.",
+            )
+            break
+        last_error = result.get("error", "Unknown error")
+        stage = str(result.get("stage", ""))
+        add_step(
+            f"generate_attempt_{attempt + 1}",
+            "failed",
+            f"stage={stage or 'unknown'}; {last_error}; duration={attempt_duration}s",
+        )
+        # Only retry on refinable failures (syntax/protocol/structure)
+        if stage not in ("syntax", "protocol", "structure"):
+            break
+
+    if code is None:
+        return {
+            "ok": False,
+            "view": "plugin_generate",
+            "plugin_id": plugin_id,
+            "steps": steps,
+            "duration_s": elapsed(),
+            "error": f"Generation failed: {last_error}",
+        }
+
+    # 6. Preview gate
+    if preview:
+        add_step("preview", "waiting_review", "Generated code returned without installing.")
+        return {
+            "ok": True,
+            "view": "plugin_generate_preview",
+            "code": code,
+            "plugin_id": plugin_id,
+            "tools": tools_list,
+            "steps": steps,
+            "duration_s": elapsed(),
+            "awaiting_confirm": True,
+            "message": f"Preview generated for plugin '{plugin_id}'.",
+        }
+
+    if dry_run:
+        add_step("dry_run", "ok", "Validated code returned without installing.")
+        return {
+            "ok": True,
+            "view": "plugin_generate_dry",
+            "code": code,
+            "plugin_id": plugin_id,
+            "tools": tools_list,
+            "steps": steps,
+            "duration_s": elapsed(),
+            "message": f"Dry run: plugin '{plugin_id}' validated but not installed.",
+        }
+
+    # 7. Install
+    install_started = _time.monotonic()
+    install_result = await _do_generate_install(ctx, plugin_id, code)
+    install_duration = round(_time.monotonic() - install_started, 2)
+    if not install_result.get("ok"):
+        add_step("install", "failed", f"{install_result.get('error', 'install failed')}; duration={install_duration}s")
+        install_result["view"] = "plugin_generate"
+        install_result["plugin_id"] = plugin_id
+        install_result["tools"] = tools_list
+        install_result["steps"] = steps
+        install_result["duration_s"] = elapsed()
+        return install_result
+    add_step("install", "ok", f"Installed, smoke-tested, and activated in {install_duration}s.")
+
+    # 8. Success
+    return {
+        "ok": True,
+        "view": "plugin_generate",
+        "plugin_id": plugin_id,
+        "tools": tools_list,
+        "trust_level": "DRAFT",
+        "steps": steps,
+        "duration_s": elapsed(),
+        "install": install_result,
+        "message": f"Plugin '{plugin_id}' generated, validated, and installed.",
+    }
+
+
+async def build_plugin_payload(ctx: "Context", args: str) -> dict[str, Any]:
+    """Build a serializable payload for /plugin commands."""
+    parts = args.strip().split(None, 1)
+    subcommand = parts[0] if parts else "list"
+    sub_args = parts[1].strip() if len(parts) > 1 else ""
+
+    from leapflow.plugins import get_registry, get_scoped_registry
+
+    if subcommand == "list":
+        try:
+            reg = get_registry()
+            scoped = get_scoped_registry()
+            plugins_info: list[dict[str, Any]] = []
+            for plugin_id, plugin in reg.plugins.items():
+                fiber = scoped.get_fiber(plugin_id)
+                plugins_info.append({
+                    "plugin_id": plugin_id,
+                    "category": plugin.category,
+                    "tool_count": len(plugin.tools),
+                    "state": fiber.state.value if fiber else "unmanaged",
+                    "generation": fiber.generation if fiber else None,
+                })
+            return {
+                "ok": True,
+                "view": "plugin_list",
+                "plugin_count": len(plugins_info),
+                "plugins": plugins_info,
+            }
+        except (RuntimeError, AttributeError) as exc:
+            return {"ok": False, "error": f"plugin list failed: {exc}"}
+
+    if subcommand == "status":
+        if not sub_args:
+            return {"ok": False, "error": "Usage: /plugin status <plugin_id>"}
+        plugin_id = sub_args.split()[0]
+        try:
+            reg = get_registry()
+            plugin = reg.get_plugin(plugin_id)
+            if plugin is None:
+                return {"ok": False, "error": f"Plugin '{plugin_id}' not registered"}
+            scoped = get_scoped_registry()
+            fiber = scoped.get_fiber(plugin_id)
+            response: dict[str, Any] = {
+                "ok": True,
+                "view": "plugin_status",
+                "plugin_id": plugin_id,
+                "category": plugin.category,
+                "dependencies": list(plugin.dependencies),
+                "tools": [
+                    {"name": t.name, "description": t.description}
+                    for t in plugin.tools
+                ],
+                "fiber": {
+                    "state": fiber.state.value if fiber else "unmanaged",
+                    "generation": fiber.generation if fiber else None,
+                },
+            }
+            # Additive trust info
+            try:
+                from leapflow.learning.plugin_advisor import get_default_advisor
+
+                advisor = get_default_advisor()
+                if advisor is not None:
+                    trust = advisor._trust_ledger.level(plugin_id)
+                    response["trust_level"] = trust.name
+            except (ImportError, AttributeError, RuntimeError):
+                pass
+            return response
+        except (RuntimeError, AttributeError) as exc:
+            return {"ok": False, "error": f"plugin status failed: {exc}"}
+
+    if subcommand == "plan":
+        tokens = sub_args.split()
+        latest = "--latest" in tokens
+        limit = 5
+        if "--limit" in tokens:
+            idx = tokens.index("--limit")
+            if idx + 1 >= len(tokens):
+                return {"ok": False, "error": "Usage: /plugin plan [--latest|--limit <n>]"}
+            try:
+                limit = max(1, int(tokens[idx + 1]))
+            except ValueError:
+                return {"ok": False, "error": "--limit must be an integer"}
+        try:
+            reg = get_registry()
+            sm_plugin = reg.get_plugin("self_management")
+            if sm_plugin is None:
+                return {"ok": False, "error": "self_management plugin not available"}
+            handler = getattr(sm_plugin, "_plugin_plan_handler", None)
+            if handler is None:
+                return {"ok": False, "error": "plugin_plan handler not available"}
+            result = await handler(limit=limit, latest=latest)
+            result["view"] = "plugin_plan"
+            return result
+        except (RuntimeError, AttributeError) as exc:
+            return {"ok": False, "error": f"plugin plan failed: {exc}"}
+
+    if subcommand in ("reload", "disable", "enable"):
+        if not sub_args:
+            return {"ok": False, "error": f"Usage: /plugin {subcommand} <plugin_id>"}
+        plugin_id = sub_args.split()[0]
+        # Delegate to self_management plugin handler
+        try:
+            reg = get_registry()
+            sm_plugin = reg.get_plugin("self_management")
+            if sm_plugin is None:
+                return {"ok": False, "error": "self_management plugin not available"}
+            handler_name = f"_plugin_{subcommand}_handler"
+            handler = getattr(sm_plugin, handler_name, None)
+            if handler is None:
+                return {"ok": False, "error": f"Handler for '{subcommand}' not found"}
+            result = await handler(plugin_id=plugin_id)
+            result["view"] = f"plugin_{subcommand}"
+            return result
+        except (RuntimeError, AttributeError) as exc:
+            return {"ok": False, "error": f"plugin {subcommand} failed: {exc}"}
+
+    if subcommand == "generate":
+        return await _handle_plugin_generate(ctx, sub_args)
+
+    return {"ok": False, "error": f"Unknown subcommand: /plugin {subcommand}. Use: list, status, plan, reload, disable, enable, generate"}
+
+
+def _render_plugin_generate_steps(console: "LeapConsole", payload: dict[str, Any]) -> None:
+    """Render generation stage details when present."""
+    steps = payload.get("steps") or []
+    if not steps:
+        return
+    from rich.table import Table
+
+    duration = payload.get("duration_s")
+    title = "Plugin generation stages"
+    if duration is not None:
+        title = f"{title} ({duration}s)"
+    table = Table(
+        title=title,
+        show_header=True,
+        header_style="bold",
+        border_style="bright_black",
+        title_style="bold cyan",
+        padding=(0, 1),
+    )
+    table.add_column("Stage", style="cyan", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Details")
+    for step in steps:
+        status = str(step.get("status") or "")
+        style = "green" if status == "ok" else ("yellow" if status in {"blocked", "waiting_review"} else "red")
+        table.add_row(
+            str(step.get("name") or ""),
+            f"[{style}]{status or '-'}[/{style}]",
+            str(step.get("detail") or ""),
+        )
+    console.print(table)
+
+
+def render_plugin_payload(console: "LeapConsole", payload: dict[str, Any]) -> None:
+    """Render a /plugin command result."""
+    view = str(payload.get("view") or "")
+    if not payload.get("ok", True):
+        if view == "plugin_generate":
+            _render_plugin_generate_steps(console, payload)
+        console.warning(str(payload.get("error") or "Plugin command failed."))
+        return
+
+    if view == "plugin_list":
+        from rich.table import Table
+
+        plugins = payload.get("plugins") or []
+        if not plugins:
+            console.system("No plugins registered.")
+            return
+        table = Table(
+            title="Registered Plugins",
+            show_header=True,
+            header_style="bold",
+            border_style="bright_black",
+            title_style="bold cyan",
+            padding=(0, 1),
+        )
+        table.add_column("Plugin ID", style="cyan", no_wrap=True)
+        table.add_column("Category")
+        table.add_column("Tools", justify="center")
+        table.add_column("State")
+        table.add_column("Gen", justify="center")
+        for p in plugins:
+            state = str(p.get("state") or "unknown")
+            state_style = "green" if state == "active" else ("red" if state == "disposed" else "yellow")
+            table.add_row(
+                str(p.get("plugin_id") or ""),
+                str(p.get("category") or ""),
+                str(p.get("tool_count") or 0),
+                f"[{state_style}]{state}[/{state_style}]",
+                str(p.get("generation") or "-"),
+            )
+        console.print(table)
+        console.system(f"{payload.get('plugin_count', 0)} plugins registered")
+        return
+
+    if view == "plugin_status":
+        from rich.panel import Panel
+        from rich.text import Text
+
+        info = Text()
+        info.append(f"Plugin:      {payload.get('plugin_id')}\n")
+        info.append(f"Category:    {payload.get('category')}\n")
+        fiber = payload.get("fiber") or {}
+        info.append(f"State:       {fiber.get('state', 'unknown')}\n")
+        info.append(f"Generation:  {fiber.get('generation', '-')}\n")
+        trust = payload.get("trust_level")
+        if trust:
+            info.append(f"Trust:       {trust}\n")
+        deps = payload.get("dependencies") or []
+        if deps:
+            info.append(f"Deps:        {', '.join(deps)}\n")
+        tools = payload.get("tools") or []
+        if tools:
+            info.append(f"Tools ({len(tools)}):")
+            for t in tools:
+                info.append(f"\n  - {t.get('name')}: {t.get('description', '')[:50]}")
+        console.print(Panel(info, title=str(payload.get("plugin_id") or "Plugin"), border_style="cyan"))
+        return
+
+    if view == "plugin_plan":
+        from rich.table import Table
+
+        records = payload.get("records") or []
+        if not records:
+            console.system("No adaptive plugin capability decisions recorded yet.")
+            return
+        table = Table(
+            title="Adaptive Plugin Plans",
+            show_header=True,
+            header_style="bold",
+            border_style="bright_black",
+            title_style="bold cyan",
+            padding=(0, 1),
+        )
+        table.add_column("Record", style="cyan", no_wrap=True)
+        table.add_column("Phase", no_wrap=True)
+        table.add_column("Selected")
+        table.add_column("Plan")
+        table.add_column("Mutation", no_wrap=True)
+        table.add_column("Registry Δ", no_wrap=True)
+        table.add_column("Executable", justify="center")
+        for record in records:
+            resolutions = record.get("resolutions") or []
+            selected = []
+            for resolution in resolutions:
+                selected_payload = resolution.get("selected") or {}
+                candidate = selected_payload.get("candidate") or {}
+                tool_name = str(candidate.get("tool_name") or "")
+                if tool_name:
+                    selected.append(tool_name)
+            plan_payload = record.get("plan") or {}
+            steps = plan_payload.get("steps") or []
+            mutation = record.get("mutation") or {}
+            registry_before = record.get("registry_version_before")
+            registry_after = record.get("registry_version_after")
+            registry_delta = "-"
+            if registry_before is not None and registry_after is not None:
+                registry_delta = f"{registry_before}→{registry_after}"
+            table.add_row(
+                str(record.get("record_id") or "")[:18],
+                str(record.get("phase") or "-"),
+                ", ".join(selected) or "-",
+                " → ".join(str(s.get("tool_name") or "") for s in steps) or "-",
+                str(mutation.get("action") or "-"),
+                registry_delta,
+                "yes" if plan_payload.get("executable") else "no",
+            )
+        console.print(table)
+        return
+
+    if view == "plugin_generate":
+        msg = payload.get("message", "")
+        plugin_id = payload.get("plugin_id", "")
+        tools = payload.get("tools") or []
+        trust = payload.get("trust_level", "")
+        parts = []
+        if msg:
+            parts.append(msg)
+        if tools:
+            parts.append(f"Tools: {', '.join(tools)}")
+        if trust:
+            parts.append(f"Trust: {trust}")
+        duration = payload.get("duration_s")
+        if duration is not None:
+            parts.append(f"Duration: {duration}s")
+        console.success(" | ".join(parts) if parts else f"Plugin '{plugin_id}' generated.")
+        _render_plugin_generate_steps(console, payload)
+        return
+
+    if view == "plugin_generate_preview":
+        from rich.panel import Panel
+        from rich.syntax import Syntax
+
+        plugin_id = payload.get("plugin_id", "")
+        tools = payload.get("tools") or []
+        code = payload.get("code", "")
+        console.system(f"Preview: plugin '{plugin_id}' with tools: {', '.join(tools)}")
+        _render_plugin_generate_steps(console, payload)
+        console.print(Panel(
+            Syntax(code, "python", theme="monokai", line_numbers=True),
+            title=f"{plugin_id} (preview)",
+            border_style="yellow",
+        ))
+        console.system("Use /plugin generate <same description> (without --preview) to install.")
+        return
+
+    if view == "plugin_generate_dry":
+        plugin_id = payload.get("plugin_id", "")
+        tools = payload.get("tools") or []
+        msg = payload.get("message", f"Dry run complete for '{plugin_id}'.")
+        console.system(f"{msg} Tools: {', '.join(tools)}")
+        _render_plugin_generate_steps(console, payload)
+        return
+
+    # Mutation results (reload, disable, enable)
+    action = str(payload.get("action") or view.replace("plugin_", ""))
+    plugin_id = str(payload.get("plugin_id") or "")
+    if payload.get("requires_approval"):
+        console.warning(str(payload.get("error") or f"Action '{action}' requires approval."))
+    else:
+        state = str(payload.get("state") or "")
+        gen = payload.get("new_generation") or payload.get("generation") or "-"
+        console.success(f"Plugin '{plugin_id}' {action}: state={state}, generation={gen}")
+
+
+async def handle_plugin(ctx: "Context", console: "LeapConsole", args: str) -> None:
+    """Handle /plugin slash command dispatch."""
+    render_plugin_payload(console, await build_plugin_payload(ctx, args))
+
+
+# ══════════════════════════════════════════════════════════════════════
 # Unified command_execute: dispatches any engine-routed slash command
 # ══════════════════════════════════════════════════════════════════════
 
@@ -1194,6 +1903,13 @@ async def command_execute(
         return _execute_scheduler_task(ctx)
     if name == "board" or name.startswith("board "):
         return await _execute_dashboard(ctx, name, args, session_id=session_id)
+    if _is_plugin_command(name):
+        plugin_args = name[len("plugin"):].strip()
+        if plugin_args:
+            plugin_args = plugin_args + (" " + args if args else "")
+        else:
+            plugin_args = args
+        return await build_plugin_payload(ctx, plugin_args)
     return {"ok": False, "message": f"Unknown command: /{name}"}
 
 
@@ -1897,11 +2613,13 @@ async def _execute_scheduler_arm(ctx: "Context", args: str) -> dict[str, Any]:
 
 def render_command_payload(console: "LeapConsole", payload: dict[str, Any]) -> None:
     """Render a generic command_execute result payload in the TUI."""
+    view = str(payload.get("view") or "")
+    if view.startswith("plugin_"):
+        render_plugin_payload(console, payload)
+        return
     if not payload.get("ok"):
         console.warning(str(payload.get("message") or payload.get("error") or "Command failed."))
         return
-
-    view = str(payload.get("view") or "")
 
     if view == "status":
         _render_status_view(console, payload)

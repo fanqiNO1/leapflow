@@ -1,6 +1,6 @@
 """File system operations — list, read, write.
 
-All handlers follow the ToolBridge convention: receive params dict, return result dict.
+All handlers follow the unified tool convention: receive params dict, return result dict.
 Safety layers:
 1. Sensitive path block: credential files, private keys, auth tokens
 2. System path block: OS system directories for writes
@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
 from leapflow.security.path_sensitivity import PathSensitivity, classify_path_sensitivity
-from leapflow.tools.execution_context import resolve_workspace_path, workspace_scope_error
+from leapflow.tools.execution_context import require_workspace_access, resolve_workspace_path
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +241,7 @@ async def file_list(params: Dict[str, Any]) -> Dict[str, Any]:
     depth = _safe_int(params.get("depth", 0), 0, minimum=0, maximum=5)
 
     target = resolve_workspace_path(path, default=".")
-    scope_error = workspace_scope_error(target, operation="file_list")
+    scope_error = await require_workspace_access(target, operation="file_list")
     if scope_error:
         return scope_error
     if not target.exists():
@@ -295,7 +295,7 @@ async def file_read(params: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": "Missing required parameter: path"}
 
     target = resolve_workspace_path(path)
-    scope_error = workspace_scope_error(target, operation="file_read")
+    scope_error = await require_workspace_access(target, operation="file_read")
     if scope_error:
         return scope_error
     sensitivity = classify_path_sensitivity(target)
@@ -327,8 +327,9 @@ async def file_read(params: Dict[str, Any]) -> Dict[str, Any]:
 
     if sensitivity.requires_approval:
         try:
-            from leapflow.tools.registry_bootstrap import get_file_read_gate
-            gate = get_file_read_gate()
+            from leapflow.plugins import get_registry
+            _tool_registry = get_registry()
+            gate = _tool_registry.get_file_read_gate()
             if gate is None:
                 return {
                     "ok": False,
@@ -428,7 +429,7 @@ async def file_write(params: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": "Missing required parameter: path"}
 
     target = resolve_workspace_path(path)
-    scope_error = workspace_scope_error(target, operation="file_write")
+    scope_error = await require_workspace_access(target, operation="file_write", effect="write")
     if scope_error:
         return scope_error
     sensitivity = classify_path_sensitivity(target)
@@ -437,8 +438,9 @@ async def file_write(params: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": _write_block_message(target, sensitivity)}
 
     try:
-        from leapflow.tools.registry_bootstrap import get_file_write_gate
-        gate = get_file_write_gate()
+        from leapflow.plugins import get_registry
+        _tool_registry = get_registry()
+        gate = _tool_registry.get_file_write_gate()
         if gate is not None:
             try:
                 approved = await gate.check(str(target), content, mode, _sensitivity_metadata(sensitivity))
@@ -709,7 +711,7 @@ async def code_search(params: Dict[str, Any]) -> Dict[str, Any]:
     else:
         pattern = all_patterns[0]
     base = resolve_workspace_path(params.get("path", ".") or ".", default=".")
-    scope_error = workspace_scope_error(base, operation="code_search")
+    scope_error = await require_workspace_access(base, operation="code_search")
     if scope_error:
         return scope_error
     if not base.exists():
@@ -772,7 +774,7 @@ async def file_find(params: Dict[str, Any]) -> Dict[str, Any]:
     if not pattern:
         return {"ok": False, "error": "Missing required parameter: glob"}
     base = resolve_workspace_path(params.get("path", ".") or ".", default=".")
-    scope_error = workspace_scope_error(base, operation="file_find")
+    scope_error = await require_workspace_access(base, operation="file_find")
     if scope_error:
         return scope_error
     if not base.exists() or not base.is_dir():
@@ -868,7 +870,7 @@ async def edit_file(params: Dict[str, Any]) -> Dict[str, Any]:
     dry_run = bool(params.get("dry_run", False))
 
     target = resolve_workspace_path(path)
-    scope_error = workspace_scope_error(target, operation="edit_file")
+    scope_error = await require_workspace_access(target, operation="edit_file", effect="write")
     if scope_error:
         return scope_error
     sensitivity = classify_path_sensitivity(target)
@@ -922,8 +924,9 @@ async def edit_file(params: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     try:
-        from leapflow.tools.registry_bootstrap import get_file_write_gate
-        gate = get_file_write_gate()
+        from leapflow.plugins import get_registry
+        _tool_registry = get_registry()
+        gate = _tool_registry.get_file_write_gate()
         if gate is not None:
             try:
                 approved = await gate.check(str(target), content, "overwrite", _sensitivity_metadata(sensitivity))

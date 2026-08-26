@@ -834,7 +834,6 @@ async def test_exact_canonical_tool_names_execute_without_guessing() -> None:
             reg = build_default_registry(rpc, llm, wm, lt)
             classifier = _FixedClassifier("complex")
             engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, classifier)
-            engine._tool_bridge = None
 
             result = await engine._execute_general_tool(
                 {"name": "file_list", "arguments": {"path": "."}},
@@ -896,7 +895,6 @@ async def test_tool_execution_ledger_skips_duplicate_external_tool() -> None:
             reg = build_default_registry(rpc, llm, wm, lt)
             classifier = _FixedClassifier("complex")
             engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, classifier)
-            engine._tool_bridge = None
             engine._current_session_id = "session-1"
             engine._session_turn_count = 1
             engine._begin_turn_context("push once")
@@ -939,7 +937,6 @@ async def test_tool_execution_ledger_waits_for_inflight_duplicate_external_tool(
             reg = build_default_registry(rpc, llm, wm, lt)
             classifier = _FixedClassifier("complex")
             engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, classifier)
-            engine._tool_bridge = None
             engine._current_session_id = "session-1"
             engine._session_turn_count = 1
             engine._begin_turn_context("push once")
@@ -990,7 +987,6 @@ async def test_tool_execution_ledger_allows_repeated_read_only_tool() -> None:
             reg = build_default_registry(rpc, llm, wm, lt)
             classifier = _FixedClassifier("complex")
             engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, classifier)
-            engine._tool_bridge = None
             engine._current_session_id = "session-1"
             engine._session_turn_count = 1
             engine._begin_turn_context("list twice")
@@ -1030,7 +1026,6 @@ async def test_side_effect_failure_stops_remaining_native_tool_batch() -> None:
             reg = build_default_registry(rpc, llm, wm, lt)
             classifier = _FixedClassifier("complex")
             engine = AgentEngine(settings, rpc, llm, wm, lt, imm, reg, classifier)
-            engine._tool_bridge = None
             engine._execute_general_tool = AsyncMock(side_effect=execute_tool)  # type: ignore[method-assign]
             engine._current_session_id = "session-1"
             engine._session_turn_count = 1
@@ -2166,34 +2161,56 @@ def test_record_tool_call_categories_caches_capability_manifests(monkeypatch) ->
 # ═══════════════════════════════════════════════════════════════════
 
 
-def _desktop_bridge():
-    """Real ToolBridge carrying semantic tools registered like bridge_factory does."""
-    from leapflow.skills.tool_executor import ToolBridge
+def _activate_desktop_plugin(monkeypatch) -> list:
+    """Activate the global desktop_semantic plugin with recording fake tools.
 
-    bridge = ToolBridge(object())
+    Mirrors the production wiring: cli/context.py calls
+    registry.bind_runtime(perception=..., execution=...) and the engine reads
+    schemas/handlers from the plugin. Returns the shared call log so tests can
+    assert handler dispatch actually reached the semantic tools.
+    """
+    import leapflow.plugins.tool_plugins.desktop_semantic as ds
+    from leapflow.plugins import get_registry
+
     calls: list = []
 
-    async def _observe(params):
-        calls.append(("observe_ui", dict(params)))
-        return {"ok": True, "tree": "app:Browser"}
+    def _fake_entries(adapter):
+        async def _observe(params):
+            calls.append(("observe_ui", dict(params)))
+            return {"ok": True, "tree": "app:Browser"}
 
-    async def _click(params):
-        calls.append(("click", dict(params)))
-        return {"ok": True, "clicked": params.get("selector")}
+        async def _click(params):
+            calls.append(("click", dict(params)))
+            return {"ok": True, "clicked": params.get("selector")}
 
-    bridge.register(
-        "observe_ui", "Observe the current UI state",
-        {"app": "string (optional) — application name"}, _observe,
-    )
-    bridge.register(
-        "click", "Click a UI element",
-        {"selector": "string (required) — element selector"}, _click,
-        mutates_state=True,
-    )
-    return bridge, calls
+        return [
+            ds.SemanticToolEntry(
+                name="observe_ui",
+                description="Observe the current UI state",
+                parameters={"app": "string (optional) — application name"},
+                handler=_observe,
+            ),
+            ds.SemanticToolEntry(
+                name="click",
+                description="Click a UI element",
+                parameters={"selector": "string (required) — element selector"},
+                handler=_click,
+                mutates_state=True,
+            ),
+        ]
+
+    monkeypatch.setattr(ds, "build_semantic_tool_entries", _fake_entries)
+    get_registry().bind_runtime(perception=object(), execution=object())
+    return calls
 
 
-def _build_desktop_engine(td: str, bridge, llm=None, **settings_overrides):
+def _deactivate_desktop_plugin() -> None:
+    from leapflow.plugins import get_registry
+
+    get_registry().bind_runtime(perception=None, execution=None)
+
+
+def _build_desktop_engine(td: str, llm=None, **settings_overrides):
     from conftest import StubLLM
     from leapflow.platform.mock import MockBridge
 
@@ -2209,69 +2226,79 @@ def _build_desktop_engine(td: str, bridge, llm=None, **settings_overrides):
     reg = build_default_registry(rpc, llm, wm, lt)
     engine = AgentEngine(
         settings, rpc, llm, wm, lt, imm, reg,
-        _FixedClassifier("chat"), tool_bridge=bridge,
+        _FixedClassifier("chat"),
     )
     return engine, lt
 
 
 @pytest.mark.asyncio
-async def test_unified_catalog_merges_semantic_tools_when_bridge_online() -> None:
-    """Catalog and handler table gain the bridge's semantic tools; static registry untouched."""
-    from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
+async def test_unified_catalog_merges_semantic_tools_when_plugin_active(monkeypatch) -> None:
+    """Catalog and handler table gain the plugin's semantic tools; static registry untouched."""
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
+    TOOL_DEFINITIONS = _tool_reg.tool_definitions
 
-    bridge, _ = _desktop_bridge()
-    with tempfile.TemporaryDirectory() as td:
-        engine, lt = _build_desktop_engine(td, bridge)
-        try:
-            catalog_names = {
-                item.get("function", {}).get("name")
-                for item in engine._unified_tool_catalog()
-            }
-            assert {"observe_ui", "click"} <= catalog_names
-            handlers = engine._unified_tool_handlers()
-            assert "observe_ui" in handlers and "click" in handlers
-            static_names = {
-                item.get("function", {}).get("name") for item in TOOL_DEFINITIONS
-            }
-            assert "click" not in static_names
-        finally:
-            lt.close()
-
-
-@pytest.mark.asyncio
-async def test_unified_catalog_rebuilds_when_static_registry_grows() -> None:
-    """Tools appended after engine construction (session_search pattern) are picked up."""
-    from leapflow.tools.registry_bootstrap import TOOL_DEFINITIONS
-
-    bridge, _ = _desktop_bridge()
-    with tempfile.TemporaryDirectory() as td:
-        engine, lt = _build_desktop_engine(td, bridge)
-        try:
-            assert engine._unified_tool_catalog()  # prime the cache
-            TOOL_DEFINITIONS.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "late_registered_probe",
-                        "description": "probe",
-                        "parameters": {"type": "object", "properties": {}},
-                    },
-                }
-            )
+    _activate_desktop_plugin(monkeypatch)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            engine, lt = _build_desktop_engine(td)
             try:
-                names = {
+                catalog_names = {
                     item.get("function", {}).get("name")
                     for item in engine._unified_tool_catalog()
                 }
-                assert "late_registered_probe" in names
+                assert {"observe_ui", "click"} <= catalog_names
+                handlers = engine._unified_tool_handlers()
+                assert "observe_ui" in handlers and "click" in handlers
+                static_names = {
+                    item.get("function", {}).get("name") for item in TOOL_DEFINITIONS
+                }
+                assert "click" not in static_names
             finally:
-                TOOL_DEFINITIONS.pop()
-        finally:
-            lt.close()
+                lt.close()
+    finally:
+        _deactivate_desktop_plugin()
 
 
 @pytest.mark.asyncio
-async def test_core_turn_hides_desktop_schemas_but_lists_them_in_index() -> None:
+async def test_unified_catalog_rebuilds_when_static_registry_grows(monkeypatch) -> None:
+    """Tools appended after engine construction (session_search pattern) are picked up."""
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
+    TOOL_DEFINITIONS = _tool_reg.tool_definitions
+
+    _activate_desktop_plugin(monkeypatch)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            engine, lt = _build_desktop_engine(td)
+            try:
+                assert engine._unified_tool_catalog()  # prime the cache
+                TOOL_DEFINITIONS.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "late_registered_probe",
+                            "description": "probe",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                )
+                try:
+                    names = {
+                        item.get("function", {}).get("name")
+                        for item in engine._unified_tool_catalog()
+                    }
+                    assert "late_registered_probe" in names
+                finally:
+                    TOOL_DEFINITIONS.pop()
+            finally:
+                lt.close()
+    finally:
+        _deactivate_desktop_plugin()
+
+
+@pytest.mark.asyncio
+async def test_core_turn_hides_desktop_schemas_but_lists_them_in_index(monkeypatch) -> None:
     """CORE keeps desktop out of the native tools kwarg while the index names them."""
     from leapflow.llm.base import LLMChatResponse, LLMProvider
 
@@ -2289,70 +2316,77 @@ async def test_core_turn_hides_desktop_schemas_but_lists_them_in_index() -> None
             if False:
                 yield ""
 
-    bridge, _ = _desktop_bridge()
-    with tempfile.TemporaryDirectory() as td:
-        llm = CaptureLLM()
-        engine, lt = _build_desktop_engine(td, bridge, llm=llm)
-        try:
-            await engine.run("hello")
-            native_names = {
-                tool.get("function", {}).get("name", "")
-                for tool in llm.kwargs.get("tools", [])
-            }
-            assert "click" not in native_names
-            assert "observe_ui" not in native_names
-            system_prompt = str(llm.messages[0].get("content", ""))
-            assert "click" in system_prompt
-            assert "capability_expand category: desktop" in system_prompt
-        finally:
-            lt.close()
+    _activate_desktop_plugin(monkeypatch)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            llm = CaptureLLM()
+            engine, lt = _build_desktop_engine(td, llm=llm)
+            try:
+                await engine.run("hello")
+                native_names = {
+                    tool.get("function", {}).get("name", "")
+                    for tool in llm.kwargs.get("tools", [])
+                }
+                assert "click" not in native_names
+                assert "observe_ui" not in native_names
+                system_prompt = str(llm.messages[0].get("content", ""))
+                assert "click" in system_prompt
+                assert "capability_expand category: desktop" in system_prompt
+            finally:
+                lt.close()
+    finally:
+        _deactivate_desktop_plugin()
 
 
 @pytest.mark.asyncio
-async def test_semantic_execution_gate_and_perception_offline() -> None:
+async def test_semantic_execution_gate_and_perception_offline(monkeypatch) -> None:
     """Observation runs ungated; mutating tools fail closed without approval;
     offline the tool is unavailable rather than unknown."""
     import types
 
-    from leapflow.tools import registry_bootstrap as rb
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
 
-    bridge, calls = _desktop_bridge()
+    calls = _activate_desktop_plugin(monkeypatch)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            engine, lt = _build_desktop_engine(td)
+            try:
+                handlers = engine._unified_tool_handlers()
+
+                observed = await engine._execute_general_tool(
+                    {"name": "observe_ui", "arguments": {"app": "Safari"}}, handlers
+                )
+                assert observed.get("ok") is True
+                assert calls == [("observe_ui", {"app": "Safari"})]
+
+                _tool_reg.set_desktop_gate(None)
+                denied = await engine._execute_general_tool(
+                    {"name": "click", "arguments": {"selector": "#go"}}, handlers
+                )
+                assert denied.get("ok") is False
+                assert "blocked" in denied["error"] or "approval" in denied["error"]
+                assert len(calls) == 1  # never executed
+
+                class _Approve:
+                    async def evaluate(self, action):
+                        return types.SimpleNamespace(approved=True, denial_message="")
+
+                _tool_reg.set_desktop_gate(_Approve())
+                clicked = await engine._execute_general_tool(
+                    {"name": "click", "arguments": {"selector": "#go"}}, handlers
+                )
+                assert clicked.get("ok") is True
+                assert calls[-1] == ("click", {"selector": "#go"})
+            finally:
+                _tool_reg.set_desktop_gate(None)
+                lt.close()
+    finally:
+        _deactivate_desktop_plugin()
+
+    # Perception offline: no plugin handlers -> explicit unavailability.
     with tempfile.TemporaryDirectory() as td:
-        engine, lt = _build_desktop_engine(td, bridge)
-        try:
-            handlers = engine._unified_tool_handlers()
-
-            observed = await engine._execute_general_tool(
-                {"name": "observe_ui", "arguments": {"app": "Safari"}}, handlers
-            )
-            assert observed.get("ok") is True
-            assert calls == [("observe_ui", {"app": "Safari"})]
-
-            rb.set_desktop_gate(None)
-            denied = await engine._execute_general_tool(
-                {"name": "click", "arguments": {"selector": "#go"}}, handlers
-            )
-            assert denied.get("ok") is False
-            assert "blocked" in denied["error"] or "approval" in denied["error"]
-            assert len(calls) == 1  # never executed
-
-            class _Approve:
-                async def evaluate(self, action):
-                    return types.SimpleNamespace(approved=True, denial_message="")
-
-            rb.set_desktop_gate(_Approve())
-            clicked = await engine._execute_general_tool(
-                {"name": "click", "arguments": {"selector": "#go"}}, handlers
-            )
-            assert clicked.get("ok") is True
-            assert calls[-1] == ("click", {"selector": "#go"})
-        finally:
-            rb.set_desktop_gate(None)
-            lt.close()
-
-    # Perception offline: no bridge handlers -> explicit unavailability.
-    with tempfile.TemporaryDirectory() as td:
-        engine, lt = _build_desktop_engine(td, None)
+        engine, lt = _build_desktop_engine(td)
         try:
             result = await engine._execute_general_tool(
                 {"name": "click", "arguments": {"selector": "#go"}},
@@ -2365,24 +2399,142 @@ async def test_semantic_execution_gate_and_perception_offline() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reconfigure_host_backend_drops_semantic_tools() -> None:
-    """Hot-swapping to a bridge without semantic tools removes desktop from the catalog."""
-    bridge, _ = _desktop_bridge()
-    with tempfile.TemporaryDirectory() as td:
-        engine, lt = _build_desktop_engine(td, bridge)
-        try:
-            assert any(
-                item.get("function", {}).get("name") == "click"
-                for item in engine._unified_tool_catalog()
-            )
-            engine.reconfigure_host_backend(
-                rpc=engine._rpc, perception=None, execution=None, tool_bridge=None,
-            )
-            names = {
-                item.get("function", {}).get("name")
-                for item in engine._unified_tool_catalog()
-            }
-            assert "click" not in names
-            assert "observe_ui" not in engine._unified_tool_handlers()
-        finally:
-            lt.close()
+async def test_reconfigure_host_backend_drops_semantic_tools(monkeypatch) -> None:
+    """Hot-swapping to a host without perception removes desktop from the catalog.
+
+    Mirrors the production reconfigure sequence: the desktop plugin is
+    unbound first (bind_runtime with None ports), then the engine refreshes
+    its host backend — the unified catalog follows the plugin offline.
+    """
+    _activate_desktop_plugin(monkeypatch)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            engine, lt = _build_desktop_engine(td)
+            try:
+                assert any(
+                    item.get("function", {}).get("name") == "click"
+                    for item in engine._unified_tool_catalog()
+                )
+                _deactivate_desktop_plugin()
+                engine.reconfigure_host_backend(
+                    rpc=engine._rpc, perception=None, execution=None,
+                )
+                names = {
+                    item.get("function", {}).get("name")
+                    for item in engine._unified_tool_catalog()
+                }
+                assert "click" not in names
+                assert "observe_ui" not in engine._unified_tool_handlers()
+            finally:
+                lt.close()
+    finally:
+        _deactivate_desktop_plugin()
+
+
+def test_disable_desktop_semantic_drops_engine_surfaces(monkeypatch) -> None:
+    """plugin_disable("desktop_semantic") removes engine surfaces immediately.
+
+    Reproduces the reviewed defect through the real disable path (scoped-registry
+    fiber dispose — exactly what self_management's plugin_disable handler runs
+    after approval): the engine must stop disclosing semantic tools on the very
+    next read, including the zero-approval observation tools, instead of serving
+    the stale cached schemas/handlers of the captured plugin instance. A
+    subsequent reload must surface a FRESH plugin instance whose version counter
+    restarted at 0 — the identity component of the engine cache keys is what
+    prevents that collision.
+    """
+    from leapflow.skills.semantic_schema import SEMANTIC_TOOL_NAMES
+    from leapflow.plugins import get_registry, get_scoped_registry
+
+    _activate_desktop_plugin(monkeypatch)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            engine, lt = _build_desktop_engine(td)
+            try:
+                # Plugin active: semantic tools disclosed and dispatchable.
+                catalog_names = {
+                    item.get("function", {}).get("name")
+                    for item in engine._unified_tool_catalog()
+                }
+                assert {"click", "observe_ui"} <= catalog_names
+                assert "observe_ui" in engine._unified_tool_handlers()
+                old_plugin = get_registry().get_desktop_semantic_plugin()
+                assert old_plugin is not None
+
+                # Approved disable: the scoped-registry fiber dispose that the
+                # plugin_disable handler executes after its approval gate.
+                scoped = get_scoped_registry()
+                fiber = scoped.get_fiber("desktop_semantic")
+                assert fiber is not None and fiber.state.value == "active"
+                fiber.begin_unload()
+                fiber.dispose()
+
+                # Engine surfaces drop every semantic tool on the next read —
+                # no stale cache entries survive the unregister.
+                assert get_registry().get_desktop_semantic_plugin() is None
+                post_disable_names = {
+                    item.get("function", {}).get("name")
+                    for item in engine._unified_tool_catalog()
+                }
+                assert post_disable_names.isdisjoint(SEMANTIC_TOOL_NAMES)
+                assert set(engine._unified_tool_handlers()).isdisjoint(SEMANTIC_TOOL_NAMES)
+                assert engine._semantic_tool_schemas() == []
+
+                # Reload: a fresh instance (version restarting at 0) becomes
+                # visible again. "screenshot" is only present in the real
+                # entry set, so serving it proves the cache picked up the new
+                # instance rather than the predecessor's cached schemas.
+                scoped.reload("desktop_semantic")
+                fresh = get_registry().get_desktop_semantic_plugin()
+                assert fresh is not None and fresh is not old_plugin
+                assert fresh.active  # last_bound_deps re-injected the ports
+                reloaded_names = {
+                    item.get("function", {}).get("name")
+                    for item in engine._unified_tool_catalog()
+                }
+                assert {"click", "observe_ui", "screenshot"} <= reloaded_names
+                assert "observe_ui" in engine._unified_tool_handlers()
+            finally:
+                # Leave the global plugin deactivated for subsequent tests.
+                _deactivate_desktop_plugin()
+                lt.close()
+    finally:
+        _deactivate_desktop_plugin()
+
+
+def test_expanded_disclosure_tier_positively_includes_desktop_schemas(monkeypatch) -> None:
+    """Tier-1 continuity expands native tools with the desktop semantic schemas.
+
+    Positive counterpart of test_core_turn_hides_desktop_schemas_but_lists_them_in_index:
+    once the prior turn actually used desktop tools (structural category fact),
+    the EXPANDED disclosure plan must carry the semantic schemas in its native
+    tool_definitions, not just name the category in the catalog index.
+    """
+    from leapflow.engine.context_disclosure import (
+        DisclosureLevel,
+        DisclosurePlanner,
+        DisclosureRuntimeState,
+    )
+
+    _activate_desktop_plugin(monkeypatch)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            engine, lt = _build_desktop_engine(td)
+            try:
+                plan = DisclosurePlanner().plan(
+                    engine._unified_tool_catalog(),
+                    DisclosureRuntimeState(
+                        native_tools_enabled=True,
+                        last_turn_tool_categories=frozenset({"desktop"}),
+                    ),
+                )
+                assert plan.level == DisclosureLevel.EXPANDED
+                assert plan.native_tools is True
+                plan_names = {
+                    tool["function"]["name"] for tool in plan.tool_definitions
+                }
+                assert {"click", "observe_ui"} <= plan_names
+            finally:
+                lt.close()
+    finally:
+        _deactivate_desktop_plugin()

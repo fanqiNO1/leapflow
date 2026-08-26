@@ -1,5 +1,11 @@
 """Shared domain model — zero-dependency data types used across all layers."""
 
+from leapflow.domain.capability_requirement import (
+    ApprovalMode,
+    CapabilityRequirement,
+    RequirementOrigin,
+)
+from leapflow.domain.effect_scope import EffectScope, ScopeState
 from leapflow.domain.event_types import (
     CLIEventType,
     ImplicitFeedbackType,
@@ -8,6 +14,7 @@ from leapflow.domain.event_types import (
     UIActionSubType,
     UNDO_SHORTCUTS,
 )
+from leapflow.domain.environment_fingerprint import EnvironmentFingerprint
 from leapflow.domain.events import SystemEvent, UIElement, UISnapshot
 from leapflow.domain.platform import (
     Capability,
@@ -16,6 +23,8 @@ from leapflow.domain.platform import (
     PlatformManifest,
     capability_from_str,
 )
+from leapflow.domain.plugin_fiber import FiberState, IllegalStateTransition, PluginFiber
+from leapflow.domain.plugin_proposal import BehaviorTestCase, GapEvidence, PluginProposal, ProposedToolSpec
 from leapflow.domain.skill_types import DistillationCandidate, SkillMetadata, SkillParameter
 from leapflow.domain.trajectory import (
     ActionType,
@@ -33,7 +42,13 @@ from leapflow.domain.trajectory import (
 
 __all__ = [
     "ActionType",
+    "ApprovalMode",
+    "BehaviorTestCase",
     "CLIEventType",
+    "CapabilityRequirement",
+    "EffectScope",
+    "FiberState",
+    "GapEvidence",
     "ImplicitFeedbackType",
     "LearningEventType",
     "NormalizedEventType",
@@ -42,12 +57,19 @@ __all__ = [
     "Capability",
     "DEFAULT_DARWIN_CAPABILITIES",
     "DistillationCandidate",
+    "EnvironmentFingerprint",
     "Episode",
+    "IllegalStateTransition",
     "NoiseSignal",
     "PlatformID",
     "PlatformManifest",
+    "PluginFiber",
+    "PluginProposal",
+    "ProposedToolSpec",
     "RawAction",
     "RecordingState",
+    "RequirementOrigin",
+    "ScopeState",
     "SemanticAction",
     "SkillMetadata",
     "SkillParameter",

@@ -5,6 +5,14 @@ from leapflow.learning.distiller import DistillationCandidate, LLMSkillDistiller
 from leapflow.learning.effectiveness import LearningEffectivenessTracker, LearningMetrics
 from leapflow.learning.event_consumer import EventConsumer
 from leapflow.learning.pattern_miner import PatternMiner, SkillCandidate
+from leapflow.learning.plugin_advisor import (
+    PluginAdvisor,
+    PluginRecommendation,
+    get_default_advisor,
+    set_default_advisor,
+)
+from leapflow.learning.plugin_stats import PluginStats, PluginUsageTracker
+from leapflow.learning.plugin_trust import PluginTrustLedger, PluginTrustLevel
 
 __all__ = [
     "ActiveLearningObserver",
@@ -17,8 +25,16 @@ __all__ = [
     "LearningMetrics",
     "LLMSkillDistiller",
     "PatternMiner",
+    "PluginAdvisor",
+    "PluginRecommendation",
+    "PluginStats",
+    "PluginTrustLedger",
+    "PluginTrustLevel",
+    "PluginUsageTracker",
     "SkillCandidate",
     "SkillDistiller",
+    "get_default_advisor",
+    "set_default_advisor",
 ]
 
 

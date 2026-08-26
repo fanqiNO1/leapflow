@@ -156,14 +156,15 @@ def test_tools_payload_groups_desktop_tools_when_perception_online() -> None:
     from leapflow.cli.commands.slash_handlers import build_tool_payload
     from leapflow.skills.semantic_schema import semantic_tool_to_openai
     from leapflow.skills.tool_executor import ToolDefinition
-    from leapflow.tools import registry_bootstrap as rb
+    from leapflow.plugins import get_registry
+    _tool_reg = get_registry()
 
     ctx = SimpleNamespace(rpc=SimpleNamespace(connected=False), platform_tools=[])
 
     # An earlier test in this worker may have constructed an AgentEngine, which
     # installs a catalog provider globally; the offline baseline needs a clean
     # slate.
-    rb.set_capability_catalog_provider(None)
+    _tool_reg.set_capability_catalog_provider(None)
     offline = build_tool_payload(ctx)
     assert "desktop" not in offline["groups"]
     offline_total = offline["total"]
@@ -172,7 +173,7 @@ def test_tools_payload_groups_desktop_tools_when_perception_online() -> None:
         semantic_tool_to_openai(ToolDefinition(name=name, description="d", parameters={}))
         for name in ("click", "observe_ui", "list_apps")
     ]
-    rb.set_capability_catalog_provider(lambda: list(rb.TOOL_DEFINITIONS) + desktop_defs)
+    _tool_reg.set_capability_catalog_provider(lambda: list(_tool_reg.tool_definitions) + desktop_defs)
     try:
         online = build_tool_payload(ctx)
         assert set(online["groups"]["desktop"]) == {"click", "list_apps", "observe_ui"}
@@ -181,4 +182,4 @@ def test_tools_payload_groups_desktop_tools_when_perception_online() -> None:
         assert "shell_run" in online["groups"]["shell"]
         assert "file_read" in online["groups"]["file"]
     finally:
-        rb.set_capability_catalog_provider(None)
+        _tool_reg.set_capability_catalog_provider(None)

@@ -13,6 +13,11 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from leapflow.perception.config import PerceptionConfig
 from leapflow.perception.extraction.pipeline import OfflineExtractionPipeline
+from leapflow.perception.signal_source import (
+    SignalSourceRegistry,
+    SignalTransformContext,
+)
+from leapflow.perception.signal_sources_builtin import build_default_signal_source_registry
 from leapflow.perception.signals import SignalBuffer
 from leapflow.perception.storage.frame_store import FrameStore, LocalFrameStore
 from leapflow.perception.types import (
@@ -29,6 +34,7 @@ if TYPE_CHECKING:
     from leapflow.causal.pipeline import CausalFusionPipeline
     from leapflow.domain.events import SystemEvent
     from leapflow.llm.base import LLMProvider
+    from leapflow.perception.active_signal_source import ActiveSourceManager
     from leapflow.platform.protocol import HostRpc
     from leapflow.recording.attention import RecordingContext
     from leapflow.signal_fusion.cross_app import CrossAppContextTracker
@@ -59,6 +65,8 @@ class PerceptionSession:
         vlm: Optional["LLMProvider"] = None,
         frame_store: Optional[FrameStore] = None,
         recording_context: Optional["RecordingContext"] = None,
+        signal_source_registry: Optional[SignalSourceRegistry] = None,
+        active_source_manager: Optional["ActiveSourceManager"] = None,
     ) -> None:
         self._config = config
         self._rpc = rpc
@@ -83,6 +91,8 @@ class PerceptionSession:
 
         self._signal_buffer = SignalBuffer()
         self._signal_channels = config.signal_channels
+        self._signal_source_registry = signal_source_registry or build_default_signal_source_registry()
+        self._active_source_manager = active_source_manager
 
         from leapflow.causal import CausalFusionPipeline, CausalGraph, build_default_registry
         causal_registry = build_default_registry()
@@ -172,9 +182,13 @@ class PerceptionSession:
         from leapflow.causal import CausalGraph
         self._causal_graph = CausalGraph()
         logger.info("Perception session started: %s (mode=%s)", session_id, self._recording_mode.value)
+        if self._active_source_manager is not None:
+            await self._active_source_manager.start_all(enabled_channels=self._signal_channels)
 
     async def stop(self) -> List[Keyframe]:
         """Stop the session and return captured keyframes."""
+        if self._active_source_manager is not None:
+            await self._active_source_manager.dispose()
         self._active = False
         logger.info(
             "Perception session stopped: %s (%d frames captured)",
@@ -330,101 +344,22 @@ class PerceptionSession:
 
         Privacy-aware: app_switch signals are always allowed (no sensitive data),
         but position/content signals are suppressed for privacy-sensitive apps.
+
+        Delegates to the pluggable SignalSourceRegistry.
         """
         if not self._signal_channels:
             return None
         if not self._recording_mode.needs_visual_polling:
             return None
 
-        if event_type == "app.focus_change" and "app_switch" in self._signal_channels:
-            new_app = payload.get("bundle_id", "")
-            return InteractionSignal(
-                timestamp=now,
-                signal_type="app_switch",
-                app=new_app,
-                detail=f"{prev_app} -> {new_app}",
-            )
-
-        if self._current_app in self._config.privacy_sensitive_apps:
-            return None
-
-        if event_type == "ui.action":
-            sub = payload.get("sub_type", "")
-
-            if sub == "click" and "click" in self._signal_channels:
-                return InteractionSignal(
-                    timestamp=now,
-                    signal_type="click",
-                    app=payload.get("app_bundle_id", "") or self._current_app,
-                    position=(
-                        int(payload.get("mouse_x", 0)),
-                        int(payload.get("mouse_y", 0)),
-                    ),
-                )
-
-            if sub == "scroll" and "scroll" in self._signal_channels:
-                return InteractionSignal(
-                    timestamp=now,
-                    signal_type="scroll",
-                    app=payload.get("app_bundle_id", "") or self._current_app,
-                    position=(
-                        int(payload.get("mouse_x", 0)),
-                        int(payload.get("mouse_y", 0)),
-                    ),
-                    detail=f"dy={payload.get('delta_y', 0)}",
-                )
-
-            if sub == "shortcut" and "keyboard" in self._signal_channels:
-                modifiers = payload.get("modifiers", [])
-                char = payload.get("char", "")
-                combo = "+".join(modifiers + ([char] if char else []))
-                return InteractionSignal(
-                    timestamp=now,
-                    signal_type="keyboard",
-                    app=payload.get("app_bundle_id", "") or self._current_app,
-                    detail=combo,
-                )
-
-            if sub == "type" and "keyboard" in self._signal_channels:
-                text = str(payload.get("text", ""))[:50]
-                return InteractionSignal(
-                    timestamp=now,
-                    signal_type="keyboard",
-                    app=payload.get("app_bundle_id", "") or self._current_app,
-                    detail=f"type:{text}",
-                )
-
-            if sub == "drag" and "drag" in self._signal_channels:
-                return InteractionSignal(
-                    timestamp=now,
-                    signal_type="drag",
-                    app=payload.get("app_bundle_id", "") or self._current_app,
-                    position=(
-                        int(payload.get("start_x", 0)),
-                        int(payload.get("start_y", 0)),
-                    ),
-                    end_position=(
-                        int(payload.get("end_x", 0)),
-                        int(payload.get("end_y", 0)),
-                    ),
-                )
-
-        if event_type == "clipboard.change":
-            if "clipboard_content" in self._signal_channels:
-                text = str(payload.get("text", ""))[:200]
-                return InteractionSignal(
-                    timestamp=now,
-                    signal_type="clipboard",
-                    detail=f"content:{text}",
-                )
-            elif "clipboard" in self._signal_channels:
-                return InteractionSignal(
-                    timestamp=now,
-                    signal_type="clipboard",
-                    detail=payload.get("change_type", "change"),
-                )
-
-        return None
+        context = SignalTransformContext(
+            now=now,
+            prev_app=prev_app,
+            current_app=self._current_app,
+            enabled_channels=self._signal_channels,
+            privacy_sensitive_apps=frozenset(self._config.privacy_sensitive_apps),
+        )
+        return self._signal_source_registry.transform_first(event_type, payload, context)
 
     @staticmethod
     def _extract_cursor(payload: Dict[str, Any]) -> Optional[tuple]:

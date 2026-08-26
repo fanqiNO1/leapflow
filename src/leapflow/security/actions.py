@@ -25,6 +25,7 @@ class ActionKind(str, Enum):
     APP_INSTALL = "app.install"
     RUNTIME_CONFIGURE = "runtime.configure"
     NETWORK_FETCH = "network.fetch"
+    WORKSPACE_ESCAPE = "workspace.escape"
     EXTERNAL_ACTION = "external.action"
 
 
@@ -86,6 +87,39 @@ class ActionDescriptor:
             detail=command,
             effect=ActionEffect.EXECUTE.value,
             resource=str(cwd or "shell"),
+            origin=origin,
+            metadata=merged,
+        )
+
+    @classmethod
+    def workspace_escape(
+        cls,
+        path: str,
+        *,
+        operation: str,
+        effect: str = ActionEffect.READ.value,
+        detail: str = "",
+        origin: str = ActionOrigin.AGENT_TOOL.value,
+        metadata: dict[str, Any] | None = None,
+    ) -> "ActionDescriptor":
+        """Describe a tool reaching a path outside the active workspace.
+
+        A first-class kind rather than a free-form string: ``DefaultRiskClassifier``
+        dispatches on ``kind``, so an unrecognized one only ever reached the
+        generic fallback. That made the tier an accident of the fallback's value
+        instead of a decision, and gave a read the same weight as a write.
+
+        *effect* is the operation's real effect (read / write / execute), which is
+        what separates listing a sibling repo from writing into it.
+        """
+        merged = dict(metadata or {})
+        merged.update({"operation": operation, "workspace_escape": True})
+        return cls(
+            kind=ActionKind.WORKSPACE_ESCAPE.value,
+            summary=f"Allow {operation} outside the workspace: {path}",
+            detail=detail or f"{operation} wants to access {path}, which is outside the active workspace.",
+            effect=effect,
+            resource=path,
             origin=origin,
             metadata=merged,
         )

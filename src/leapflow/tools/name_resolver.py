@@ -187,10 +187,9 @@ class ToolRegistry:
         tool_definitions: Sequence[Mapping[str, Any]],
         handlers: Mapping[str, Any],
         *,
-        bridge_tools: Sequence[Mapping[str, Any]] = (),
         aliases: Mapping[str, str] | None = None,
     ) -> "ToolRegistry":
-        """Build a registry from OpenAI schemas, dispatch handlers, and bridge metadata.
+        """Build a registry from OpenAI schemas and dispatch handlers.
 
         Parameters
         ----------
@@ -198,10 +197,6 @@ class ToolRegistry:
             Each entry declares a human-verified 1:1 semantic equivalence.
             Keys are normalized via ``tool_lookup_key`` before storage.
         """
-        bridge_meta = {
-            str(tool.get("name", "")).removeprefix("gp_"): dict(tool)
-            for tool in bridge_tools
-        }
         specs: dict[str, ToolSpec] = {}
         for definition in tool_definitions:
             function = definition.get("function", {})
@@ -212,8 +207,7 @@ class ToolRegistry:
             properties = parameters_schema.get("properties", {}) or {}
             required = parameters_schema.get("required", []) or []
             metadata = function.get("x_leapflow", {}) or definition.get("x_leapflow", {}) or {}
-            bridge_tool = bridge_meta.get(name, {})
-            mutates_state = bool(bridge_tool.get("mutates_state", metadata.get("mutates_state", False)))
+            mutates_state = bool(metadata.get("mutates_state", False))
             risk_level = _infer_risk_level(name, mutates_state)
             specs[name] = ToolSpec(
                 name=name,
@@ -228,8 +222,7 @@ class ToolRegistry:
         for name in handlers.keys():
             canonical = str(name).removeprefix("gp_")
             if canonical and canonical not in specs:
-                bridge_tool = bridge_meta.get(canonical, {})
-                mutates_state = bool(bridge_tool.get("mutates_state", False))
+                mutates_state = False
                 risk_level = _infer_risk_level(canonical, mutates_state)
                 specs[canonical] = ToolSpec(
                     name=canonical,
@@ -359,7 +352,7 @@ class ToolRegistry:
 
 
 def _infer_risk_level(name: str, bridge_mutates: bool) -> RiskLevel:
-    if name.startswith("gateway_") or name.startswith("hub_"):
+    if name.startswith("gateway_") or name.startswith("hub_") or name.startswith("platform_"):
         return "external"
     if name in _READ_ONLY_TOOLS and not bridge_mutates:
         return "read_only"

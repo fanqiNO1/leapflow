@@ -87,6 +87,11 @@ class PerceptionConfig:
     signal_reactive_min_interval: float = 0.3
     signal_reactive_triggers: FrozenSet[str] = field(default_factory=frozenset)
 
+    # Active signal sources (Phase 2.5)
+    active_signal_sources: tuple[str, ...] = ()
+    active_source_queue_capacity: int = 256
+    active_source_shutdown_timeout_s: float = 5.0
+
     @classmethod
     def from_settings(cls, settings: "Settings") -> "PerceptionConfig":
         """Construct PerceptionConfig from the global Settings object."""
@@ -109,4 +114,7 @@ class PerceptionConfig:
             cache_max_size=settings.vlm_cache_max_size,
             signal_channels=frozenset(settings.signal_channels),
             signal_reactive_capture=settings.signal_reactive_capture,
+            active_signal_sources=tuple(settings.active_signal_sources),
+            active_source_queue_capacity=settings.active_source_queue_capacity,
+            active_source_shutdown_timeout_s=settings.active_source_shutdown_timeout_s,
         )

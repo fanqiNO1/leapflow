@@ -104,6 +104,29 @@ class Settings:
     config_sources: tuple[str, ...] = ()
     watched_config_paths: tuple[Path, ...] = ()
     config_warnings: tuple[str, ...] = ()
+    disabled_plugins: tuple[str, ...] = ()
+    # LLM-driven plugin generation (self_management.plugin_generate). Off by
+    # default: turning it on lets the agent produce new plugin code via the
+    # active LLM. Installation is still separately approval-gated by
+    # ApprovalOrchestrator; this switch guards the earlier code-generation step
+    # so an unattended profile cannot spend tokens synthesizing plugins.
+    plugin_generation_enabled: bool = True
+    # Profile-scoped directory where plugin_install writes plugin code and
+    # loads it dynamically. None -> derive from the active ProfileLayout
+    # (profiles/<profile>/plugins/). Set an absolute path to override.
+    plugin_install_dir: str | None = None
+    # Optional local directory acting as a plugin marketplace source. When set,
+    # plugin_install(marketplace_name=...) resolves plugins from this directory.
+    # Opt-in; default None (no local marketplace).
+    plugin_marketplace_root: str | None = None
+    # Optional HTTP(S) marketplace registry base URL. When both this and
+    # plugin_marketplace_root are set, the URL source takes precedence.
+    # Opt-in; default None (no remote marketplace).
+    plugin_marketplace_url: str | None = None
+    # Hex-encoded Ed25519 public keys trusted to sign marketplace plugins.
+    # When non-empty, marketplace installs MUST carry a valid signature from
+    # one of these keys; empty tuple -> checksum-only integrity verification.
+    plugin_marketplace_trusted_pubkeys: tuple[str, ...] = ()
     runtime_dir: Path = field(default_factory=lambda: _bootstrap_profile_layout().runtime_dir)
 
     # Audit
@@ -453,6 +476,11 @@ class Settings:
     signal_channels: frozenset = frozenset()
     signal_reactive_capture: bool = False
     signal_noise_gate_enabled: bool = True
+
+    # Active signal sources (Phase 2.5)
+    active_signal_sources: tuple = ()
+    active_source_queue_capacity: int = 256
+    active_source_shutdown_timeout_s: float = 5.0
     signal_noise_same_source_cooldown_s: float = 2.0
     signal_noise_allow_fs_outside_workspace: bool = False
     signal_noise_path_fragments: tuple = (

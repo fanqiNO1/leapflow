@@ -36,8 +36,6 @@ logger = logging.getLogger(__name__)
 
 NotifyFn = Callable[..., Any]
 
-# TTL for a queued autonomous-send approval; the daemon denies on timeout.
-_SEND_APPROVAL_TTL = 300.0
 _ALLOW_DECISIONS = frozenset({"allow", "allow_once", "allow_session", "allow_always"})
 
 
@@ -175,11 +173,13 @@ class ReentryService:
         from leapflow.security.approval import ApprovalRequest
 
         grant = spec.target.grant_key(spec.kind)
+        # No expiry: an autonomous send waits for a human verdict rather than
+        # being denied because nobody was at the keyboard. The request is
+        # released when the owning turn/stream ends.
         request = ApprovalRequest(
             category="reentry_send",
             detail=f"Autonomous reply to {spec.target.platform}:{spec.target.chat} — {spec.text[:200]}",
             risk_hint=0.7,
-            expires_at=time.time() + _SEND_APPROVAL_TTL,
             metadata={"platform": spec.target.platform, "chat": spec.target.chat, "task_id": orient.task_id},
         )
         try:

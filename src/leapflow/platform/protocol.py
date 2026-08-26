@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Optional, Protocol, Tuple, runtime_checkable
 
 import msgpack
@@ -10,15 +9,31 @@ import msgpack
 PROTOCOL_VERSION = 1
 
 
-@dataclass(frozen=True)
 class RpcError(Exception):
-    """Structured RPC error."""
+    """Structured RPC error.
 
-    code: str
-    message: str
-    details: Dict[str, Any]
+    Deliberately a plain exception rather than a frozen dataclass. CPython keeps
+    the traceback on the instance, and every Python-level re-raise assigns
+    ``__traceback__`` through ``__setattr__`` -- ``contextlib.__exit__``,
+    asyncio, and pytest all do. On a frozen dataclass that assignment raises
+    ``FrozenInstanceError``, which *replaces* the original failure: a driver
+    answering "Unknown tool: get_desktop_state" surfaced instead as "cannot
+    assign to field '__traceback__'", erasing the cause. An exception type must
+    stay mutable enough to carry its own traceback.
 
-    def __str__(self) -> str:  # pragma: no cover
+    ``args`` keeps all three fields so ``RpcError(*err.args)`` round-trips.
+    """
+
+    def __init__(
+        self, code: str, message: str, details: Optional[Dict[str, Any]] = None
+    ) -> None:
+        resolved = details if details is not None else {}
+        super().__init__(code, message, resolved)
+        self.code = code
+        self.message = message
+        self.details: Dict[str, Any] = resolved
+
+    def __str__(self) -> str:
         return f"{self.code}: {self.message}"
 
 

@@ -252,13 +252,34 @@ class DenyGate:
         return Result()
 
 
+class CaptureGate:
+    """Approving gate double that records what it was asked to approve.
+
+    Side-effecting platform actions fail closed without a gate, so a test whose
+    subject is dispatch or execution must install one to reach the adapter.
+    """
+
+    def __init__(self) -> None:
+        self.actions = []
+
+    async def evaluate(self, action):
+        self.actions.append(action)
+
+        class Result:
+            approved = True
+            denial_message = ""
+
+        return Result()
+
+
 @pytest.mark.asyncio
 async def test_gateway_send_tool_dispatches_to_connected_adapter(tmp_path) -> None:
     server = GatewayServer(tmp_path)
     adapter = FakeSendAdapter()
+    gate = CaptureGate()
     server._adapters["fake"] = adapter
     set_gateway_server(server)
-    set_gateway_approval_gate(None)
+    set_gateway_approval_gate(gate)
 
     try:
         result = await gateway_send_handler({
@@ -275,10 +296,73 @@ async def test_gateway_send_tool_dispatches_to_connected_adapter(tmp_path) -> No
     assert result["resource_id"] == "fake-action-1"
     assert result["message_id"] == "fake-action-1"
     assert result["source_tool"] == "gateway_send"
+    assert len(gate.actions) == 1
     target, content = adapter.sent[0]
     assert target.chat_id == "chat-1"
     assert target.thread_id == "thread-1"
     assert content.text == "hello outbound"
+
+
+@pytest.mark.asyncio
+async def test_side_effect_action_fails_closed_without_approval_gate(tmp_path) -> None:
+    """A send with no gate installed is refused, not waved through.
+
+    Consent cannot be obtained without a gate, so treating its absence as
+    permission would leave outbound sends as the only ungated path.
+    """
+    from leapflow.security.permission_failures import is_permission_hard_stop_payload
+
+    server = GatewayServer(tmp_path)
+    adapter = FakeSendAdapter()
+    server._adapters["fake"] = adapter
+    set_gateway_server(server)
+    set_gateway_approval_gate(None)
+
+    try:
+        result = await platform_action_handler({
+            "platform": "fake",
+            "action": "im.send_message",
+            "payload": {"chat_id": "chat-1", "text": "must not be sent"},
+        })
+    finally:
+        set_gateway_server(None)
+
+    assert result["ok"] is False
+    assert result["failure_code"] == "approval_gate_missing"
+    assert adapter.sent == []
+    # The turn must stop rather than let the model retry an action that can
+    # never obtain consent, but this is a wiring defect and must not be
+    # classified as a denied scope.
+    assert is_permission_hard_stop_payload(result) is True
+    assert result.get("failure_class") is None
+    assert "llm_instruction" in result
+
+
+@pytest.mark.asyncio
+async def test_read_action_still_works_without_approval_gate(tmp_path) -> None:
+    """Read actions are deliberately unaffected by a missing gate.
+
+    The gate is not a read action's permission boundary, so failing them closed
+    would break every read path whenever no gate is installed.
+    """
+    server = GatewayServer(tmp_path)
+    adapter = RecoveringPermissionAdapter()
+    adapter.fail_next_read = False  # exercise a plain successful read
+    server._adapters["fake"] = adapter
+    set_gateway_server(server)
+    set_gateway_approval_gate(None)
+
+    try:
+        result = await platform_action_handler({
+            "platform": "fake",
+            "action": "im.list_messages",
+            "payload": {"chat_id": "chat-1"},
+        })
+    finally:
+        set_gateway_server(None)
+
+    assert result["ok"] is True
+    assert adapter.execute_calls == ["im.list_messages"]
 
 
 @pytest.mark.asyncio
@@ -465,20 +549,6 @@ async def test_platform_action_reports_unknown_platform_with_available_list(tmp_
     assert result["failure_code"] == "unknown_platform"
     assert result["retryable"] is True
     assert "feishu" in result["available_platforms"]
-
-
-class CaptureGate:
-    def __init__(self) -> None:
-        self.actions = []
-
-    async def evaluate(self, action):
-        self.actions.append(action)
-
-        class Result:
-            approved = True
-            denial_message = ""
-
-        return Result()
 
 
 class PermissionFailingAdapter(FakeSendAdapter):

@@ -7,7 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from leapflow.security.actions import ActionDescriptor, ActionKind
+from leapflow.security.actions import ActionDescriptor, ActionEffect, ActionKind
 from leapflow.security.path_sensitivity import configured_path_sensitivity_roots
 
 
@@ -104,6 +104,8 @@ class DefaultRiskClassifier:
             return self._assess_file_write(action)
         if action.kind == ActionKind.NETWORK_FETCH.value:
             return self._assess_network_fetch(action)
+        if action.kind == ActionKind.WORKSPACE_ESCAPE.value:
+            return self._assess_workspace_escape(action)
         if action.kind == ActionKind.GATEWAY_SEND.value:
             return RiskAssessment(
                 level=RiskLevel.HIGH,
@@ -214,6 +216,25 @@ class DefaultRiskClassifier:
 
     @staticmethod
     def _platform_risk_level(action: ActionDescriptor) -> RiskAssessment | None:
+        # Self-modification is always HIGH risk, no permanent grants allowed.
+        # This is a defense-in-depth guard: even if a caller forgets to set
+        # explicit risk metadata, plugin_management actions are treated as
+        # HIGH so that "always allow" grants are never offered for actions
+        # that change the agent's own composition.
+        if action.metadata.get("platform") == "plugin_management":
+            return RiskAssessment(
+                level=RiskLevel.HIGH,
+                score=0.78,
+                reasons=("agent_self_modification",),
+                explanation="This action changes the agent's own plugin composition.",
+                hardline=False,
+                allow_permanent=False,
+                metadata={
+                    "backend_kind": action.metadata.get("backend_kind", ""),
+                    "platform": action.metadata.get("platform", ""),
+                    "action": action.metadata.get("action", ""),
+                },
+            )
         raw = str(action.metadata.get("risk_level") or "").lower()
         if not raw:
             return None
@@ -282,6 +303,44 @@ class DefaultRiskClassifier:
                 explanation="This shell command has side effects or reaches external systems.",
             )
         return RiskAssessment(level=RiskLevel.LOW, score=0.15, reasons=("ordinary_shell_command",))
+
+    def _assess_workspace_escape(self, action: ActionDescriptor) -> RiskAssessment:
+        """Assess a tool reaching outside the active workspace.
+
+        Never LOW, and never below the policy's ASK threshold: crossing the
+        boundary is precisely the case a human must see. Rating it by the target
+        path's own sensitivity would let an ordinary file in another project fall
+        through as low risk, and the policy engine auto-allows low risk — turning
+        a refusal into silent cross-workspace access.
+
+        The effect sets the tier, so listing a sibling repo is not weighed the
+        same as writing into it. Write and execute additionally refuse permanent
+        grants: "always allow" for mutating another workspace is a standing
+        licence the user is unlikely to have meant.
+        """
+        operation = str((action.metadata or {}).get("operation") or "tool")
+        if action.effect in {ActionEffect.WRITE.value, ActionEffect.EXECUTE.value,
+                             ActionEffect.DELETE.value}:
+            return RiskAssessment(
+                level=RiskLevel.HIGH,
+                score=0.7,
+                reasons=("workspace_escape_mutating",),
+                explanation=(
+                    f"{operation} would modify or execute against a path outside "
+                    "the active workspace."
+                ),
+                allow_permanent=False,
+                metadata={"operation": operation, "effect": action.effect},
+            )
+        return RiskAssessment(
+            level=RiskLevel.MEDIUM,
+            score=0.5,
+            reasons=("workspace_escape_read",),
+            explanation=(
+                f"{operation} would read a path outside the active workspace."
+            ),
+            metadata={"operation": operation, "effect": action.effect},
+        )
 
     def _assess_file_read(self, action: ActionDescriptor) -> RiskAssessment:
         path = Path(action.resource).expanduser()

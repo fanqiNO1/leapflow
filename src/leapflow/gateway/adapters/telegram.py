@@ -174,3 +174,22 @@ class TelegramAdapter(AdapterLifecycle):
             json_body=payload,
             timeout_s=timeout_s,
         )
+
+
+# ── Plugin registration ───────────────────────────────────────
+
+from leapflow.gateway.adapter_registry import BuiltinAdapterPlugin  # noqa: E402
+
+plugin = BuiltinAdapterPlugin(
+    _platform_id="telegram",
+    _display_name="Telegram",
+    _adapter_module="leapflow.gateway.adapters.telegram",
+    _adapter_class="TelegramAdapter",
+    _config_schema={
+        "bot_token": {"type": "string", "required": True},
+        "transport": {"type": "string", "enum": ["polling", "webhook"], "default": "polling"},
+        "webhook_url": {"type": "string", "default": ""},
+        "poll_interval_s": {"type": "number", "default": 1.0},
+        "auto_poll": {"type": "boolean", "default": True},
+    },
+)

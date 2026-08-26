@@ -1,5 +1,10 @@
-"""LeapFlow general-purpose tools for the unified agent loop."""
+"""Tool implementations — the callable behaviour behind the agent's tools.
 
-from leapflow.tools.registry_bootstrap import bootstrap_tools
+This package holds what tools *do* (file operations, shell, terminal sessions,
+web fetch/extract, SCM, config, gateway dispatch, code intelligence) plus the
+Tool Capability Contract in ``name_resolver``.
 
-__all__ = ["bootstrap_tools"]
+It deliberately exposes no registry: declaring tools, discovering plugins, and
+owning the live catalog belong to ``leapflow.plugins``. Import
+``leapflow.plugins.get_registry()`` to reach the assembled tool catalog.
+"""

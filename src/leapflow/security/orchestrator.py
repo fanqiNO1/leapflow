@@ -1,7 +1,6 @@
 """Approval orchestration: policy, grants, prompting, and audit."""
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -102,7 +101,6 @@ class ApprovalOrchestrator:
             risk=risk,
             choices=self._choices(policy.allow_permanent),
             default_choice="deny" if risk.level in {RiskLevel.HIGH, RiskLevel.CRITICAL} else "allow_once",
-            expires_at=time.time() + 120.0,
             display={
                 "title": self._title(risk),
                 "summary": action.summary,

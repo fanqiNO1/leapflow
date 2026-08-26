@@ -1,4 +1,4 @@
-"""Platform adapter return-shape contracts (cua-driver 0.19.3).
+"""Platform adapter return-shape contracts (cua-driver, verified against 0.6.8).
 
 Locks the response side of the wire contract: get_window_state's flat
 elements array becomes a UISnapshot (records verbatim, no tree), dict
@@ -6,6 +6,9 @@ payloads gain an ok envelope with images preserved, the local clipboard
 dispatch returns the PerceptionPort dict shape, screenshots land on disk
 via screenshot_out_file, and exec_shell runs locally instead of
 masquerading as an AX action.
+
+Driven through MockBridge, so this file never contacts a real driver;
+tests/test_darwin_adapter.py covers that side.
 """
 
 from __future__ import annotations

@@ -28,7 +28,7 @@ import uuid
 from collections import deque
 from typing import Any, Deque, Dict, Optional
 
-from leapflow.tools.execution_context import current_tool_context, resolve_workspace_path, workspace_scope_error
+from leapflow.tools.execution_context import current_tool_context, require_workspace_access, resolve_workspace_path
 from leapflow.utils.process_group import ProcessGroup
 
 logger = logging.getLogger(__name__)
@@ -194,7 +194,9 @@ async def terminal_open(params: Dict[str, Any]) -> Dict[str, Any]:
     else:
         ctx = current_tool_context()
         cwd_path = ctx.workspace_root if ctx is not None else resolve_workspace_path(os.getcwd())
-    scope_error = workspace_scope_error(cwd_path, operation="terminal_open cwd")
+    scope_error = await require_workspace_access(
+        cwd_path, operation="terminal_open cwd", effect="execute",
+    )
     if scope_error:
         return scope_error
     cwd = str(cwd_path)
