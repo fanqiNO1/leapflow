@@ -60,7 +60,11 @@ web = ["trafilatura>=2.2"]
 # and — via the per-group requires-python below — they never constrain the
 # py3.11 lanes. Installed with `uv sync --all-extras --group leapbench`.
 [dependency-groups]
-leapbench = []
+leapbench = ["pyqt6>=6.7", "cua-sandbox", "pydantic>=2"]
+
+[tool.uv.sources]
+# Sibling checkout, installed editable: benchmarks drive sandboxes through it.
+cua-sandbox = { path = "../cua/libs/python/cua-sandbox", editable = true }
 
 [tool.uv.dependency-groups]
 leapbench = { requires-python = ">=3.12" }
