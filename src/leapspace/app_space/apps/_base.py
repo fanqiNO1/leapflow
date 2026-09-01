@@ -63,7 +63,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from leapspace.utils import write_atomic
+from leapspace.app_space.utils import write_atomic
 
 # Widget types an agent may act on; self-check requires each to be named.
 INTERACTIVE_TYPES: tuple[type[QWidget], ...] = (

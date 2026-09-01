@@ -11,7 +11,7 @@ pytest.importorskip("PyQt6")  # leapspace dependency group only
 
 from PyQt6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton, QWidget  # noqa: E402
 
-from leapspace.apps import BaseLeapApp  # noqa: E402
+from leapspace.app_space.apps import BaseLeapApp  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -288,7 +288,7 @@ def test_notify_delivered_when_binary_available(app, monkeypatch):
         pass
 
     monkeypatch.setattr(
-        "leapspace.apps._base.subprocess.Popen", lambda *a, **k: calls.append(a) or FakeProc()
+        "leapspace.app_space.apps._base.subprocess.Popen", lambda *a, **k: calls.append(a) or FakeProc()
     )
     window._notify_available = True
     window.notify("hello", "world")
@@ -300,7 +300,7 @@ def test_notify_delivered_when_binary_available(app, monkeypatch):
 def test_notify_undelivered_when_binary_missing(app, monkeypatch):
     window, state_dir = app
     monkeypatch.setattr(
-        "leapspace.apps._base.subprocess.Popen",
+        "leapspace.app_space.apps._base.subprocess.Popen",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not be called")),
     )
     window._notify_available = False

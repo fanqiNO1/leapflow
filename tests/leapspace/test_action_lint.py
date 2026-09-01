@@ -2,7 +2,7 @@
 
 """
 
-from leapspace.action_lint import lint_task, main
+from leapspace.app_space.action_lint import lint_task, main
 
 CONFIG = """\
 id: task-t

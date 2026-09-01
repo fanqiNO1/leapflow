@@ -1,6 +1,6 @@
 """Static checks for a task's action.py (structure + import safety).
 
-Dual use: CLI (``python -m leapspace.action_lint <task_dir>``) and harness
+Dual use: CLI (``python -m leapspace.app_space.action_lint <task_dir>``) and harness
 import (``lint_task(task_dir) -> list[str]``). All checks are AST-only —
 action.py is never imported: importing has side effects and needs the
 runtime environment, while linting must work offline.
@@ -16,7 +16,7 @@ import ast
 import sys
 from pathlib import Path
 
-from leapspace.config import TaskConfig
+from leapspace.app_space.config import TaskConfig
 
 # Top-level packages importable inside the sandbox app process, beyond the
 # stdlib. Host-only libraries (cua_sandbox, mcp, ...) must be imported

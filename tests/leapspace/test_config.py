@@ -6,7 +6,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from leapspace.config import TaskConfig
+from leapspace.app_space.config import TaskConfig
 
 VALID = """\
 id: task-001

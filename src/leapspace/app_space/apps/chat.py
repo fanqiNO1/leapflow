@@ -12,7 +12,7 @@ declares the ``after_message_sent`` hook point, fired after a send lands.
 
 Run in-sandbox with the leapspace package importable:
 
-    PYTHONPATH=/apps python3 -m leapspace.apps.chat
+    PYTHONPATH=/apps python3 -m leapspace.app_space.apps.chat
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
     QTextEdit,
 )
 
-from leapspace.apps import BaseLeapApp
+from leapspace.app_space.apps import BaseLeapApp
 
 INBOX_POLL_MS = 500
 

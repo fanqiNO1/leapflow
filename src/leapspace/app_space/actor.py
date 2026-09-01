@@ -34,7 +34,7 @@ from cua_sandbox.interfaces.shell import CommandResult
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from leapspace.utils import CUA_MCP_PORT
+from leapspace.app_space.utils import CUA_MCP_PORT
 
 
 @dataclass(frozen=True)

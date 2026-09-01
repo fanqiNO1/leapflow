@@ -1,6 +1,6 @@
-"""Tests for the shared check() convention in leapspace.utils."""
+"""Tests for the shared check() convention in leapspace.app_space.utils."""
 
-from leapspace.utils import check
+from leapspace.app_space.utils import check
 
 
 def test_check_pass_line(capsys):

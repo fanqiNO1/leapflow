@@ -4,7 +4,7 @@ import pytest
 
 pytest.importorskip("cua_sandbox")  # leapspace dependency group only
 
-from leapspace.actor import ActionResult, LeapActor
+from leapspace.app_space.actor import ActionResult, LeapActor
 
 
 def make_actor() -> LeapActor:
