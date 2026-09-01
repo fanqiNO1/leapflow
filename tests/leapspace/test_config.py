@@ -1,13 +1,12 @@
 """Hermetic unit tests for TaskConfig (no Qt, no sandbox).
 
-Run from benchmarks/leapbench:  python3 -m pytest tests/
 """
 
 import pytest
 import yaml
 from pydantic import ValidationError
 
-from leapbench.config import TaskConfig
+from leapspace.config import TaskConfig
 
 VALID = """\
 id: task-001

@@ -1258,7 +1258,7 @@ web = [
 ]
 
 [package.dev-dependencies]
-leapbench = [
+leapspace = [
     { name = "cua-sandbox", marker = "python_full_version >= '3.12'" },
     { name = "pydantic", marker = "python_full_version >= '3.12'" },
     { name = "pyqt6", marker = "python_full_version >= '3.12'" },
@@ -1293,7 +1293,7 @@ requires-dist = [
 provides-extras = ["dev", "hub", "dashboard", "web"]
 
 [package.metadata.requires-dev]
-leapbench = [
+leapspace = [
     { name = "cua-sandbox", marker = "python_full_version >= '3.12'", editable = "../cua/libs/python/cua-sandbox" },
     { name = "pydantic", marker = "python_full_version >= '3.12'", specifier = ">=2" },
     { name = "pyqt6", marker = "python_full_version >= '3.12'", specifier = ">=6.7" },

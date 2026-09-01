@@ -1,4 +1,4 @@
-"""LeapChat — LeapBench mock chat app (PyQt6, BaseLeapApp contract).
+"""LeapChat — LeapSpace mock chat app (PyQt6, BaseLeapApp contract).
 
 Communication is mocked: outbound messages only append to local state;
 inbound messages arrive via ``<state_dir>/inbox.jsonl`` — one JSON object
@@ -10,9 +10,9 @@ Task-facing surface: ``inject_message(sender, text)`` is the public
 injection API (task hooks and the inbox transport share it), and the app
 declares the ``after_message_sent`` hook point, fired after a send lands.
 
-Run in-sandbox with the leapbench package importable:
+Run in-sandbox with the leapspace package importable:
 
-    PYTHONPATH=/apps python3 -m leapbench.apps.chat
+    PYTHONPATH=/apps python3 -m leapspace.apps.chat
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
     QTextEdit,
 )
 
-from leapbench.apps import BaseLeapApp
+from leapspace.apps import BaseLeapApp
 
 INBOX_POLL_MS = 500
 

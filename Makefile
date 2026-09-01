@@ -6,7 +6,7 @@ BASE ?= origin/main
 # Parallelism for the mock layer. The real layer runs at -n 4 (few, heavy cases).
 JOBS ?= auto
 
-.PHONY: setup sync bench-sync test test-unit test-e2e test-live test-impact test-full \
+.PHONY: setup sync space-sync test test-unit test-e2e test-live test-impact test-full \
         record-traffic seed-cassettes sync-fixtures lint brain cua-check help
 
 help:  ## Show available targets
@@ -20,11 +20,11 @@ setup:  ## Setup scripts permissions and environment
 sync:  ## Sync all dependencies
 	uv sync --all-extras
 
-bench-sync:  ## Sync dependencies including LeapBench (requires Python >= 3.12)
-	uv sync --all-extras --group leapbench
+space-sync:  ## Sync dependencies including LeapSpace (requires Python >= 3.12)
+	uv sync --all-extras --group leapspace
 
 lint:  ## Lint source code
-	uv run ruff check src/leapflow/ tests/ tools/ benchmarks/
+	uv run ruff check src/ tests/ tools/
 
 # ── Test layers ───────────────────────────────────────────────────────────────
 # The mock layer is broad and fast; the real layer is small, coarse, and never

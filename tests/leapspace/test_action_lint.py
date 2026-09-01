@@ -1,9 +1,8 @@
 """Hermetic unit tests for action_lint (AST only, no Qt, no sandbox).
 
-Run from benchmarks/leapbench:  python3 -m pytest tests/
 """
 
-from leapbench.action_lint import lint_task, main
+from leapspace.action_lint import lint_task, main
 
 CONFIG = """\
 id: task-t
@@ -29,7 +28,7 @@ def boss_followup(app):
 async def reference(actor):
     await actor.list_apps()
 
-def expect(state_root="/tmp/leapbench"):
+def expect(state_root="/tmp/leapspace"):
     return 0
 '''
 
@@ -97,7 +96,7 @@ def test_expect_missing(tmp_path):
 
 
 def test_expect_params_need_defaults(tmp_path):
-    action = GOOD_ACTION.replace('state_root="/tmp/leapbench"', "state_root")
+    action = GOOD_ACTION.replace('state_root="/tmp/leapspace"', "state_root")
     problems = lint_task(make_task(tmp_path, action=action))
     assert any("must have defaults" in p for p in problems)
 

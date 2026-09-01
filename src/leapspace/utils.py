@@ -1,7 +1,27 @@
-"""Shared leapbench helpers: sandbox image presets."""
+"""Shared leapspace helpers: sandbox image presets."""
 
+import os
 from enum import Enum
+from pathlib import Path
 from typing import Any
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Write text atomically via a sibling tmp file + os.replace."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def check(name: str, cond: bool, detail: str = "") -> bool:
+    """Report one named assertion as a PASS/FAIL line; returns cond.
+
+    Shared convention for task expect() functions: accumulate with
+    ``ok &= check(...)`` so every check runs and reports, then exit
+    non-zero if any failed.
+    """
+    print(f"{'PASS' if cond else 'FAIL'} {name}: {detail}")
+    return cond
 
 
 class LeapImage(str, Enum):

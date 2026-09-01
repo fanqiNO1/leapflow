@@ -1,7 +1,4 @@
-"""Hermetic unit tests for BaseLeapApp (offscreen Qt, tmp state dirs).
-
-Run from benchmarks/leapbench:  python3 -m pytest tests/
-"""
+"""Hermetic unit tests for BaseLeapApp (offscreen Qt, tmp state dirs)."""
 
 import json
 import os
@@ -9,9 +6,12 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
+
+pytest.importorskip("PyQt6")  # leapspace dependency group only
+
 from PyQt6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton, QWidget  # noqa: E402
 
-from leapbench.apps import BaseLeapApp  # noqa: E402
+from leapspace.apps import BaseLeapApp  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -43,7 +43,7 @@ class MiniApp(BaseLeapApp):
 
 @pytest.fixture()
 def app(qapp, tmp_path, monkeypatch):
-    monkeypatch.setenv("LEAPBENCH_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LEAPSPACE_STATE_DIR", str(tmp_path))
     window = MiniApp()
     yield window, tmp_path
     window.deleteLater()
@@ -90,7 +90,7 @@ def test_init_override_forbidden():
 
 
 def test_missing_classvars_rejected(qapp, tmp_path, monkeypatch):
-    monkeypatch.setenv("LEAPBENCH_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LEAPSPACE_STATE_DIR", str(tmp_path))
 
     class NoId(MiniApp):
         app_id = ""
@@ -112,7 +112,7 @@ def test_initial_persist_and_title(app):
 
 
 def test_unnamed_interactive_widget_recorded_not_fatal(qapp, tmp_path, monkeypatch):
-    monkeypatch.setenv("LEAPBENCH_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LEAPSPACE_STATE_DIR", str(tmp_path))
 
     class Sloppy(MiniApp):
         def build_ui(self):
@@ -126,7 +126,7 @@ def test_unnamed_interactive_widget_recorded_not_fatal(qapp, tmp_path, monkeypat
 
 
 def test_duplicate_bind_name_recorded(qapp, tmp_path, monkeypatch):
-    monkeypatch.setenv("LEAPBENCH_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LEAPSPACE_STATE_DIR", str(tmp_path))
 
     class Dupe(MiniApp):
         def build_ui(self):
@@ -157,7 +157,7 @@ def test_state_snapshot_updates_on_emit(app):
 
 
 def test_unserializable_state_recorded(qapp, tmp_path, monkeypatch):
-    monkeypatch.setenv("LEAPBENCH_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LEAPSPACE_STATE_DIR", str(tmp_path))
 
     class BadState(MiniApp):
         def state(self):
@@ -177,7 +177,7 @@ def write_hooks(state_dir, mapping, source=None):
 
 
 def test_before_launch_hook_seeds_via_reset(qapp, tmp_path, monkeypatch):
-    monkeypatch.setenv("LEAPBENCH_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LEAPSPACE_STATE_DIR", str(tmp_path))
     write_hooks(
         tmp_path,
         {"before_launch": "seed"},
@@ -190,7 +190,7 @@ def test_before_launch_hook_seeds_via_reset(qapp, tmp_path, monkeypatch):
 
 
 def test_hook_unknown_point_recorded(qapp, tmp_path, monkeypatch):
-    monkeypatch.setenv("LEAPBENCH_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LEAPSPACE_STATE_DIR", str(tmp_path))
     write_hooks(
         tmp_path, {"after_whatever": "seed"}, "def seed(app):\n    pass\n"
     )
@@ -201,7 +201,7 @@ def test_hook_unknown_point_recorded(qapp, tmp_path, monkeypatch):
 
 
 def test_hook_missing_function_recorded(qapp, tmp_path, monkeypatch):
-    monkeypatch.setenv("LEAPBENCH_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LEAPSPACE_STATE_DIR", str(tmp_path))
     write_hooks(tmp_path, {"before_launch": "nope"}, "def seed(app):\n    pass\n")
     window = MiniApp()
     violations = read_state(tmp_path)["a11y_violations"]
@@ -210,7 +210,7 @@ def test_hook_missing_function_recorded(qapp, tmp_path, monkeypatch):
 
 
 def test_hook_exception_recorded_not_fatal(qapp, tmp_path, monkeypatch):
-    monkeypatch.setenv("LEAPBENCH_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LEAPSPACE_STATE_DIR", str(tmp_path))
     write_hooks(
         tmp_path,
         {"before_launch": "seed"},
@@ -223,7 +223,7 @@ def test_hook_exception_recorded_not_fatal(qapp, tmp_path, monkeypatch):
 
 
 def test_hooks_py_missing_recorded(qapp, tmp_path, monkeypatch):
-    monkeypatch.setenv("LEAPBENCH_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LEAPSPACE_STATE_DIR", str(tmp_path))
     write_hooks(tmp_path, {"before_launch": "seed"})
     window = MiniApp()
     violations = read_state(tmp_path)["a11y_violations"]
@@ -238,7 +238,7 @@ def test_execute_undeclared_point_raises(app):
 
 
 def test_app_declared_point_fires(qapp, tmp_path, monkeypatch):
-    monkeypatch.setenv("LEAPBENCH_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LEAPSPACE_STATE_DIR", str(tmp_path))
     write_hooks(
         tmp_path,
         {"after_ping": "on_ping"},
@@ -258,7 +258,7 @@ def test_app_declared_point_fires(qapp, tmp_path, monkeypatch):
 
 
 def test_supported_hooks_must_keep_before_launch(qapp, tmp_path, monkeypatch):
-    monkeypatch.setenv("LEAPBENCH_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LEAPSPACE_STATE_DIR", str(tmp_path))
 
     class NoLaunch(MiniApp):
         supported_hooks = ()
@@ -288,7 +288,7 @@ def test_notify_delivered_when_binary_available(app, monkeypatch):
         pass
 
     monkeypatch.setattr(
-        "leapbench.apps._base.subprocess.Popen", lambda *a, **k: calls.append(a) or FakeProc()
+        "leapspace.apps._base.subprocess.Popen", lambda *a, **k: calls.append(a) or FakeProc()
     )
     window._notify_available = True
     window.notify("hello", "world")
@@ -300,7 +300,7 @@ def test_notify_delivered_when_binary_available(app, monkeypatch):
 def test_notify_undelivered_when_binary_missing(app, monkeypatch):
     window, state_dir = app
     monkeypatch.setattr(
-        "leapbench.apps._base.subprocess.Popen",
+        "leapspace.apps._base.subprocess.Popen",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not be called")),
     )
     window._notify_available = False

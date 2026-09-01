@@ -1,6 +1,6 @@
 """Static checks for a task's action.py (structure + import safety).
 
-Dual use: CLI (``python -m leapbench.action_lint <task_dir>``) and harness
+Dual use: CLI (``python -m leapspace.action_lint <task_dir>``) and harness
 import (``lint_task(task_dir) -> list[str]``). All checks are AST-only —
 action.py is never imported: importing has side effects and needs the
 runtime environment, while linting must work offline.
@@ -16,13 +16,13 @@ import ast
 import sys
 from pathlib import Path
 
-from leapbench.config import TaskConfig
+from leapspace.config import TaskConfig
 
 # Top-level packages importable inside the sandbox app process, beyond the
 # stdlib. Host-only libraries (cua_sandbox, mcp, ...) must be imported
 # lazily inside the functions that use them: the app loads action.py whole
 # as hooks.py at registration time, so module-level imports execute there.
-SAFE_ROOTS = frozenset({"PyQt6", "leapbench"})
+SAFE_ROOTS = frozenset({"PyQt6", "leapspace"})
 
 
 def lint_task(task_dir: str | Path) -> list[str]:
@@ -72,7 +72,7 @@ def _check_imports(tree: ast.Module) -> list[str]:
             if node.level:
                 problems.append(
                     f"line {node.lineno}: relative import breaks when action.py "
-                    "is loaded as hooks.py; import leapbench.* absolutely"
+                    "is loaded as hooks.py; import leapspace.* absolutely"
                 )
                 continue
             roots = [node.module.split(".")[0]]
@@ -123,7 +123,7 @@ def _check_expect(
 ) -> list[str]:
     fn = functions.get("expect")
     if fn is None:
-        return ["expect: missing (def expect(state_root='/tmp/leapbench'))"]
+        return ["expect: missing (def expect(state_root='/tmp/leapspace'))"]
     if isinstance(fn, ast.AsyncFunctionDef):
         return ["expect: must be sync — the harness runs it as a plain script"]
     required = _positional_count(fn) - len(fn.args.defaults)

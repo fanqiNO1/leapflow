@@ -1,4 +1,4 @@
-"""BaseLeapApp — abstract base for all LeapBench scenario apps.
+"""BaseLeapApp — abstract base for all LeapSpace scenario apps.
 
 Contract:
 
@@ -27,8 +27,8 @@ Contract:
   ``a11y_violations`` and stderr, never raised: a broken environment must
   stay observable — legality is action.py's verdict, not the app's.
 
-State dir: ``$LEAPBENCH_STATE_DIR`` if set (hermetic tests only), else
-``/tmp/leapbench/<app_id>/``.
+State dir: ``$LEAPSPACE_STATE_DIR`` if set (hermetic tests only), else
+``/tmp/leapspace/<app_id>/``.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from leapbench.utils import write_atomic
+from leapspace.utils import write_atomic
 
 # Widget types an agent may act on; self-check requires each to be named.
 INTERACTIVE_TYPES: tuple[type[QWidget], ...] = (
@@ -112,9 +112,9 @@ class BaseLeapApp(QMainWindow, ABC, metaclass=_LeapAppMeta):
         self._validate_class_contract()
 
         # Ground-truth location: env override exists solely for hermetic tests.
-        env_dir = os.environ.get("LEAPBENCH_STATE_DIR")
+        env_dir = os.environ.get("LEAPSPACE_STATE_DIR")
         self._state_dir = (
-            Path(env_dir) if env_dir else Path("/tmp/leapbench") / self.app_id
+            Path(env_dir) if env_dir else Path("/tmp/leapspace") / self.app_id
         )
         self._state_dir.mkdir(parents=True, exist_ok=True)
 
@@ -306,7 +306,7 @@ class BaseLeapApp(QMainWindow, ABC, metaclass=_LeapAppMeta):
             return
         try:
             import_spec = importlib.util.spec_from_file_location(
-                "leapbench_task_hooks", hooks_path
+                "leapspace_task_hooks", hooks_path
             )
             module = importlib.util.module_from_spec(import_spec)
             import_spec.loader.exec_module(module)

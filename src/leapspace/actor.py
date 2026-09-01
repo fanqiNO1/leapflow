@@ -1,4 +1,4 @@
-"""LeapActor: the OS-signal source of leapbench.
+"""LeapActor: the OS-signal source of leapspace.
 
 Drives the in-sandbox apps through the cua-driver MCP tool surface plus
 direct sandbox handles (sb.shell, sb.clipboard, ...).
@@ -18,8 +18,11 @@ click/type_text/press_key/hotkey/scroll via scope="desktop") stay optional.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 import shlex
+import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from types import TracebackType
@@ -31,7 +34,7 @@ from cua_sandbox.interfaces.shell import CommandResult
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from leapbench.utils import CUA_MCP_PORT
+from leapspace.utils import CUA_MCP_PORT
 
 
 @dataclass(frozen=True)
@@ -47,6 +50,30 @@ class ActionResult:
     data: Any = None
     images: list[str] = field(default_factory=list)
     error: str | None = None
+
+
+# Nodes in tree_markdown look like:  - [7] text "Message input" [actions=[...]]
+_ELEMENT_RE = re.compile(r'-\s*\[(\d+)\]\s+([a-z ]+?)\s+"(.*?)"')
+
+
+def find_element(tree_markdown: str, name: str, *, role: str | None = None) -> int:
+    """Resolve an accessible name to its element index in a tree snapshot.
+
+    action.py addresses widgets semantically: bound names survive layout
+    evolution, pixel coordinates do not. Raises LookupError when the name is
+    absent or ambiguous — both are scripting bugs, not runtime conditions.
+    Indices expire on the next snapshot; always re-resolve after acting.
+    """
+    matches = [
+        (int(index), node_role)
+        for index, node_role, node_name in _ELEMENT_RE.findall(tree_markdown)
+        if node_name == name and (role is None or node_role == role)
+    ]
+    if not matches:
+        raise LookupError(f"no element named {name!r} in snapshot")
+    if len(matches) > 1:
+        raise LookupError(f"ambiguous element name {name!r}: {matches}")
+    return matches[0][0]
 
 
 class LeapActor:
@@ -65,6 +92,11 @@ class LeapActor:
         self.exit_stack = AsyncExitStack()
         self.cua_mcp: ClientSession | None = None
         self.cua_mcp_tools: list[str] | None = None
+
+    @classmethod
+    async def attach(cls, name: str) -> LeapActor:
+        """Attach to a running sandbox by name — action.py's entry point (D6)."""
+        return cls(await Sandbox.connect(name, local=True))
 
     async def __aenter__(self) -> LeapActor:
         return self
@@ -205,6 +237,33 @@ class LeapActor:
             raise RuntimeError(f"get_window_state failed via MCP: {result.error}")
         return result
 
+    async def wait_for_window(
+        self, title_prefix: str, *, timeout_s: float = 60, poll_s: float = 2.0
+    ) -> dict[str, Any]:
+        """Poll list_windows until a window titled `title_prefix...` appears."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            result = await self.list_windows()
+            windows = result.data
+            if isinstance(windows, dict):
+                windows = windows.get("windows", [])
+            for window in windows or []:
+                if window.get("title", "").startswith(title_prefix):
+                    return window
+            await asyncio.sleep(poll_s)
+        raise RuntimeError(
+            f"window {title_prefix!r} did not appear within {timeout_s}s"
+        )
+
+    async def snapshot_tree(self, pid: int, window_id: int) -> str:
+        """Fresh AX tree for one window, as tree_markdown.
+
+        Element indices expire on the next snapshot — re-snapshot before
+        every element-indexed action.
+        """
+        result = await self.get_window_state(pid, window_id)
+        return result.data["tree_markdown"]
+
     # ── App management ───────────────────────────────────────────────────
 
     async def launch_app(
@@ -233,6 +292,10 @@ class LeapActor:
             "bring_to_front", {"pid": pid, "window_id": window_id}
         )
         if not result.ok:
+            # Linux declares this unsupported: AT-SPI/X11 already reach
+            # backgrounded windows, so the request is satisfied by doing nothing.
+            if result.error and "bring_to_front_unsupported_on_platform" in result.error:
+                return ActionResult(ok=True, via="mcp", data={"skipped": True})
             raise RuntimeError(f"bring_to_front failed via MCP: {result.error}")
         return result
 
