@@ -84,6 +84,7 @@ include = ["leapflow*", "leapspace*"]
 "leapflow.gateway.action_packs" = ["*.yaml"]
 "leapflow.dashboard.templates" = ["*.yaml"]
 "leapflow.dashboard.static" = ["*"]
+"leapflow.plugins.dsh" = ["*.js"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
