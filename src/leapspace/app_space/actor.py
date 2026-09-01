@@ -1,4 +1,4 @@
-"""LeapActor: the OS-signal source of leapspace.
+"""LeapAppActor: the OS-signal source of leapspace.
 
 Drives the in-sandbox apps through the cua-driver MCP tool surface plus
 direct sandbox handles (sb.shell, sb.clipboard, ...).
@@ -76,7 +76,7 @@ def find_element(tree_markdown: str, name: str, *, role: str | None = None) -> i
     return matches[0][0]
 
 
-class LeapActor:
+class LeapAppActor:
     """Human-operation emitter driving a sandbox from the host.
 
     The MCP connection is lazy: it is established on first use by
@@ -94,11 +94,11 @@ class LeapActor:
         self.cua_mcp_tools: list[str] | None = None
 
     @classmethod
-    async def attach(cls, name: str) -> LeapActor:
+    async def attach(cls, name: str) -> LeapAppActor:
         """Attach to a running sandbox by name — action.py's entry point (D6)."""
         return cls(await Sandbox.connect(name, local=True))
 
-    async def __aenter__(self) -> LeapActor:
+    async def __aenter__(self) -> LeapAppActor:
         return self
 
     async def __aexit__(

@@ -16,7 +16,7 @@ import ast
 import sys
 from pathlib import Path
 
-from leapspace.app_space.config import TaskConfig
+from leapspace.app_space.config import AppTaskConfig
 
 # Top-level packages importable inside the sandbox app process, beyond the
 # stdlib. Host-only libraries (cua_sandbox, mcp, ...) must be imported
@@ -33,7 +33,7 @@ def lint_task(task_dir: str | Path) -> list[str]:
     """
     task_dir = Path(task_dir)
     try:
-        config = TaskConfig.load(task_dir)
+        config = AppTaskConfig.load(task_dir)
     except Exception as exc:  # any load failure is a lint problem, not a crash
         return [f"config.yaml: {exc}"]
 
@@ -88,7 +88,7 @@ def _check_imports(tree: ast.Module) -> list[str]:
 
 
 def _check_hooks(
-    config: TaskConfig, functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef]
+    config: AppTaskConfig, functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef]
 ) -> list[str]:
     """Every config-wired hook must exist with the fn(app) signature."""
     problems = []

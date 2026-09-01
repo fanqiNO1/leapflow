@@ -32,11 +32,11 @@ from typing import TYPE_CHECKING
 from leapspace.app_space.utils import check
 
 if TYPE_CHECKING:
-    from leapspace.app_space.actor import LeapActor
+    from leapspace.app_space.actor import LeapAppActor
 
 APP_TITLE = "LeapChat"
-REPLY = "收到，明天下午 3 点见。"
-FOLLOWUP = "收到的话，把上季度的报表也带上。"
+REPLY = "Got it, see you at 3pm tomorrow."
+FOLLOWUP = "If you got this, bring last quarter's report too."
 SETTLE_TIMEOUT_S = 10
 
 # The unread lives in a background conversation on purpose: opening boss is
@@ -46,10 +46,10 @@ SEED = {
     "active": "alice",
     "conversations": {
         "alice": [
-            {"sender": "alice", "text": "周末打球吗？", "read": True},
+            {"sender": "alice", "text": "Up for basketball this weekend?", "read": True},
         ],
         "boss": [
-            {"sender": "boss", "text": "明天的例会改到下午3点，收到请确认。", "read": False},
+            {"sender": "boss", "text": "Tomorrow's meeting moved to 3pm, please confirm.", "read": False},
         ],
     },
 }
@@ -69,7 +69,7 @@ def boss_followup(app) -> None:
 # ── reference (host side; the human action sequence) ─────────────────────
 
 
-async def reference(actor: LeapActor) -> None:
+async def reference(actor: LeapAppActor) -> None:
     from leapspace.app_space.actor import find_element
 
     window = await actor.wait_for_window(APP_TITLE)

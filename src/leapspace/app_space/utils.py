@@ -24,7 +24,7 @@ def check(name: str, cond: bool, detail: str = "") -> bool:
     return cond
 
 
-class LeapImage(str, Enum):
+class LeapAppImage(str, Enum):
     """Sandbox image presets, selectable by name from CLI or task config."""
 
     LINUX = "linux"
@@ -45,14 +45,14 @@ LINUX_IMAGE_CONFIG: dict[str, Any] = {
     "kind": "vm",
 }
 
-LEAPIMAGE_CONFIGS: dict[LeapImage, dict[str, Any]] = {
-    LeapImage.LINUX: LINUX_IMAGE_CONFIG,
+IMAGE_CONFIGS: dict[LeapAppImage, dict[str, Any]] = {
+    LeapAppImage.LINUX: LINUX_IMAGE_CONFIG,
 }
 
 
-def get_image_config(image: LeapImage) -> dict[str, Any]:
+def get_image_config(image: LeapAppImage) -> dict[str, Any]:
     """Return a copy of the preset spec for cua.Image.from_dict().
 
     Shared conventions (e.g. exposing the MCP port) are applied by the caller.
     """
-    return LEAPIMAGE_CONFIGS[image].copy()
+    return IMAGE_CONFIGS[image].copy()

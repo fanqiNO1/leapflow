@@ -1,4 +1,4 @@
-"""TaskConfig — config.yaml loading and validation (harness-side).
+"""AppTaskConfig — config.yaml loading and validation (harness-side).
 
 config.yaml is pure declaration: wiring and metadata only, no behavior
 bodies — hook functions live in the task's action.py, config only names
@@ -20,7 +20,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict
 
 
-class TaskConfig(BaseModel):
+class AppTaskConfig(BaseModel):
     """One task's config.yaml.
 
     hooks:     {app_id: {hook_point: function_name}} — wiring only; the
@@ -43,7 +43,7 @@ class TaskConfig(BaseModel):
     max_steps: int | None = None
 
     @classmethod
-    def load(cls, path: str | Path) -> TaskConfig:
+    def load(cls, path: str | Path) -> AppTaskConfig:
         """Load from a config.yaml path, or a task directory containing one."""
         path = Path(path)
         if path.is_dir():

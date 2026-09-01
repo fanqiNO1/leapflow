@@ -1,4 +1,4 @@
-"""Hermetic unit tests for TaskConfig (no Qt, no sandbox).
+"""Hermetic unit tests for AppTaskConfig (no Qt, no sandbox).
 
 """
 
@@ -6,7 +6,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from leapspace.app_space.config import TaskConfig
+from leapspace.app_space.config import AppTaskConfig
 
 VALID = """\
 id: task-001
@@ -38,7 +38,7 @@ def write(tmp_path, text=VALID):
 
 
 def test_load_full(tmp_path):
-    cfg = TaskConfig.load(write(tmp_path))
+    cfg = AppTaskConfig.load(write(tmp_path))
     assert cfg.id == "task-001"
     assert cfg.title == "Reply to the boss's unread message"
     assert cfg.apps == ("chat",)
@@ -53,7 +53,7 @@ def test_load_full(tmp_path):
 
 
 def test_load_minimal_defaults(tmp_path):
-    cfg = TaskConfig.load(write(tmp_path, MINIMAL))
+    cfg = AppTaskConfig.load(write(tmp_path, MINIMAL))
     assert cfg.hooks == {}
     assert cfg.interface == {}
     assert cfg.timeout_s is None
@@ -62,36 +62,36 @@ def test_load_minimal_defaults(tmp_path):
 
 def test_load_accepts_task_directory(tmp_path):
     write(tmp_path)
-    cfg = TaskConfig.load(tmp_path)
+    cfg = AppTaskConfig.load(tmp_path)
     assert cfg.id == "task-001"
 
 
 def test_frozen(tmp_path):
-    cfg = TaskConfig.load(write(tmp_path))
+    cfg = AppTaskConfig.load(write(tmp_path))
     with pytest.raises(ValidationError):
         cfg.id = "task-999"
 
 
 def test_missing_file(tmp_path):
     with pytest.raises(OSError):
-        TaskConfig.load(tmp_path / "config.yaml")
+        AppTaskConfig.load(tmp_path / "config.yaml")
 
 
 def test_invalid_yaml(tmp_path):
     with pytest.raises(yaml.YAMLError):
-        TaskConfig.load(write(tmp_path, "id: [unclosed\n"))
+        AppTaskConfig.load(write(tmp_path, "id: [unclosed\n"))
 
 
 def test_non_mapping_top_level(tmp_path):
     with pytest.raises(ValueError, match="top level must be a mapping"):
-        TaskConfig.load(write(tmp_path, "- just\n- a\n- list\n"))
+        AppTaskConfig.load(write(tmp_path, "- just\n- a\n- list\n"))
 
 
 def test_unknown_top_level_key_rejected(tmp_path):
     with pytest.raises(ValidationError, match="bogus"):
-        TaskConfig.load(write(tmp_path, VALID + "bogus: 1\n"))
+        AppTaskConfig.load(write(tmp_path, VALID + "bogus: 1\n"))
 
 
 def test_wrong_field_type_rejected(tmp_path):
     with pytest.raises(ValidationError, match="hooks"):
-        TaskConfig.load(write(tmp_path, MINIMAL + "hooks: [chat]\n"))
+        AppTaskConfig.load(write(tmp_path, MINIMAL + "hooks: [chat]\n"))

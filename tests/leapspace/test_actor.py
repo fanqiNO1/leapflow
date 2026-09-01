@@ -1,16 +1,16 @@
-"""Tests for LeapActor's polling helpers (wait_for_window / snapshot_tree)."""
+"""Tests for LeapAppActor's polling helpers (wait_for_window / snapshot_tree)."""
 
 import pytest
 
 pytest.importorskip("cua_sandbox")  # leapspace dependency group only
 
-from leapspace.app_space.actor import ActionResult, LeapActor
+from leapspace.app_space.actor import ActionResult, LeapAppActor
 
 
-def make_actor() -> LeapActor:
+def make_actor() -> LeapAppActor:
     # __init__ only stores the sandbox; the helpers under test never touch it
     # because list_windows / get_window_state are stubbed per test.
-    return LeapActor(sandbox=object())
+    return LeapAppActor(sandbox=object())
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,7 @@
 id: task-001
 title: Reply to the boss's unread message
 apps: [chat]
-instruction: "boss 给你发了一条消息，请回复确认收到。"
+instruction: "Your boss sent you a message; reply to confirm receipt."
 hooks:
   chat:
     before_launch: seed
