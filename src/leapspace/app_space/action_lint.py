@@ -1,7 +1,8 @@
 """Static checks for a task's action.py (structure + import safety).
 
-Dual use: CLI (``python -m leapspace.app_space.action_lint <task_dir>``) and harness
-import (``lint_task(task_dir) -> list[str]``). All checks are AST-only —
+Dual use: CLI (``python -m leapspace.app_space.action_lint <config_path>``) and harness
+import (``lint_task(config) -> list[str]`` — the caller owns config loading).
+All checks are AST-only —
 action.py is never imported: importing has side effects and needs the
 runtime environment, while linting must work offline.
 
@@ -16,6 +17,7 @@ import ast
 import sys
 from pathlib import Path
 
+from leapspace.app_space.apps import APP_MODULES
 from leapspace.app_space.config import AppTaskConfig
 
 # Top-level packages importable inside the sandbox app process, beyond the
@@ -25,19 +27,13 @@ from leapspace.app_space.config import AppTaskConfig
 SAFE_ROOTS = frozenset({"PyQt6", "leapspace"})
 
 
-def lint_task(task_dir: str | Path) -> list[str]:
-    """Check a task directory's action.py against its config.yaml.
+def lint_task(config: AppTaskConfig) -> list[str]:
+    """Check a task's action file (config.action_path) against its config.
 
-    Returns the list of problems found (empty = clean); a broken config or
-    action file is reported as problems rather than raised.
+    Returns the list of problems found (empty = clean); a broken action
+    file is reported as problems rather than raised.
     """
-    task_dir = Path(task_dir)
-    try:
-        config = AppTaskConfig.load(task_dir)
-    except Exception as exc:  # any load failure is a lint problem, not a crash
-        return [f"config.yaml: {exc}"]
-
-    action_path = task_dir / "action.py"
+    action_path = config.action_path
     if not action_path.exists():
         return [f"{action_path}: not found"]
     try:
@@ -51,10 +47,20 @@ def lint_task(task_dir: str | Path) -> list[str]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     return [
+        *_check_app_ids(config),
         *_check_imports(tree),
         *_check_hooks(config, functions),
         *_check_reference(functions),
         *_check_expect(functions),
+    ]
+
+
+def _check_app_ids(config: AppTaskConfig) -> list[str]:
+    """Every configured app must be a registered app module."""
+    return [
+        f"app_id {app_id!r}: not registered in APP_MODULES"
+        for app_id in config.app_ids
+        if app_id not in APP_MODULES
     ]
 
 
@@ -139,12 +145,17 @@ def main(argv: list[str] | None = None) -> int:
         description="Statically check a task's action.py against its config.yaml.",
     )
     parser.add_argument(
-        "task_dir", type=Path, help="task directory holding config.yaml + action.py"
+        "config_path", type=Path, help="path to the task's config.yaml"
     )
     args = parser.parse_args(argv)
-    problems = lint_task(args.task_dir)
+    try:
+        config = AppTaskConfig.load(args.config_path)
+    except Exception as exc:  # a load failure is a lint problem, not a crash
+        print(f"{args.config_path}: {exc}", file=sys.stderr)
+        return 1
+    problems = lint_task(config)
     for problem in problems:
-        print(f"{args.task_dir}: {problem}", file=sys.stderr)
+        print(f"{args.config_path}: {problem}", file=sys.stderr)
     return 1 if problems else 0
 
 

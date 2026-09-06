@@ -57,14 +57,10 @@ web = ["trafilatura>=2.2"]
 
 # LeapSpace (src/leapspace) heavier dependencies. The package itself ships
 # with the leapflow distribution, but PyQt6/cua-sandbox/pydantic are only
-# installed with this group — via the per-group requires-python below they
-# never constrain the py3.11 lanes. Installed with
+# installed with this group. Installed with
 # `uv sync --all-extras --group leapspace`.
 [dependency-groups]
 leapspace = ["pyqt6>=6.7", "cua-sandbox", "pydantic>=2"]
-
-[tool.uv.dependency-groups]
-leapspace = { requires-python = ">=3.12" }
 
 [project.scripts]
 leap = "leapflow.__main__:main"

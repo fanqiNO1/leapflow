@@ -93,11 +93,6 @@ class LeapAppActor:
         self.cua_mcp: ClientSession | None = None
         self.cua_mcp_tools: list[str] | None = None
 
-    @classmethod
-    async def attach(cls, name: str) -> LeapAppActor:
-        """Attach to a running sandbox by name — action.py's entry point (D6)."""
-        return cls(await Sandbox.connect(name, local=True))
-
     async def __aenter__(self) -> LeapAppActor:
         return self
 
@@ -238,9 +233,15 @@ class LeapAppActor:
         return result
 
     async def wait_for_window(
-        self, title_prefix: str, *, timeout_s: float = 60, poll_s: float = 2.0
+        self, app_title: str, *, timeout_s: float = 60, poll_s: float = 2.0
     ) -> dict[str, Any]:
-        """Poll list_windows until a window titled `title_prefix...` appears."""
+        """Poll list_windows until the app's window appears.
+
+        A window matches when its title equals app_title, optionally with
+        one " (...)" status suffix — "LeapChat (3)" matches "LeapChat";
+        "LeapChat Pro" does not.
+        """
+        pattern = re.compile(rf"{re.escape(app_title)}(?: \([^)]*\))?")
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             result = await self.list_windows()
@@ -248,11 +249,11 @@ class LeapAppActor:
             if isinstance(windows, dict):
                 windows = windows.get("windows", [])
             for window in windows or []:
-                if window.get("title", "").startswith(title_prefix):
+                if pattern.fullmatch(window.get("title", "")):
                     return window
             await asyncio.sleep(poll_s)
         raise RuntimeError(
-            f"window {title_prefix!r} did not appear within {timeout_s}s"
+            f"window {app_title!r} did not appear within {timeout_s}s"
         )
 
     async def snapshot_tree(self, pid: int, window_id: int) -> str:

@@ -24,7 +24,11 @@ class AppTaskConfig(BaseModel):
     """One task's config.yaml.
 
     hooks:     {app_id: {hook_point: function_name}} — wiring only; the
-               named functions live in the task's action.py.
+               named functions live in the task's action file.
+    action_path: full path to the task's action file. Optional in the
+               yaml: a relative value resolves against the config file's
+               directory; when absent, load() defaults to action.py beside
+               the config.
     interface: {app_id: (bound_names,)} — the semantic surface the task
                addresses; the static precheck compares it against the app's
                persisted ``interface`` (the mutation budget).
@@ -35,20 +39,26 @@ class AppTaskConfig(BaseModel):
 
     id: str
     title: str
-    apps: tuple[str, ...]
+    app_ids: tuple[str, ...]
     instruction: str
+    action_path: Path
     hooks: dict[str, dict[str, str]] = {}
     interface: dict[str, tuple[str, ...]] = {}
     timeout_s: float | None = None
     max_steps: int | None = None
 
     @classmethod
-    def load(cls, path: str | Path) -> AppTaskConfig:
-        """Load from a config.yaml path, or a task directory containing one."""
-        path = Path(path)
-        if path.is_dir():
-            path = path / "config.yaml"
-        raw = yaml.safe_load(path.read_text())
+    def load(cls, config_path: str | Path) -> AppTaskConfig:
+        """Load from a config.yaml path; action_path resolves to a full path."""
+        config_path = Path(config_path)
+        raw = yaml.safe_load(config_path.read_text())
         if not isinstance(raw, dict):
-            raise ValueError(f"{path}: top level must be a mapping")
+            raise ValueError(f"{config_path}: top level must be a mapping")
+        base = config_path.parent
+        declared = raw.get("action_path")
+        if declared is None:
+            raw["action_path"] = base / "action.py"
+        else:
+            action = Path(declared)
+            raw["action_path"] = action if action.is_absolute() else base / action
         return cls.model_validate(raw)

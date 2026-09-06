@@ -1,5 +1,12 @@
-"""LeapSpace scenario apps (PyQt6)."""
+"""LeapSpace scenario apps: the host-side app registry.
 
-from leapspace.app_space.apps._base import BaseLeapApp
+APP_MODULES is the only place an app_id resolves to its module: the
+harness launches ``python -m <module>`` from it and lint whitelists
+app_ids with it. Keep this package PyQt6-free — the harness and lint
+import it on the host before any sandbox exists; the app classes live
+in _base and the per-app modules.
+"""
 
-__all__ = ["BaseLeapApp"]
+APP_MODULES: dict[str, str] = {
+    "chat": "leapspace.app_space.apps.chat",
+}

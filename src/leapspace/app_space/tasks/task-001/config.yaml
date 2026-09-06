@@ -6,7 +6,7 @@
 # app's persisted interface).
 id: task-001
 title: Reply to the boss's unread message
-apps: [chat]
+app_ids: [chat]
 instruction: "Your boss sent you a message; reply to confirm receipt."
 hooks:
   chat:

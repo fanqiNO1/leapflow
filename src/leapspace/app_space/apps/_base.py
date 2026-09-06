@@ -27,15 +27,15 @@ Contract:
   ``a11y_violations`` and stderr, never raised: a broken environment must
   stay observable — legality is action.py's verdict, not the app's.
 
-State dir: ``$LEAPSPACE_STATE_DIR`` if set (hermetic tests only), else
-``/tmp/leapspace/<app_id>/``.
+State dir: ``get_sandbox_state_dir``'s fixed per-OS root + ``<app_id>``
+(``/tmp/leapspace/<app_id>/`` on Linux) — the same convention the harness
+computes from its image preset, so both sides agree without configuration.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -63,7 +63,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from leapspace.app_space.utils import write_atomic
+from leapspace.app_space.utils import get_sandbox_state_dir, write_atomic
 
 # Widget types an agent may act on; self-check requires each to be named.
 INTERACTIVE_TYPES: tuple[type[QWidget], ...] = (
@@ -111,11 +111,8 @@ class BaseLeapApp(QMainWindow, ABC, metaclass=_LeapAppMeta):
         # Class-level identity is an authoring contract; fail fast if absent.
         self._validate_class_contract()
 
-        # Ground-truth location: env override exists solely for hermetic tests.
-        env_dir = os.environ.get("LEAPSPACE_STATE_DIR")
-        self._state_dir = (
-            Path(env_dir) if env_dir else Path("/tmp/leapspace") / self.app_id
-        )
+        # Ground-truth location: fixed per-OS convention shared with the harness.
+        self._state_dir = Path(get_sandbox_state_dir(in_sandbox=True)) / self.app_id
         self._state_dir.mkdir(parents=True, exist_ok=True)
 
         self._events: list[dict[str, Any]] = []
@@ -366,6 +363,7 @@ class BaseLeapApp(QMainWindow, ABC, metaclass=_LeapAppMeta):
     def _persist(self) -> None:
         envelope = {
             "app_id": self.app_id,
+            "app_title": self.app_title,
             "version": self.version,
             "interface": sorted(self._interface),
             "a11y_violations": list(self._violations),

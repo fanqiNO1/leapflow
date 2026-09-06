@@ -20,7 +20,7 @@ setup:  ## Setup scripts permissions and environment
 sync:  ## Sync all dependencies
 	uv sync --all-extras
 
-space-sync:  ## Sync dependencies including LeapSpace (requires Python >= 3.12)
+space-sync:  ## Sync dependencies including LeapSpace
 	uv sync --all-extras --group leapspace
 
 lint:  ## Lint source code

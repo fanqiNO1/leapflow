@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
     QTextEdit,
 )
 
-from leapspace.app_space.apps import BaseLeapApp
+from leapspace.app_space.apps._base import BaseLeapApp
 
 INBOX_POLL_MS = 500
 

@@ -58,7 +58,22 @@ async def test_wait_for_window_accepts_bare_list_payload():
         )
 
     actor.list_windows = list_windows
-    assert (await actor.wait_for_window("Leap"))["pid"] == 1
+    assert (await actor.wait_for_window("LeapChat"))["pid"] == 1
+
+
+@pytest.mark.asyncio
+async def test_wait_for_window_rejects_similar_title():
+    actor = make_actor()
+
+    async def list_windows():
+        return ActionResult(
+            ok=True, via="sdk",
+            data={"windows": [{"pid": 1, "window_id": 2, "title": "LeapChat Pro"}]},
+        )
+
+    actor.list_windows = list_windows
+    with pytest.raises(RuntimeError, match="did not appear"):
+        await actor.wait_for_window("LeapChat", timeout_s=0.05, poll_s=0.01)
 
 
 @pytest.mark.asyncio
