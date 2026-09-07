@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
-from leapflow.daemon._transport import get_transport
+from leapflow.daemon._transport import RPC_STREAM_LIMIT, get_transport
 from leapflow.daemon.lifecycle import (
     DaemonInfo,
     DaemonLock,
@@ -222,6 +222,169 @@ class DaemonClient:
         result = await self.request("host.restart")
         return dict(result or {})
 
+    async def hardware_pause(self, device: str) -> dict[str, Any]:
+        """Pause the daemon-owned hardware sampling loop for one device."""
+        result = await self.request("hardware.pause", {"device": device})
+        return dict(result or {})
+
+    async def hardware_resume(self, device: str) -> dict[str, Any]:
+        """Resume the daemon-owned hardware sampling loop for one device."""
+        result = await self.request("hardware.resume", {"device": device})
+        return dict(result or {})
+
+    async def hardware_inventory(self) -> dict[str, Any]:
+        """Return the admitted device fleet grouped by declared class."""
+        result = await self.request("hardware.inventory")
+        return dict(result or {})
+
+    async def hardware_device(self, device: str) -> dict[str, Any]:
+        """Return one device's channels, sampled values, controls and previews."""
+        result = await self.request("hardware.device", {"device": device})
+        return dict(result or {})
+
+    async def hardware_rescan(self) -> dict[str, Any]:
+        """Re-run device discovery and converge on the new set."""
+        result = await self.request("hardware.rescan")
+        return dict(result or {})
+
+    async def hardware_frame(
+        self,
+        device: str,
+        channel: str,
+        *,
+        max_width: int = 0,
+        quality: int = 0,
+        fps: float = 0.0,
+        viewer_id: str = "",
+        on_stream_event: Callable[[StreamEvent], Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return one base64 preview frame, or a structured refusal.
+
+        ``on_stream_event`` receives the approval prompt when the channel is
+        privacy-gated: the daemon installs a route for this method, so the request waits
+        while the caller presents the prompt and answers it through ``approval.resolve``.
+        Omitting the callback is what makes an unattended caller fail closed -- the prompt
+        is raised, nobody sees it, and the request is denied when the connection ends.
+        """
+        result = await self.request(
+            "hardware.frame",
+            {
+                "device": device,
+                "channel": channel,
+                "max_width": max_width,
+                "quality": quality,
+                "fps": fps,
+                "viewer_id": viewer_id,
+            },
+            on_stream_event=on_stream_event,
+        )
+        return dict(result or {})
+
+    async def hardware_preview_stream(
+        self,
+        device: str,
+        channel: str,
+        *,
+        max_width: int = 0,
+        quality: int = 0,
+        fps: float = 0.0,
+        viewer_id: str = "",
+        on_stream_event: Callable[[StreamEvent], Any] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield daemon preview-frame metadata over one socket until cancelled.
+
+        Preview consent is routed on this same stream. Approval notifications are forwarded
+        before the first frame, so a Board panel can render the daemon's real prompt in
+        place while the stream waits for the user's decision.
+        """
+        request = RpcRequest(
+            method="hardware.preview.stream",
+            params={
+                "device": device,
+                "channel": channel,
+                "max_width": max_width,
+                "quality": quality,
+                "fps": fps,
+                "viewer_id": viewer_id,
+            },
+        )
+        reader, writer = await self._open()
+        try:
+            await _send(writer, request.to_json())
+            while True:
+                payload = await self._read_payload(reader)
+                params = dict(payload.get("params") or {})
+                if payload.get("method") == "stream.chunk" and params.get("id") == request.id:
+                    metadata = params.get("metadata") or {}
+                    if metadata.get("heartbeat"):
+                        continue
+                    event_type = str(params.get("event_type") or "")
+                    if event_type == "approval_request" and on_stream_event is not None:
+                        event = _event_from_params(params)
+                        result = on_stream_event(event)
+                        if hasattr(result, "__await__"):
+                            await result
+                        continue
+                    if event_type == "error":
+                        raise DaemonUnavailableError(
+                            str(metadata.get("error") or params.get("content") or "preview stream failed")
+                        )
+                    if params.get("done"):
+                        continue
+                    if event_type == "frame":
+                        yield dict(metadata)
+                    continue
+                if payload.get("id") == request.id:
+                    if "error" in payload:
+                        raise DaemonUnavailableError(_format_rpc_error(payload["error"]))
+                    return
+        finally:
+            await _close_writer(writer)
+
+    async def hardware_preview_release(
+        self, device: str, channel: str, *, viewer_id: str = ""
+    ) -> dict[str, Any]:
+        """Release one preview viewer immediately and idempotently."""
+        result = await self.request(
+            "hardware.preview.release",
+            {"device": device, "channel": channel, "viewer_id": viewer_id},
+        )
+        return dict(result or {})
+
+    async def hardware_preview_status(self) -> dict[str, Any]:
+        """Return active preview metrics without bytes."""
+        result = await self.request("hardware.preview.status")
+        return dict(result or {})
+
+    async def hardware_read(
+        self,
+        device: str,
+        channel: str,
+        *,
+        viewer_id: str = "",
+        on_stream_event: Callable[[StreamEvent], Any] | None = None,
+    ) -> dict[str, Any]:
+        """Read one channel's current value, or return a structured refusal.
+
+        Same approval routing as ``hardware_frame``; see its note on ``on_stream_event``.
+        """
+        result = await self.request(
+            "hardware.read",
+            {"device": device, "channel": channel, "viewer_id": viewer_id},
+            on_stream_event=on_stream_event,
+        )
+        return dict(result or {})
+
+    async def hardware_write_request(
+        self, device: str, channel: str, value: Any, *, dry_run: bool = True
+    ) -> dict[str, Any]:
+        """Preview or submit a channel write. Defaults to a dry run."""
+        result = await self.request(
+            "hardware.write_request",
+            {"device": device, "channel": channel, "value": value, "dry_run": dry_run},
+        )
+        return dict(result or {})
+
     async def tools_list(self) -> dict[str, Any]:
         """Return daemon-owned tool summary for slash-command rendering."""
         result = await self.request("tools.list")
@@ -391,6 +554,20 @@ class DaemonClient:
             raw = await asyncio.wait_for(reader.readline(), timeout=self._timeout_s)
         except TimeoutError as exc:
             raise DaemonUnavailableError("Timed out waiting for leapd response") from exc
+        except ValueError as exc:
+            # A frame larger than the stream limit. ``readline`` reports this as a bare
+            # ValueError ("Separator is not found, and chunk exceed the limit"), which
+            # is indistinguishable from a parse bug at the call site -- so every caller
+            # up the stack saw an unclassified crash instead of a transport refusal.
+            # That is how one oversized watch finding took down the entire Board with
+            # "could not be assembled" and no clue which RPC or which limit was hit.
+            # The connection's buffer still holds the partial frame, so it is not
+            # reusable; the caller closes it and this reports what to do about it.
+            raise DaemonUnavailableError(
+                f"leapd sent a response larger than the {RPC_STREAM_LIMIT} byte RPC frame "
+                "limit and it could not be read. This is a defect in the responding "
+                "handler, which must bound its payload rather than a limit to raise."
+            ) from exc
         if not raw:
             raise DaemonUnavailableError("leapd closed the connection unexpectedly")
         try:

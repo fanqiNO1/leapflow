@@ -58,8 +58,15 @@ class ApprovalCoordinator:
 
             existing = getattr(ctx, "_approval_orchestrator", None)
             gate = SessionAwareGate(_DaemonApprovalGate(self))
+            # The hardware classifier is composed here too, not only in-process: a gate
+            # installed at one site and not the other makes a device behave differently
+            # depending on whether leapd happens to be running. The registry is built by
+            # LeapContext; reusing it keeps both paths assessing the same declarations.
+            from leapflow.hardware.risk import build_risk_classifier
+
             orchestrator = ApprovalOrchestrator(
                 gate,
+                risk_classifier=build_risk_classifier(getattr(ctx, "_hardware_registry", None)),
                 policy=ApprovalPolicyEngine(bypass=getattr(getattr(ctx, 'settings', None), 'approval_bypass', False)),
                 grants=getattr(existing, "grants", None),
                 audit=getattr(existing, "audit", None),
@@ -96,6 +103,7 @@ class ApprovalCoordinator:
             marketplace_client = self._build_marketplace_client(settings, plugin_install_dir)
             _tool_registry.bind_runtime(
                 plugin_approval_gate=orchestrator,
+                hardware_approval_gate=orchestrator,
                 llm_provider=getattr(ctx, "llm", None),
                 plugin_generation_enabled=bool(
                     getattr(settings, "plugin_generation_enabled", False)

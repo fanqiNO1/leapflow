@@ -87,6 +87,41 @@ async def test_builder_default_template_renders_session_analysis() -> None:
     assert len([n for n in _flatten(spec) if n["type"] == "InsightCard"]) == 1
 
 
+async def test_session_board_is_not_crowded_out_by_other_domain_findings() -> None:
+    """The session build must fetch scoped to the session watch, not all domains.
+
+    Findings are returned newest-first inside a byte-bounded batch. A burst of newer,
+    larger findings from another domain (hardware payloads dwarf every other) would
+    fill an unscoped batch and push a still-current session analysis past the end,
+    blanking a board whose data plainly exists. Here sixty hardware findings sit ahead
+    of the one session finding; scoping to the session watch renders it regardless.
+    """
+    hardware_findings = [
+        {"finding_id": f"h{i}", "watch_id": "hw", "domain": "hardware",
+         "title": "snapshot", "severity": "info"}
+        for i in range(60)
+    ]
+    session_finding = {
+        "finding_id": "s1", "watch_id": "s", "domain": "session", "title": "analysis",
+        "severity": "notable", "payload": {
+            "story": "the arc",
+            "insights": [{"title": "i", "summary": "s", "severity": "notable"}],
+        },
+    }
+    provider = _FakeProvider(
+        watches=[
+            {"watch_id": "hw", "domain": "hardware", "state": "armed"},
+            {"watch_id": "s", "domain": "session", "state": "armed"},
+        ],
+        # Session finding last: an unscoped limit=50 read would never reach it.
+        findings=[*hardware_findings, session_finding],
+    )
+    builder = DashboardViewBuilder(TemplateLibrary())
+    spec = await builder.build(DashboardIntent(template=""), provider)
+    assert spec["title"] == "Session Analysis"
+    assert "StoryPanel" in {n["type"] for n in _flatten(spec)}
+
+
 async def test_builder_named_template_reframes_same_session() -> None:
     builder = DashboardViewBuilder(TemplateLibrary())
     spec = await builder.build(DashboardIntent(template="finance"), _session_provider())
@@ -207,3 +242,165 @@ async def test_view_hub_backpressure_drops_when_full() -> None:
     assert hub.broadcast({"n": 2}) == 0  # queue full -> dropped, not blocked
     await hub.shutdown()
     assert hub.subscriber_count == 0
+
+
+# ── An empty hardware board must say why ────────────────────────────────────
+#
+# Every panel on the hardware lens gates on the data it renders, which is what lets a new
+# peripheral appear with no template edit. The cost is that *no* data renders *no* panels:
+# the board showed a bare "Hardware" heading over an empty page, which answers none of the
+# three questions a person actually has -- is it off, is it broken, or is nothing plugged
+# in. Each branch below names the next step, because only the message can tell them apart.
+
+
+def _fleet_spec(inventory: dict, digest: dict | None = None) -> dict:
+    import asyncio
+
+    from leapflow.dashboard.intent import DashboardIntent
+    from leapflow.dashboard.service import DashboardViewBuilder
+
+    class _Provider:
+        async def watches(self) -> list:
+            return []
+
+        async def findings(self, *, watch_id: str = "", limit: int = 50) -> list:
+            if digest is None:
+                return []
+            return [{"domain": "hardware", "severity": "info", "payload": digest}]
+
+        async def signal_metrics(self) -> dict:
+            return {}
+
+        async def hardware_inventory(self) -> dict:
+            return inventory
+
+        async def hardware_device(self, device_id: str) -> dict:
+            return {"ok": False, "code": "unknown_device"}
+
+    builder = DashboardViewBuilder()
+    return asyncio.run(builder.build(DashboardIntent(template="hardware"), _Provider()))
+
+
+def _cards(spec: dict) -> list[tuple[str, str]]:
+    """Return (title, body) for every Card that carries prose."""
+    found: list[tuple[str, str]] = []
+
+    def walk(nodes: list) -> None:
+        for node in nodes:
+            children = node.get("children") or []
+            if node.get("type") == "Card":
+                text = " ".join(
+                    str((child.get("props") or {}).get("text", ""))
+                    for child in children
+                    if child.get("type") == "Markdown"
+                )
+                if text:
+                    found.append((str((node.get("props") or {}).get("title", "")), text))
+            walk(children)
+
+    walk(spec.get("root") or [])
+    return found
+
+
+def _section_titles(spec: dict) -> list[str]:
+    """Return every Section heading that survived its ``when`` gate."""
+    titles: list[str] = []
+
+    def walk(nodes: list) -> None:
+        for node in nodes:
+            if node.get("type") == "Section":
+                title = str((node.get("props") or {}).get("title", ""))
+                if title:
+                    titles.append(title)
+            walk(node.get("children") or [])
+
+    walk(spec.get("root") or [])
+    return titles
+
+
+def test_a_disabled_hardware_subsystem_says_so_and_how_to_turn_it_on() -> None:
+    spec = _fleet_spec({
+        "ok": False, "code": "hardware_disabled",
+        "error": "Hardware is disabled for this profile.",
+    })
+
+    cards = _cards(spec)
+    assert cards, "a disabled subsystem rendered an empty page instead of an explanation"
+    title, body = cards[0]
+    assert "disabled" in title.lower()
+    assert "hardware.enabled" in body, "the message must name the setting that changes it"
+    assert "restart" in body.lower(), "hardware.* is restart-required and the message must say so"
+
+
+def test_an_empty_bench_distinguishes_itself_from_a_broken_one() -> None:
+    """Enabled with nothing attached is a different situation, and gets a different answer."""
+    spec = _fleet_spec({"ok": True, "groups": [], "devices": [], "counts": {"devices": 0}})
+
+    title, body = _cards(spec)[0]
+    assert "no devices" in title.lower()
+    assert "rescan" in body, "the next step for an empty bench is to scan again"
+    assert "hardware.enabled" not in body, (
+        "hardware is on here; telling the user to enable it would send them in a circle"
+    )
+
+
+def test_an_unreachable_subsystem_points_at_the_board_process() -> None:
+    """The board is separately launched and long-lived, so its own age is a real cause."""
+    spec = _fleet_spec({
+        "ok": False, "code": "rpc_unavailable", "error": "This leapd build has no hardware RPC.",
+    })
+
+    title, body = _cards(spec)[0]
+    assert "cannot reach" in title.lower()
+    assert "This leapd build has no hardware RPC." in body, "the underlying error must survive"
+    assert "leap board" in body
+
+
+def test_a_bench_with_devices_gets_panels_and_no_notice() -> None:
+    """The notice is for emptiness only: it must not sit above a page that has content."""
+    spec = _fleet_spec({
+        "ok": True,
+        "counts": {"devices": 1, "channels": 2, "previewable": 1},
+        "groups": [{"device_class": "camera", "devices": [{"device_id": "cam", "label": "Cam"}]}],
+        "devices": [{"device_id": "cam"}],
+    })
+
+    assert _cards(spec) == [], "a populated bench must not be captioned as empty"
+    titles = _section_titles(spec)
+    assert "Attached devices" in titles
+
+
+def test_the_fleet_renders_from_inventory_alone() -> None:
+    """No synthetic mode flag: whatever data arrives, renders.
+
+    This is the regression guard for the blank board. The panels used to gate on a ``fleet``
+    key that only the newest builder supplied, so a board process serving fresh templates
+    with older code produced a page with a title and nothing under it. Gating on the real
+    data removes the whole class: an inventory with no digest still shows the devices.
+    """
+    spec = _fleet_spec({
+        "ok": True,
+        "counts": {"devices": 1, "channels": 2},
+        "groups": [{"device_class": "camera", "devices": [{"device_id": "cam", "label": "Cam"}]}],
+        "devices": [{"device_id": "cam"}],
+    })
+
+    assert "Attached devices" in _section_titles(spec)
+
+
+def test_only_actionable_admission_notes_reach_the_board() -> None:
+    """A V10 privacy warning is emitted per gated channel by design, not as a problem.
+
+    Bound unfiltered, three cameras produced "Admission decisions: 3" under a heading that
+    promises to explain why a device is not what it declared -- when nothing was demoted.
+    """
+    from leapflow.dashboard.service import _actionable_notes
+
+    notes = _actionable_notes({"notes": [
+        {"device_id": "cam", "rule": "V10", "outcome": "warning", "detail": "privacy"},
+        {"device_id": "arm", "rule": "V4", "outcome": "demoted", "detail": "unverified"},
+        {"device_id": "bad", "rule": "V2", "outcome": "rejected", "detail": "bad id"},
+    ]})
+
+    assert [n["outcome"] for n in notes] == ["demoted", "rejected"]
+    assert _actionable_notes({}) == []

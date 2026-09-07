@@ -68,6 +68,16 @@ from leapflow.platform.normalizer import EventNormalizer
 
 logger = logging.getLogger(__name__)
 
+_MCP_THREAT_BLOCK_SEVERITY = 0.8
+"""Severity at or above which an MCP tool description is refused registration.
+
+Set where the classic injection patterns sit ("ignore all previous instructions", "your
+new instructions are") rather than lower, because a tool description is *supposed* to
+contain imperative language about what the tool does. Blocking on weak signals would
+reject legitimate tools; blocking on nothing leaves an injection payload sitting in the
+model's tool index for every subsequent turn.
+"""
+
 
 def _active_tool_workspace_root(fallback_workspace: str) -> str:
     """Return the current tool context workspace, or a stable fallback."""
@@ -476,6 +486,14 @@ class Context:
         self._observation_daemon: Optional[Any] = None
         self._pipeline_observer: Optional[Any] = None
 
+        # Runtime ownership mode. Defaults to daemon-owned because the daemon is
+        # the one caller that drives ``initialize_critical()`` directly; the
+        # in-process CLI entry point (``initialize()``) flips this off. It gates
+        # hardware sampling so that only leapd writes the session-scoped hardware
+        # reading store (Phase 0.5, paving the way for the Phase 2.1
+        # LocalConnectionHolder migration).
+        self._daemon_mode: bool = True
+
         # Skill evolution & PatternMiner
         self._evolution_policy: Optional[EMAConfidencePolicy] = None
         self._pattern_miner: Optional[Any] = None
@@ -511,11 +529,22 @@ class Context:
         from leapflow.security.orchestrator import ApprovalOrchestrator
         from leapflow.security.policy import ApprovalPolicyEngine
 
+        # Hardware is resolved here, before the orchestrator, because the risk
+        # classifier is composed at construction: a device action must be assessed by
+        # the hardware classifier from the very first turn. With hardware disabled the
+        # registry is None and build_risk_classifier returns the unmodified default,
+        # so this costs nothing and changes nothing.
+        from leapflow.hardware.registry import build_registry as _build_hardware_registry
+        from leapflow.hardware.risk import build_risk_classifier as _build_risk_classifier
+
+        self._hardware_registry = _build_hardware_registry(settings)
+
         approval_layout = settings.profile_layout.approval
         self._tui_approval = _TUIApprovalGate()
         self._approval_gate = SessionAwareGate(self._tui_approval)
         self._approval_orchestrator = ApprovalOrchestrator(
             self._approval_gate,
+            risk_classifier=_build_risk_classifier(self._hardware_registry),
             policy=ApprovalPolicyEngine(bypass=settings.approval_bypass),
             grants=JsonApprovalGrantStore(approval_layout.grants_path),
             audit=ApprovalAuditLog(approval_layout.audit_path),
@@ -748,6 +777,63 @@ class Context:
                 else:
                     os.environ.pop(key, None)
 
+    async def _authorize_mcp_call(self, schema: Any, params: dict) -> tuple[bool, str]:
+        """Run one MCP tool call through the approval orchestrator.
+
+        Fails closed on absence and on exception. No orchestrator, or one that raises,
+        both mean deny with a message the model can act on: a broken gate must never
+        become an open door, and this gate stands in front of arbitrary third-party code.
+
+        ``mcp.approval_mode`` selects the policy. The default, ``mutating_only``, gates
+        every tool that does not declare itself read-only -- absence of a declaration is
+        not a claim of safety, so an old server that carries no annotations is gated in
+        full. ``off`` exists because a bench of trusted local servers is a real setup, but
+        it is logged once per process so the choice is discoverable in a diagnosis.
+        """
+        mode = str(getattr(self.settings, "mcp_approval_mode", "mutating_only") or "mutating_only")
+        read_only = bool(getattr(schema, "read_only", False))
+        if mode == "off":
+            if not self._mcp_approval_off_logged:
+                self._mcp_approval_off_logged = True
+                logger.warning(
+                    "mcp.approval_mode=off: MCP tool calls run without approval. "
+                    "Third-party server code executes with this agent's privileges."
+                )
+            return True, ""
+        if mode == "mutating_only" and read_only:
+            return True, ""
+
+        orchestrator = getattr(self, "_approval_orchestrator", None)
+        if orchestrator is None:
+            return False, (
+                "No approval gate is installed for MCP tools, so the call was refused. "
+                "This is a configuration fault, not a user decision."
+            )
+
+        from leapflow.security.actions import ActionDescriptor
+
+        descriptor = ActionDescriptor.mcp_tool(
+            server=str(getattr(schema, "server_name", "") or ""),
+            tool=str(getattr(schema, "original_name", "") or getattr(schema, "name", "")),
+            arguments=params,
+            description=str(getattr(schema, "description", "") or ""),
+            read_only=read_only,
+        )
+        try:
+            result = await orchestrator.evaluate(descriptor)
+        except Exception as exc:
+            logger.error(
+                "MCP approval gate raised for %r: %s", descriptor.resource, exc, exc_info=True
+            )
+            return False, "The approval gate failed while assessing this call, so it was refused."
+        if getattr(result, "approved", False):
+            return True, ""
+        # The orchestrator's own wording states that the user withheld consent and that
+        # the outcome must not be pursued another way. Substituting a generic tool error
+        # would let the agent reroute around a refusal.
+        message = getattr(result, "denial_message", "") or getattr(result, "reason", "")
+        return False, str(message or "The MCP tool call was not approved.")
+
     def _configure_mcp_manager(self, settings: Settings) -> None:
         """Rebuild MCP manager and global MCP tool registrations from layout config."""
         from leapflow.plugins import get_registry
@@ -769,6 +855,7 @@ class Context:
                 _tool_registry.tool_handlers.pop(name, None)
         self._mcp_manager = None
         self._mcp_tool_names = ()
+        self._mcp_approval_off_logged = False
 
         try:
             mcp_config_path = settings.layout.mcp_servers_path
@@ -807,13 +894,48 @@ class Context:
 
             tool_names: list[str] = []
 
-            def _build_mcp_handler(manager, tool_name: str):
+            def _build_mcp_handler(manager, schema):
+                """Wrap one MCP tool call in the single approval entry point.
+
+                An MCP tool is third-party code reached over a local transport, running
+                with this agent's privileges, and the protocol tells us nothing about what
+                it does. Before this gate existed, every such call executed with no risk
+                classification, no consent, and no audit record -- the only sensitive
+                capability in the process reachable without passing through the
+                orchestrator.
+
+                The orchestrator is resolved per call rather than captured here on
+                purpose: ``ApprovalCoordinator.install_gate`` *replaces*
+                ``ctx._approval_orchestrator`` when leapd starts, so a captured reference
+                would keep routing prompts to the in-process gate and a daemon session
+                would never see them.
+                """
+
                 async def _handler(params: dict) -> dict:
-                    return await manager.call_tool(tool_name, params)
+                    allowed, denial = await self._authorize_mcp_call(schema, params)
+                    if not allowed:
+                        return {"ok": False, "error": denial, "failure_code": "approval_denied"}
+                    return await manager.call_tool(schema.name, params)
+
                 return _handler
 
             for schema in mgr.get_tool_schemas():
                 threats = scan_mcp_description(schema.description)
+                blocking = [t for t in threats if t.severity >= _MCP_THREAT_BLOCK_SEVERITY]
+                if blocking:
+                    # Refused, not merely logged. A tool description is injected verbatim
+                    # into the model's tool index, so a description carrying "ignore all
+                    # previous instructions" is an attack delivered through the capability
+                    # catalogue itself. Registering it and warning leaves the payload in
+                    # place for every subsequent turn.
+                    logger.error(
+                        "Refusing MCP tool %r from server %r: description matches "
+                        "prompt-injection patterns %s",
+                        schema.name,
+                        schema.server_name,
+                        [t.pattern_name for t in blocking],
+                    )
+                    continue
                 if threats:
                     logger.warning(
                         "MCP tool '%s' description has threats: %s",
@@ -821,17 +943,33 @@ class Context:
                         [t.pattern_name for t in threats],
                     )
                 _tool_registry.tool_definitions.append(schema.to_openai_function())
-                _tool_registry.tool_handlers[schema.name] = _build_mcp_handler(mgr, schema.name)
+                _tool_registry.tool_handlers[schema.name] = _build_mcp_handler(mgr, schema)
                 tool_names.append(schema.name)
 
             if tool_names:
                 self._mcp_manager = mgr
                 self._mcp_tool_names = tuple(tool_names)
+                self._install_mcp_transport_client()
                 logger.info("MCP Manager: %d servers, %d tools registered to agent", len(server_configs), total_tools)
             else:
                 mgr.close()
         except Exception:
             logger.debug("MCP Manager initialization skipped", exc_info=True)
+
+    def _install_mcp_transport_client(self) -> None:
+        """Let a device declared with ``kind: mcp`` reach the configured servers.
+
+        A resolver rather than the manager itself, because ``_configure_mcp_manager``
+        runs again on every runtime config reload: a captured manager would outlive
+        the servers it was built for, and the device would keep calling a closed
+        session. Installed here because this is the one place the manager exists.
+        """
+        try:
+            from leapflow.hardware.transports.mcp import set_mcp_client_provider
+
+            set_mcp_client_provider(lambda: getattr(self, "_mcp_manager", None))
+        except Exception:
+            logger.debug("MCP hardware transport client not installed", exc_info=True)
 
     def reload_runtime_config_if_changed(self, *, force: bool = False) -> bool:
         """Hot-reload LLM/VLM config when user-editable config files changed."""
@@ -1036,23 +1174,227 @@ class Context:
                 execution=execution_adapter,
             )
 
+    def _bind_hardware_experience(self) -> None:
+        """Give the hardware registry the experience store once it exists.
+
+        Called from deferred initialization because that is where the store is built,
+        while hardware persistence is bound during critical initialization -- reading
+        ``experience_store`` there would only ever find None. Without this second pass the
+        outcome recorder stays disabled and physical commands are never learned from, which
+        is exactly the kind of "wired but never reached" gap that is invisible in review.
+        """
+        registry = getattr(self, "_hardware_registry", None)
+        store = getattr(self, "experience_store", None)
+        if registry is None or store is None:
+            return
+        try:
+            registry.bind_persistence(experience_store=store)
+        except Exception:
+            logger.warning(
+                "Could not bind the experience store to hardware outcomes", exc_info=True
+            )
+
+    async def _maybe_start_hardware_streams(self) -> None:
+        """Start hardware sampling only when this runtime owns the reading store.
+
+        Sampling flushes downsampled windows into the session-scoped hardware
+        reading store (a DuckDB file), and that store has no cross-process
+        mutual exclusion. To keep a single writer -- and to pave the way for the
+        Phase 2.1 ``LocalConnectionHolder`` migration -- only the daemon-owned
+        runtime samples. In-process CLI mode (reached through ``initialize()``)
+        deliberately skips sampling and reading-store persistence so that a
+        one-shot command never opens the reading store for writing while leapd
+        owns it (Phase 0.5).
+        """
+        if not self._daemon_mode:
+            logger.debug(
+                "In-process CLI mode: skipping hardware sampling; leapd is the "
+                "sole writer of the session hardware reading store (Phase 0.5)."
+            )
+            return
+        await self._start_hardware_streams()
+
+    async def _start_hardware_streams(self) -> None:
+        """Begin sampling channels that declare a sample rate.
+
+        Started here rather than handed to ``ActiveSourceManager`` because that manager
+        has no production caller today; delegating to it would ship a sampling loop that
+        never runs. Handing it over later also needs a ``HardwareEvent`` ->
+        ``InteractionSignal`` adapter, since its queue is typed for the latter.
+
+        Failures are contained: a bench that cannot be sampled must not prevent the
+        process from finishing initialization.
+        """
+        registry = getattr(self, "_hardware_registry", None)
+        if registry is None:
+            return
+        self._bind_hardware_persistence(registry)
+        try:
+            # Installed before starting, and used by the command path too: a refusal
+            # to command an unreachable device must reach the same signal path as a
+            # threshold breach, or a stalled bench stays invisible.
+            registry.set_event_emitter(self._hardware_event_emitter())
+            await registry.start_streams()
+        except Exception:
+            logger.warning("Hardware streaming failed to start", exc_info=True)
+
+    def _hardware_event_emitter(self) -> Any:
+        """Return the sink that puts derived device events on the shared signal path.
+
+        This is the step that makes physical observation actionable. Without it the
+        detector still runs and still records events for ``hw_status``, but nothing
+        reacts to them: an overnight run could leave its declared envelope and no
+        watch, board or turn would ever hear about it. Devices go onto ``EventBus``
+        rather than a private channel so they reach the same noise gate, watch
+        activation and board stream as every other environment signal -- ``hw`` is a
+        family there by virtue of the event type, with nothing enumerated anywhere.
+
+        Returns ``None`` when there is no bus, so the registry keeps recording events
+        for status instead of failing to sample.
+        """
+        event_bus = getattr(self, "event_bus", None)
+        if event_bus is None or not hasattr(event_bus, "handle_event"):
+            logger.debug("No event bus for hardware events; sampling records for status only")
+            return None
+
+        def _emit(event: Any) -> None:
+            # Sampling runs on this loop, and ingestion is async, so the handoff is a
+            # task. Safe to spawn per event only because the source paces each kind;
+            # an unpaced 10 Hz channel would otherwise queue tasks at sampling rate.
+            try:
+                asyncio.create_task(
+                    event_bus.handle_event(event.event_type, event.to_payload()),
+                    name=f"hw-event:{event.kind}",
+                )
+            except RuntimeError:
+                # No running loop (teardown). Dropping one event is correct here;
+                # raising would surface inside the sampling loop's dispatch.
+                logger.debug("Dropped hardware event %s: no running loop", event.event_type)
+
+        return _emit
+
+    def _bind_hardware_persistence(self, registry: Any) -> None:
+        """Point the reading store at session-scoped, layout-owned paths.
+
+        Raw physical samples are treated like the session's visual and VLM artifacts:
+        session cache scope, marked sensitive and non-syncable, TTL bounded. A qPCR curve
+        can carry patient sample information and a production temperature trace can be a
+        trade secret, so this data must never leave the machine and must expire.
+
+        Bound here rather than at registry construction because the path is session
+        scoped, and no session exists when the registry is built.
+        """
+        try:
+            from leapflow.cache.manager import CacheManager, CacheScope
+            from leapflow.hardware.reading_store import READINGS_CATEGORY
+
+            settings = self.settings
+            cache_layout = settings.profile_layout.cache
+            session_id = str(getattr(self, "session_id", "") or "default")
+            workspace_id = str(getattr(settings, "workspace_id", "") or "default")
+            readings_dir = cache_layout.category_dir(
+                scope=CacheScope.SESSION.value,
+                category=READINGS_CATEGORY,
+                workspace_id=workspace_id,
+                session_id=session_id,
+            )
+            registry.bind_persistence(
+                cache_manager=CacheManager(
+                    cache_layout, profile_id=settings.profile_manifest.profile_id
+                ),
+                readings_dir=readings_dir,
+                session_id=session_id,
+                # Physical outcomes are the first clean ground truth the world model can
+                # get: the command was 37.0, the device settled at 36.8, the error is 0.2
+                # and needs no model call to judge. Absent a store the recorder stays off
+                # rather than accumulating comparisons nothing will resolve.
+                experience_store=getattr(self, "experience_store", None),
+            )
+        except Exception:
+            # Reduced to in-memory sampling rather than no sampling: observing the device
+            # is still worth more than nothing, and the failure is visible here.
+            logger.warning(
+                "Hardware reading persistence unavailable; samples will not be stored",
+                exc_info=True,
+            )
+
+    def _bind_hardware_plugin(self) -> None:
+        """Bind the hardware registry and approval gate into the hardware plugin.
+
+        Skipped entirely when hardware is disabled: the plugin then keeps an empty tool
+        list, so the LLM tool index is byte-identical to a build without the subsystem.
+        That equivalence is what makes the feature default-off and reversible, and it is
+        also what keeps the journey cassette fingerprints valid.
+
+        The gate passed here is the orchestrator, not a bare gate: hardware commands go
+        through the same single entry point as every other sensitive capability.
+
+        A ``HardwareTrustGate`` is constructed alongside and stored as
+        ``_hardware_trust_gate`` so that write outcomes can accrue or erode trust.
+        The gate integrates with the plugin-level ``PluginTrustLedger`` when one
+        is available.
+        """
+        registry = getattr(self, "_hardware_registry", None)
+        if registry is None:
+            return
+        from leapflow.plugins import get_registry as _get_tool_registry
+
+        # Construct the hardware trust gate, optionally linked to the plugin
+        # trust ledger so trust events propagate to the plugin governance layer.
+        try:
+            from leapflow.hardware.trust import HardwareTrustGate
+
+            plugin_trust = getattr(self, "_plugin_trust_ledger", None)
+            self._hardware_trust_gate = HardwareTrustGate(
+                plugin_trust_ledger=plugin_trust,
+            )
+        except Exception:
+            logger.debug(
+                "HardwareTrustGate construction failed; trust-based approval exemption disabled",
+                exc_info=True,
+            )
+            self._hardware_trust_gate = None
+
+        _get_tool_registry().bind_runtime(
+            hardware_registry=registry,
+            hardware_approval_gate=self._approval_orchestrator,
+            hardware_trust_gate=self._hardware_trust_gate,
+        )
+        report = registry.report
+        logger.info(
+            "Hardware plugin bound: %d device(s) admitted, %d rejected",
+            len(report.admitted),
+            len(report.rejected),
+        )
+
     @property
     def storage_volatile(self) -> bool:
         """Return True when this process uses non-persistent fallback storage."""
         return bool(getattr(self._db_holder, "is_volatile", False))
 
     async def initialize(self) -> None:
-        """Full initialization - used by CLI direct mode."""
-        await self.initialize_critical()
+        """Full initialization - used by CLI direct mode.
+
+        ``daemon_mode=False`` marks this as an in-process runtime so hardware
+        sampling is skipped: the daemon is the sole writer of the hardware
+        reading store (Phase 0.5).
+        """
+        await self.initialize_critical(daemon_mode=False)
         await self.initialize_deferred()
         self._deferred_initialized = True
 
-    async def initialize_critical(self) -> None:
+    async def initialize_critical(self, *, daemon_mode: bool = True) -> None:
         """Critical-path initialization: platform, memory, engine core.
 
         Must complete before service.start() returns. Provides enough state
         for the engine to handle basic chat requests.
+
+        ``daemon_mode`` defaults to True because the daemon drives this method
+        directly (``service.start()``); the in-process CLI entry point
+        (``initialize()``) passes False. It gates hardware sampling so only the
+        daemon-owned runtime writes the session hardware reading store.
         """
+        self._daemon_mode = daemon_mode
         settings = self.settings
 
         await self.memory.initialize_all()
@@ -1223,6 +1565,9 @@ class Context:
         from leapflow.plugins import get_registry as _get_tool_registry
         _get_tool_registry().bind_runtime(perception=perception, execution=execution_adapter)
         logger.info("Desktop semantic plugin bound (perception=%s)", perception is not None)
+
+        self._bind_hardware_plugin()
+        await self._maybe_start_hardware_streams()
 
         # Initialize skill discovery (SkillIndex + SkillInjector)
         skills_dir = Path(settings.skills_dir).expanduser()
@@ -2084,6 +2429,7 @@ class Context:
                 embedding_provider=embedding_provider,
                 semantic_weight=settings.semantic_rerank_weight,
             )
+            self._bind_hardware_experience()
             self.snapshot_service = StateSnapshotService(self.rpc, self.imm)
             self.curiosity = CuriositySignal(
                 CuriosityConfig(
@@ -3037,6 +3383,18 @@ class Context:
             gw.register_trigger_policy(platform_id, policy)
 
     async def cleanup(self) -> None:
+        # Physical devices come first. A sampling loop still reading from a transport
+        # that is being torn down logs a failure per channel on the way out, burying
+        # whatever actually caused the shutdown; and a device left commanded -- a fan
+        # still spinning, a serial port still held -- outlives the process that opened
+        # it. Unlike every store below, this one has consequences outside the machine.
+        registry = getattr(self, "_hardware_registry", None)
+        if registry is not None:
+            try:
+                await registry.close_all()
+            except Exception:
+                logger.warning("Hardware teardown failed", exc_info=True)
+
         # Drain the deferred-DB executor first so no worker thread touches the
         # shared DuckDB connection while stores below persist/close it.
         db_executor = getattr(self, "_deferred_db_executor", None)

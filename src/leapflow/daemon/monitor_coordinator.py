@@ -5,11 +5,13 @@ orchestration while MonitorCoordinator owns all monitor lifecycle and RPC logic.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections import deque
 from typing import Any, Callable, Optional
 
+from leapflow.daemon._transport import RPC_STREAM_LIMIT
 from leapflow.daemon.notifications import Notification
 from leapflow.monitor.signal_noise import SignalNoiseConfig, SignalNoiseGate
 
@@ -17,6 +19,18 @@ logger = logging.getLogger(__name__)
 
 # Rate-limit: max pushes per event_type per second.
 _SIGNAL_STREAM_MAX_PER_SEC = 2
+
+FINDINGS_FRAME_BUDGET = RPC_STREAM_LIMIT // 2
+"""Bytes of finding payload one ``watch.findings`` reply may carry.
+
+A batch reply is one newline-delimited JSON frame, so ``limit`` counts rows while the
+transport counts bytes -- and the two disagree without a bound here. Each producer is
+responsible for bounding its own payload, but this is the boundary that actually
+breaks, and it must not depend on every producer getting that right: an oversized
+frame is not a degraded panel, it is an unreadable reply that fails the caller's whole
+request. Half the frame limit leaves room for the JSON-RPC envelope and for the
+headroom a single unusually large newest finding needs.
+"""
 
 
 class MonitorCoordinator:
@@ -31,6 +45,7 @@ class MonitorCoordinator:
         self._notification_bus: Any | None = None
         self._signal_stream_buffer: deque[dict[str, Any]] = deque(maxlen=50)
         self._signal_noise_gate: SignalNoiseGate | None = None
+        self._off_loop: Optional[Callable[[Callable[[], Any]], Any]] = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -38,8 +53,16 @@ class MonitorCoordinator:
         """Build and start the monitor runtime if scheduler is enabled."""
         if not getattr(settings, "scheduler_enabled", True):
             return
+        # The runtime's serialized DB channel, so status and watch reads never block
+        # the loop. Captured here because this is the only place ctx is in scope.
+        self._off_loop = getattr(ctx, "_run_deferred_db", None)
         try:
-            from leapflow.monitor import CapabilityAdaptationProducer, MonitorManager, SessionAnalysisProducer
+            from leapflow.monitor import (
+                CapabilityAdaptationProducer,
+                MonitorManager,
+                PluginHealthProducer,
+                SessionAnalysisProducer,
+            )
             from leapflow.monitor.signal_producer import SignalObservationProducer
 
             bus = notification_bus
@@ -53,6 +76,8 @@ class MonitorCoordinator:
             self._monitors.producers.register(SessionAnalysisProducer())
             self._monitors.producers.register(SignalObservationProducer())
             self._monitors.producers.register(CapabilityAdaptationProducer())
+            self._monitors.producers.register(PluginHealthProducer())
+            self._register_hardware_producer(ctx, settings)
             setattr(ctx, "monitors", self._monitors)
             await self._monitors.start()
 
@@ -91,6 +116,29 @@ class MonitorCoordinator:
             logger.debug("daemon: monitor runtime start skipped", exc_info=True)
             self._monitors = None
             setattr(ctx, "monitors", None)
+
+    def _register_hardware_producer(self, ctx: Any, settings: Any) -> None:
+        """Register the physical-bench domain, but only when hardware is enabled.
+
+        Conditional because ``hardware.enabled`` is off by default: with no devices
+        declared the producer would run every cycle to conclude there is nothing to
+        report. The registry is resolved lazily rather than captured, since its
+        reading store and experience store are bound during deferred initialization
+        -- after this call.
+        """
+        if not getattr(settings, "hardware_enabled", False):
+            return
+        monitors = self._monitors
+        if monitors is None:
+            return
+        try:
+            from leapflow.hardware.observability import HardwareObservationProducer
+
+            monitors.producers.register(
+                HardwareObservationProducer(lambda: getattr(ctx, "_hardware_registry", None))
+            )
+        except Exception:
+            logger.debug("daemon: hardware observability producer unavailable", exc_info=True)
 
     def _build_services_proxy(self, ctx: Any, settings: Any) -> Any:
         """Build the _ProducerServices proxy.
@@ -174,13 +222,24 @@ class MonitorCoordinator:
     _DEFAULT_WATCHES = [
         ("fs-observer", "signal", "event:fs.*"),
         ("gateway-observer", "signal", "event:gateway.*"),
+        # Plugin health is polled rather than event-driven: trust degradation and a
+        # rising error rate are both trends, visible only by comparing successive
+        # observations. Without this watch the producer is registered and never
+        # called, which is how it sat unused while its own docstring said otherwise.
+        ("plugin-health", "plugin_health", "5m"),
+        # Polled for the same reason: an envelope excursion is caught by the event
+        # detector, but cadence drift, quality decay and unpersisted windows are all
+        # trends that only a comparison between cycles can show. Armed regardless of
+        # ``hardware.enabled`` so the board has a watch to report against; with the
+        # producer unregistered the cycle is a no-op.
+        ("hardware-bench", "hardware", "2m"),
     ]
 
     async def _arm_default_watches(self) -> None:
-        """Arm built-in event-driven watches if not already present (idempotent).
+        """Arm built-in watches if not already present (idempotent).
 
-        Stale watches (state=done/failed) with the same trigger pattern are
-        removed and re-created so daemon restarts always restore monitoring.
+        Stale watches (state=done/failed) with the same name are removed and
+        re-created so daemon restarts always restore monitoring.
         """
         from leapflow.monitor import WatchSpec
 
@@ -188,20 +247,22 @@ class MonitorCoordinator:
         if monitors is None:
             return
 
-        # Map trigger -> (view, is_active) for existing watches
+        # Keyed by name, not by trigger label. The label is rendered by the manager
+        # ("every 5m", "event:fs.*"), so reconstructing it here only worked for event
+        # triggers -- an interval watch would never match its own entry and would be
+        # re-armed on every start, accumulating duplicates.
         existing: dict[str, tuple[Any, bool]] = {}
         _ACTIVE_STATES = {"armed", "watching", "due", "confirming", "executing"}
         try:
             for view in monitors.list_watches():
                 is_active = str(view.state) in _ACTIVE_STATES
-                existing[view.trigger] = (view, is_active)
+                existing[str(view.name)] = (view, is_active)
         except Exception:
             logger.debug("daemon: failed to list watches for default arm", exc_info=True)
             return
 
         for name, domain, trigger_expr in self._DEFAULT_WATCHES:
-            expected_trigger = f"event:{trigger_expr.removeprefix('event:')}"
-            entry = existing.get(expected_trigger)
+            entry = existing.get(name)
             if entry is not None:
                 view, is_active = entry
                 if is_active:
@@ -267,10 +328,39 @@ class MonitorCoordinator:
         return view.to_dict()
 
     async def list_watches(self) -> list[dict[str, Any]]:
-        """List all registered watches."""
+        """List all registered watches, reading the store off the event loop."""
         if self._monitors is None:
             return []
-        return [view.to_dict() for view in self._monitors.list_watches()]
+        return await self._read_watches()
+
+    async def _read_watches(self) -> list[dict[str, Any]]:
+        """Load every watch view without blocking the loop.
+
+        The store is DuckDB, so this is a blocking read of unbounded duration -- it
+        grows with the number of armed watches. Run inline it stalls every other RPC
+        for as long as the query takes, which is how a daemon that is merely busy
+        becomes a daemon that looks hung.
+
+        Routed through the runtime's single-thread channel rather than
+        ``asyncio.to_thread``: reads here must stay serialized against the deferred
+        initialisation work that uses the same database, and one worker is what makes
+        that true by construction.
+        """
+        monitors = self._monitors
+        if monitors is None:
+            return []
+
+        def _load() -> list[dict[str, Any]]:
+            return [view.to_dict() for view in monitors.list_watches()]
+
+        off_loop = self._off_loop
+        if off_loop is None:
+            # No runtime channel installed (tests, or a coordinator used standalone).
+            # Reading inline is worse for latency but still correct, and refusing
+            # would turn a slow answer into no answer.
+            return _load()
+        result = await off_loop(_load)
+        return list(result or [])
 
     async def get_watch(self, watch_id: str) -> dict[str, Any]:
         """Get a single watch by id."""
@@ -304,13 +394,13 @@ class MonitorCoordinator:
     async def findings(
         self, watch_id: str = "", limit: int = 50, offset: int = 0
     ) -> list[dict[str, Any]]:
-        """Get findings, optionally filtered by watch_id."""
+        """Get findings, optionally filtered by watch_id, bounded to one RPC frame."""
         if self._monitors is None:
             return []
         results = self._monitors.list_findings(
             watch_id=watch_id or None, limit=int(limit), offset=int(offset)
         )
-        return [finding.to_dict() for finding in results]
+        return _fit_to_frame([finding.to_dict() for finding in results])
 
     # ── Status / queries ──────────────────────────────────────────────────
 
@@ -324,8 +414,15 @@ class MonitorCoordinator:
         except Exception:
             return False
 
-    def get_summary(self) -> dict[str, Any]:
-        """Runtime summary for daemon.status()."""
+    async def get_summary(self) -> dict[str, Any]:
+        """Runtime summary for daemon.status().
+
+        Async because it reads the watch store, and that read is DuckDB: done inline
+        it made every status poll block the loop for the length of the query, which
+        gets worse with each armed watch. ``status()`` is the most frequently called
+        RPC there is -- the TUI status bar polls it -- so it is the last place that
+        can afford a synchronous database read.
+        """
         monitors = self._monitors
         if monitors is None:
             return {
@@ -336,7 +433,7 @@ class MonitorCoordinator:
                 "active_samples": [],
             }
         try:
-            watches = [view.to_dict() for view in monitors.list_watches()]
+            watches = await self._read_watches()
         except Exception:
             logger.debug("daemon: watch summary unavailable", exc_info=True)
             watches = []
@@ -360,3 +457,43 @@ class MonitorCoordinator:
                 for watch in active[:5]
             ],
         }
+
+
+def _fit_to_frame(
+    findings: list[dict[str, Any]], *, budget: int = FINDINGS_FRAME_BUDGET
+) -> list[dict[str, Any]]:
+    """Return the newest findings whose combined JSON stays inside one RPC frame.
+
+    Findings arrive newest-first, so this keeps the prefix a caller can actually read
+    and drops the oldest tail -- the opposite of losing the present. A single finding
+    that is itself over budget is a producer defect the coordinator cannot fix by
+    dropping neighbours; it is kept (so the newest state is never silently empty) and
+    logged, and the transport layer will still report the frame overrun as a typed,
+    actionable error rather than an unclassified crash.
+    """
+    if not findings:
+        return findings
+    kept: list[dict[str, Any]] = []
+    used = 0
+    for index, finding in enumerate(findings):
+        try:
+            size = len(json.dumps(finding, ensure_ascii=False, default=str).encode("utf-8"))
+        except (TypeError, ValueError):
+            logger.warning("daemon: finding %d is not JSON-serialisable; skipping", index)
+            continue
+        if kept and used + size > budget:
+            logger.warning(
+                "daemon: watch.findings truncated to %d of %d findings to fit the "
+                "%d-byte frame budget; the oldest were dropped",
+                len(kept), len(findings), budget,
+            )
+            break
+        if not kept and size > budget:
+            logger.warning(
+                "daemon: newest finding (domain=%s) is %d bytes, over the %d-byte "
+                "frame budget; a producer is not bounding its payload",
+                finding.get("domain"), size, budget,
+            )
+        kept.append(finding)
+        used += size
+    return kept

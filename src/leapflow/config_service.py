@@ -106,6 +106,144 @@ _BOOTSTRAP_ONLY_SETTINGS = frozenset({
 _SECRET_SETTINGS = frozenset({"llm_api_key", "vlm_api_key", "llm_aux_api_key"})
 
 _FIELD_DESCRIPTIONS = {
+    "mcp.approval_mode": (
+        "Approval policy for tools from external MCP servers, which run third-party code "
+        "with this agent's privileges. mutating_only assesses every tool that does not "
+        "declare itself read-only; always assesses and audits all of them, including "
+        "declared reads; off disables the gate entirely. Read when MCP servers are "
+        "configured, so a change needs a daemon restart."
+    ),
+    "hardware.enabled": (
+        "Passive local hardware discovery is on by default: host metrics plus camera and "
+        "microphone enumeration. Enumeration opens nothing; privacy-gated reads still "
+        "require approval. Set false only to hard-disable the subsystem. Takes effect "
+        "after `leap daemon restart` because the approval classifier is composed when "
+        "the orchestrator is built."
+    ),
+    "hardware.devices_dir": (
+        "Directory of device declaration files for the active profile. Read once at "
+        "startup, so a change needs a daemon restart."
+    ),
+    "hardware.providers": (
+        "Comma-separated discovery sources, e.g. 'yaml,host,media'. Empty uses all "
+        "three passive local sources: declarations, host resources, and media enumeration. "
+        "Cameras/microphones are listed but never opened until an approved preview. "
+        "Scanners that transmit or leave the host are opt-in and must be named here. "
+        "Providers run at startup, so a change needs a daemon restart."
+    ),
+    "hardware.host_interval_s": (
+        "Seconds between samples of fast host channels (cpu, memory, network); disk, "
+        "battery and thermal channels sample less often. 0 uses the 5s default. Read "
+        "when sampling starts, so a change needs a daemon restart."
+    ),
+    "hardware.host_include": (
+        "Channel-id prefixes to keep from the discovered host set, e.g. 'cpu,memory'. "
+        "Empty keeps everything discovered. Applied at discovery, so a change needs a "
+        "daemon restart."
+    ),
+    "hardware.host_exclude": (
+        "Channel-id prefixes to drop from the discovered host set, e.g. 'net.utun'. "
+        "Applied after include, at discovery, so a change needs a daemon restart."
+    ),
+    "hardware.rediscover_interval_s": (
+        "Seconds between automatic rediscovery passes, so a peripheral attached after "
+        "startup appears without a restart. 0 disables it and leaves rediscovery to "
+        "`leap hw scan`. Runs on the monitor cadence, never during a turn."
+    ),
+    "hardware.media_screens": (
+        "Enumerate displays as previewable devices. Off by default, because a platform "
+        "that presents the screen as another video input would put 'stream this screen' "
+        "beside the webcam. Reads still require consent. Applied at discovery, so a "
+        "change needs a daemon restart."
+    ),
+    "hardware.media_microphones": (
+        "Enumerate microphones alongside cameras. Only an input level is exposed, never "
+        "audio. Applied at discovery, so a change needs a daemon restart."
+    ),
+    "hardware.preview_max_fps": (
+        "Hard capture ceiling for page-selected economy/balanced/detail profiles. The "
+        "default balanced profile is 8fps; this 12fps ceiling is also declared at media "
+        "discovery, so a change needs a daemon restart."
+    ),
+    "hardware.preview_max_width": (
+        "Hard scaled-width ceiling for the page-selected preview profiles; height follows "
+        "aspect ratio. Balanced requests 960px below the 1280px default ceiling. Read "
+        "when the preview broker is built, so a change needs a daemon restart."
+    ),
+    "hardware.preview_quality": (
+        "Hard JPEG-quality ceiling (1-100) for page-selected preview profiles. Balanced "
+        "uses 75 below the default ceiling of 85. Read when the preview broker is built, "
+        "so a change needs a daemon restart."
+    ),
+    "hardware.preview_idle_timeout_s": (
+        "How long a device stays claimed after the last preview viewer disconnects. "
+        "Short by design: a camera left on after everyone stopped looking is the failure "
+        "this subsystem exists to prevent. Read when the preview broker is built, so a "
+        "change needs a daemon restart."
+    ),
+    "hardware.max_devices": (
+        "Maximum number of devices admitted from all providers. Applied during "
+        "admission at startup; changing it needs a daemon restart."
+    ),
+    "hardware.unverified_policy": (
+        "How to treat a device context no human has confirmed. deny_write keeps it "
+        "readable but not commandable. Applied during admission, so a change needs a "
+        "daemon restart."
+    ),
+    "hardware.require_describe": (
+        "Require hw_describe before the first command to a device, so the model has "
+        "read the channel's operating envelope before commanding it. Read at startup; "
+        "a change needs a daemon restart."
+    ),
+    "hardware.envelope_grant": (
+        "Let one consent cover a channel's whole declared envelope band. Off asks for "
+        "every command separately. Read at startup, so a change needs a daemon restart."
+    ),
+    "hardware.trust_skip_enabled": (
+        "Let reversible channels with VERIFIED+ trust skip per-command approval. "
+        "Off by default; irreversible channels always require approval regardless. "
+        "Read at startup, so a change needs a daemon restart."
+    ),
+    "hardware.stream_enabled": (
+        "Sample channels that declare a sample rate. Sampling loops start during "
+        "initialization, so a change needs a daemon restart."
+    ),
+    "hardware.stream_ring_capacity": (
+        "Per-channel raw sample ring buffer depth. Buffers are sized when sampling "
+        "starts, so a change needs a daemon restart."
+    ),
+    "hardware.persist_readings": (
+        "Persist sampled readings so physical history survives the process. Off means "
+        "samples exist only in memory and nothing can be learned from them afterwards. "
+        "Read when sampling starts, so a change needs a daemon restart."
+    ),
+    "hardware.downsample_interval_s": (
+        "Seconds of samples collapsed into one stored history window. Read when sampling "
+        "starts, so a change needs a daemon restart."
+    ),
+    "hardware.raw_retention_days": (
+        "How long raw sample files are kept. They are session-scoped, sensitive, and "
+        "never synced. Read when sampling starts, so a change needs a daemon restart."
+    ),
+    "hardware.history_retention_days": (
+        "How long downsampled history windows are kept in instrument.duckdb. Longer than "
+        "the raw tier because this is the data later analysis reads, but bounded: nothing "
+        "else deletes from that table. Read when sampling starts, so a change needs a "
+        "daemon restart."
+    ),
+    "hardware.raw_segment_mb": (
+        "Size at which a raw sample file is closed and a new segment started. A finished "
+        "segment is written once, so its indexed size and TTL are accurate and old data "
+        "can expire without touching the file being appended to. Read when sampling "
+        "starts, so a change needs a daemon restart."
+    ),
+    "hardware.reading_store_sensitive": (
+        "Register the durable instrument.duckdb history tier as sensitive and "
+        "non-syncable, so a profile backup excludes physical series that may carry a "
+        "trade secret or sample information. On by default; opt out only for a bench "
+        "known to produce no sensitive data. Applied when the store is built, so a "
+        "change needs a daemon restart."
+    ),
     "llm.api_key": "Primary LLM API key stored in the local secret vault.",
     "llm.aux_api_key": "Auxiliary LLM provider API key stored in the local secret vault.",
     "llm.base_url": "OpenAI-compatible endpoint for the primary LLM provider.",
@@ -236,6 +374,12 @@ _SECTION_CATEGORIES = {
 _VALUE_HINTS = {
     "runtime.log_level": "DEBUG|INFO|WARNING|ERROR",
     "daemon.log_level": "DEBUG|INFO|WARNING|ERROR",
+    "mcp.approval_mode": "mutating_only|always|off",
+    "hardware.unverified_policy": "deny_write|prompt|allow",
+    "hardware.devices_dir": "absolute path, or empty for the profile default",
+    "hardware.providers": "comma-separated provider kinds (yaml, host, media)",
+    "hardware.host_include": "comma-separated channel-id prefixes, or empty for all",
+    "hardware.host_exclude": "comma-separated channel-id prefixes, or empty for none",
     "recording.mode": "video|default|vision_only",
     "signal.channels": "all or comma-separated channel names",
     "signal.noise_path_fragments": "comma-separated path fragments",
@@ -247,7 +391,7 @@ _VALUE_HINTS = {
 }
 
 _PARTIAL_RELOAD_SECTIONS = frozenset({"runtime", "mock", "gateway", "hub", "scheduler", "observer", "cua", "use", "dashboard"})
-_RESTART_REQUIRED_SECTIONS = frozenset({"daemon", "plugins"})
+_RESTART_REQUIRED_SECTIONS = frozenset({"daemon", "plugins", "hardware", "mcp"})
 
 _PROFILE_FILE_BY_SECTION = {
     "llm": "llm.yaml",

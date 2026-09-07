@@ -29,6 +29,7 @@ import pytest
 
 GATEWAY_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "leapflow" / "gateway"
 PLUGINS_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "leapflow" / "plugins"
+HARDWARE_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "leapflow" / "hardware"
 
 # Sub-packages that own platform/vendor specifics. Gateway core may define the
 # contracts these implement, but must never depend on them.
@@ -113,6 +114,122 @@ def test_gateway_core_has_no_vendor_endpoints_or_error_shapes() -> None:
                 violations.append(f"{path.name}:{lineno}")
 
     assert violations == [], "vendor endpoint hardcoded in gateway core: " + ", ".join(violations)
+
+
+# ── Hardware Context Protocol boundaries ─────────────────────────────────
+
+
+def _hardware_modules() -> list[pathlib.Path]:
+    """Return every module in the hardware package, including its seams."""
+    return sorted(HARDWARE_DIR.rglob("*.py"))
+
+
+def test_hardware_domain_model_is_free_of_upstream_standard_names() -> None:
+    """The Hardware Context Protocol's one architectural red line.
+
+    ``context.py`` describes what an agent must know to operate a device safely --
+    facts fixed by physics and by governance, not by whichever southbound standard
+    eventually carries the command. The moment a guessed upstream concept leaks into
+    the domain model, the model expires when that standard is published, and the
+    two-file integration promise is gone with it.
+
+    Upstream names belong in ``providers/`` and ``transports/``, which is where a
+    mapping is allowed to be wrong.
+    """
+    upstream_names = re.compile(r"\bmhs\b|model_hardware_standard", re.IGNORECASE)
+    domain_modules = (HARDWARE_DIR / "context.py", HARDWARE_DIR / "transport.py")
+    violations: list[str] = []
+    for path in domain_modules:
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if upstream_names.search(line):
+                violations.append(f"{path.name}:{lineno}: {line.strip()}")
+
+    assert violations == [], (
+        "an upstream standard's name leaked into the hardware domain model; keep it "
+        "in providers/ or transports/:\n  " + "\n  ".join(violations)
+    )
+
+
+def test_hardware_does_not_import_the_engine() -> None:
+    """Dependency runs engine -> hardware, never back.
+
+    ``WriteOutcome.side_effect_state`` mirrors ``SideEffectState`` as plain strings
+    for exactly this reason: importing the enum would create a cycle and make the
+    domain model unimportable on its own.
+    """
+    violations: list[str] = []
+    for path in _hardware_modules():
+        for module, lineno in _imported_modules(path):
+            if module.startswith("leapflow.engine"):
+                violations.append(f"{path.relative_to(HARDWARE_DIR)}:{lineno} imports {module}")
+
+    assert violations == [], (
+        "leapflow.hardware must not depend on leapflow.engine:\n  " + "\n  ".join(violations)
+    )
+
+
+def test_hardware_domain_model_does_not_import_its_own_seams() -> None:
+    """The domain model must not know which providers or transports exist.
+
+    If ``context.py`` reached for the transport table, adding a transport would
+    become a change to the stable half of the protocol -- the exact coupling the
+    split exists to prevent.
+    """
+    violations: list[str] = []
+    for module, lineno in _imported_modules(HARDWARE_DIR / "context.py"):
+        if "hardware.providers" in module or "hardware.transports" in module:
+            violations.append(f"context.py:{lineno} imports {module}")
+
+    assert violations == [], (
+        "the hardware domain model must not import its seams:\n  " + "\n  ".join(violations)
+    )
+
+
+def test_hardware_transports_are_not_named_after_one_device() -> None:
+    """Transports are generic mechanisms; device specifics live in declarations.
+
+    A transport named after a particular instrument or board is a sign that device
+    knowledge has moved into code, where it can no longer be reviewed or overridden
+    per bench.
+
+    ``mcp.py`` qualifies for the same reason ``python_callable.py`` does: it is a
+    transport *mechanism* -- one protocol, any device that speaks it -- and it holds
+    no tool name, argument name or response key of its own. Every one of those is
+    read from the declaration, which is what keeps a bench reviewable.
+
+    ``simulated.py`` qualifies too: it synthesises readings from a declared
+    waveform and models generic link misbehaviour (latency, drop, reorder,
+    disconnect), never anything specific to one instrument.
+
+    ``host.py`` qualifies because "the host" is not an instrument: the module holds
+    no channel id, unit or quantity of its own and resolves every read through the
+    probe table in ``hardware/host_metrics.py``. That table is a *discovery* source
+    (``ContextSource.DISCOVERED``) and belongs outside this directory precisely
+    because the host is the one device whose declaration cannot be hand-written --
+    its mounts, interfaces and sensors differ per machine.
+
+    ``media.py`` qualifies for the same reason, and its name is the evidence: it is
+    local media capture through a pluggable backend, not ``camera.py`` and
+    ``microphone.py``. Which kind of device it is talking to, the platform input
+    format and the input spec all arrive from the declaration; the capture backend
+    comes from availability. A pair of device-named modules here would have been the
+    device knowledge this rule exists to keep out of code.
+    """
+    allowed = {
+        "__init__.py",
+        "mock.py",
+        "simulated.py",
+        "python_callable.py",
+        "mcp.py",
+        "host.py",
+        "media.py",
+    }
+    present = {p.name for p in (HARDWARE_DIR / "transports").glob("*.py")}
+    unexpected = present - allowed
+    assert not unexpected, (
+        f"unexpected transport modules {sorted(unexpected)}; a transport must be a generic "
+        "mechanism, and a new one also needs a case in tests/test_hardware_transport_contract.py"
+    )
 
 
 # ── Plugin core vs tool implementations ──────────────────────────────────
@@ -373,3 +490,200 @@ def test_engine_self_attributes_all_exist() -> None:
 
     undefined = sorted(read - assigned - on_class)
     assert not undefined, f"engine reads attributes that are never assigned: {undefined}"
+
+
+# ════════════════════════════════════════════════════════════════
+# CBAG: emit wiring exists + hardware producer registered (G15 / G24)
+# ════════════════════════════════════════════════════════════════
+
+
+def test_hardware_event_emitter_path_exists_in_context() -> None:
+    """The emit wiring path must exist so hardware events reach EventBus.
+
+    CBAG G15: six detection rules produced events that reached nothing because
+    ``set_event_emitter`` was never called, or ``_hardware_event_emitter`` was
+    not defined. This asserts the path *exists* at the source level — a structural
+    guard that catches deletion, rename, or accidental removal.
+    """
+    import ast
+
+    context_source = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "src" / "leapflow" / "cli" / "context.py"
+    )
+    tree = ast.parse(context_source.read_text(encoding="utf-8"))
+    method_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            method_names.add(node.name)
+
+    assert "_hardware_event_emitter" in method_names, (
+        "G15 regression: _hardware_event_emitter() was removed from context.py; "
+        "without it, hardware events never reach EventBus"
+    )
+    assert "_start_hardware_streams" in method_names, (
+        "G15 regression: _start_hardware_streams() was removed from context.py; "
+        "without it, the sampling loop never starts"
+    )
+
+
+def test_set_event_emitter_is_called_in_start_hardware_streams() -> None:
+    """The emit sink must be installed *before* streams start.
+
+    CBAG G15: if ``set_event_emitter`` is not called in the start path, events
+    produced by the sampling loop go nowhere — recorded for hw_status but not
+    actionable via watches, board, or notifications.
+    """
+    context_source = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "src" / "leapflow" / "cli" / "context.py"
+    )
+    source = context_source.read_text(encoding="utf-8")
+    # The call must appear somewhere in the file: either directly or via a
+    # helper, the registry must receive an emitter.
+    assert "set_event_emitter" in source, (
+        "G15 regression: set_event_emitter is not called anywhere in context.py; "
+        "the sampling loop would emit events into the void"
+    )
+
+
+def test_hardware_producer_is_registered_when_hardware_is_enabled() -> None:
+    """The ``hardware`` domain must appear in the monitor producer registry.
+
+    CBAG G24: ``HardwareObservationProducer`` was registered but never invoked
+    because no watch named the ``hardware`` domain. This is the structural
+    check that the producer is registered *and* that a default watch exists.
+    """
+    from leapflow.hardware.observability import DOMAIN, HardwareObservationProducer
+
+    assert DOMAIN == "hardware", (
+        "G24 regression: the hardware producer domain must be 'hardware'"
+    )
+    # The producer must be instantiable with a provider callable.
+    producer = HardwareObservationProducer(lambda: None)
+    assert producer.domain == "hardware", (
+        "G24 regression: HardwareObservationProducer.domain is not 'hardware'"
+    )
+
+
+def test_hardware_default_watch_targets_the_hardware_domain() -> None:
+    """The daemon arms a default watch whose domain matches the producer's.
+
+    CBAG G24: without a watch naming ``hardware``, the producer runs zero
+    times — even though it is registered. The watch list is the contract.
+    """
+    from leapflow.daemon.monitor_coordinator import MonitorCoordinator
+
+    # The class-level _DEFAULT_WATCHES must include a hardware entry.
+    domains = [domain for _name, domain, _trigger in MonitorCoordinator._DEFAULT_WATCHES]
+    assert "hardware" in domains, (
+        "G24 regression: no default watch targets the 'hardware' domain; "
+        "the HardwareObservationProducer would be registered but never invoked"
+    )
+
+
+# ════════════════════════════════════════════════════════════════
+# A thread-scoped connection must never be captured
+# ════════════════════════════════════════════════════════════════
+
+LEAPFLOW_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "leapflow"
+
+_STORE_CLASSES = (
+    ("leapflow.scheduler.store", "TaskStore"),
+    ("leapflow.monitor.finding_store", "FindingStore"),
+    ("leapflow.storage.skill_library", "SkillLibraryStore"),
+    ("leapflow.storage.conversation_store", "DuckDBConversationStore"),
+    ("leapflow.storage.session_store", "LearningSessionStore"),
+    ("leapflow.storage.evolution_store", "DuckDBEvolutionStore"),
+    ("leapflow.storage.trajectory_store", "TrajectoryStore"),
+)
+
+
+def test_no_store_captures_the_thread_scoped_connection() -> None:
+    """``ConnectionHolder.connection`` is per-thread, so it may not be assigned.
+
+    Every store used to do ``self._con = self._holder.connection`` in ``__init__``,
+    which resolves once on the event loop thread and hands that same
+    ``DuckDBPyConnection`` to every later caller. Since the type is not thread-safe,
+    a deferred worker and the event loop then serialise against each other *inside*
+    DuckDB: the daemon answered no RPC at all on roughly a third of starts, with the
+    log ending after the last successful init line and nothing to indicate why.
+
+    Asserted against the source rather than one store, because the next store to be
+    added is the one that will reintroduce it.
+    """
+    offenders: list[str] = []
+    # Only attribute assignment. A local ``conn = holder.connection`` inside a method
+    # resolves per call and is the correct form, and ``_ = holder.connection`` is a
+    # deliberate touch to surface a database lock early.
+    pattern = re.compile(r"^\s*self\.(?!_?_?$)\w+\s*(?::[^=\n]+)?=\s*[\w.]*\.connection\s*$")
+    for path in sorted(LEAPFLOW_DIR.rglob("*.py")):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if pattern.match(line):
+                offenders.append(f"{path.relative_to(LEAPFLOW_DIR)}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "a thread-scoped connection was captured instead of resolved per call; "
+        "use a property that returns ``self._holder.connection``:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+@pytest.mark.parametrize(("module_name", "class_name"), _STORE_CLASSES)
+def test_each_store_hands_a_worker_thread_its_own_cursor(
+    module_name: str, class_name: str, tmp_path: pathlib.Path
+) -> None:
+    """The behavioural half: two threads must not receive the same connection.
+
+    The source guard above catches the assignment form; this catches any other way
+    of arriving at a shared connection, and it is what actually fails if the holder's
+    thread affinity regresses.
+    """
+    import threading
+
+    store = importlib.import_module(module_name)
+    cls = getattr(store, class_name)
+    instance = cls(tmp_path / f"{class_name.lower()}.duckdb")
+    attr = "_conn" if hasattr(type(instance), "_conn") else "_con"
+
+    main_connection = getattr(instance, attr)
+    worker: list[object] = []
+    thread = threading.Thread(target=lambda: worker.append(getattr(instance, attr)))
+    thread.start()
+    thread.join(timeout=30)
+
+    assert worker, f"{class_name} never resolved a connection on the worker thread"
+    assert worker[0] is not main_connection, (
+        f"{class_name} handed the worker thread the event loop's connection; "
+        "concurrent use of one DuckDBPyConnection blocks whichever thread arrives second"
+    )
+    close = getattr(instance, "close", None)
+    if callable(close):
+        close()
+
+
+def test_only_watched_rpcs_get_an_approval_route() -> None:
+    """A route makes a handler wait for a human, so it must be a call somebody is watching.
+
+    Two failure modes bound this set from either side. Too narrow, and a caller that *can*
+    present a prompt cannot obtain one: an ordinary RPC has no route, so the coordinator
+    denies immediately and a board preview could never be approved. Too wide, and an
+    unattended RPC blocks on a prompt nobody will ever see.
+
+    The lifecycle is what makes membership safe: every routed request registers, denies on
+    exit, and unregisters, so a pending approval cannot outlive the caller that raised it.
+    """
+    from leapflow.daemon.server import _APPROVAL_ROUTED_METHODS
+    from leapflow.daemon.protocol import METHOD_REGISTRY
+
+    assert "command.execute" in _APPROVAL_ROUTED_METHODS, (
+        "slash commands are the original approval surface and must keep their route"
+    )
+    # The device observations, which are the reason the set exists at all.
+    assert {"hardware.frame", "hardware.read"} <= _APPROVAL_ROUTED_METHODS
+
+    unknown = sorted(_APPROVAL_ROUTED_METHODS - set(METHOD_REGISTRY))
+    assert not unknown, f"routed methods that no RPC answers: {unknown}"
+
+    # Writes are deliberately absent: they run through the tool handler, which builds its
+    # own descriptor and is reached from a turn that already owns a route.
+    assert "hardware.write_request" not in _APPROVAL_ROUTED_METHODS

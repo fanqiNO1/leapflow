@@ -135,6 +135,115 @@ class Settings:
     plugins_dsh_max_message_bytes: int = 1_000_000
     plugins_dsh_max_stderr_bytes: int = 64_000
     plugins_dsh_max_memory_mb: int = 128
+
+    # Approval policy for tools supplied by external MCP servers. An MCP tool is
+    # third-party code reached over a local transport, running with this agent's
+    # privileges, and the protocol does not say what it does.
+    #   mutating_only -- assess every tool that does not declare readOnlyHint (default)
+    #   always        -- assess and audit every MCP call, including declared reads
+    #   off           -- no gate; logged once per process
+    # Absence of a read-only declaration is not a claim of safety, which is why the
+    # default gates unannotated servers in full rather than trusting them. A declared
+    # read is assessed LOW and auto-allowed on risk, so the practical difference between
+    # the first two modes is audit coverage rather than prompt frequency.
+    mcp_approval_mode: str = "mutating_only"
+
+    # Hardware Context Protocol. On by default: host metrics and passive local media
+    # enumeration are core observability, not an opt-in feature hidden behind an unrelated
+    # config task. Enumeration opens no camera, radio or network connection; a read that
+    # discloses the surrounding space still enters the approval chain and stays refused
+    # until a human grants it. Explicitly setting this False remains a hard disable.
+    #
+    # It is restart-required because the approval classifier is composed when the
+    # orchestrator is constructed.
+    hardware_enabled: bool = True
+    # Comma-separated discovery sources. Empty -> "yaml,host,media": declarations a person
+    # wrote plus this machine's own resources. The media provider only enumerates cameras
+    # and microphones; it never opens either. Scanners that transmit (bluetooth) or leave
+    # the host (mdns) are opt-in, because discovery must never be the reason a radio starts
+    # up or a packet leaves the machine.
+    hardware_providers: str = ""
+    # Directory holding device declarations. Empty -> the active profile's
+    # hardware/devices/ directory.
+    hardware_devices_dir: str = ""
+    # Admission cap. A declaration directory that suddenly lists hundreds of
+    # devices is far more likely to be a mistake than an intent.
+    hardware_max_devices: int = 16
+    # How to treat a device context no human has confirmed: deny_write (writable
+    # channels are demoted to read-only), prompt, or allow. The default keeps an
+    # unverified declaration observable but not commandable.
+    hardware_unverified_policy: str = "deny_write"
+    # Require hw_describe before the first command to a device in a session. The
+    # generic tool schemas cannot express per-channel limits, so this is what puts
+    # the envelope in front of the model before it commands anything.
+    hardware_require_describe: bool = True
+    # Allow one consent to cover a channel's whole declared envelope band. Turning it
+    # off asks separately for every command, which suits a bench where each operation
+    # deserves its own decision -- at the cost of prompting often enough that people
+    # start clicking through.
+    hardware_envelope_grant: bool = True
+    # Trust-based approval skip for reversible channels that have accumulated
+    # enough successful outcomes.  Off by default: enabling it is a deliberate
+    # operator decision, and the safety invariant (irreversible channels always
+    # require approval) holds regardless.
+    hardware_trust_skip_enabled: bool = False
+    # Continuous sampling for channels that declare a sample rate.
+    hardware_stream_enabled: bool = True
+    # Per-channel ring buffer depth for raw samples. Raw readings never enter the
+    # interaction signal buffer; only derived events cross that boundary.
+    hardware_stream_ring_capacity: int = 4096
+    # Persist sampled readings. Without this, samples live only in a bounded in-memory
+    # ring and vanish with the process, so nothing can be learned from physical
+    # experience afterwards -- there is no series to learn from.
+    hardware_persist_readings: bool = True
+    # Interval collapsed into one stored history window. Raw samples are kept separately
+    # as session-scoped sensitive artifacts; this governs the long-term tier.
+    hardware_downsample_interval_s: float = 60.0
+    # TTL for raw sample files, which are sensitive and non-syncable.
+    hardware_raw_retention_days: float = 7.0
+    # How long downsampled history is kept. Longer than the raw tier because this is
+    # what later analysis reads, but bounded: the table grows at a fixed rate per
+    # streaming channel and nothing else was ever going to delete from it.
+    hardware_history_retention_days: float = 90.0
+    # Byte cap per raw sample file before a new segment starts. Segments exist so a
+    # finished one is a write-once artifact -- its recorded size and TTL are correct,
+    # and old data can be dropped without discarding the file being written to.
+    hardware_raw_segment_mb: float = 32.0
+    # Whether the durable ``instrument.duckdb`` history tier is registered as sensitive
+    # and non-syncable, so a profile backup excludes physical series that may carry a
+    # trade secret or sample information. On by default; opt out only for a bench known
+    # to produce no sensitive data.
+    hardware_reading_store_sensitive: bool = True
+    # Sampling period for fast-moving host channels (cpu, memory, network); slower
+    # quantities multiply it. Empty/0 -> the provider default of 5s. One second would
+    # put twelve times as many rows into stored history for detail nobody diagnoses a
+    # machine from.
+    hardware_host_interval_s: float = 0.0
+    # Comma-separated channel-id prefixes to keep / drop from the discovered host set
+    # (e.g. "cpu,memory" or "net.utun"). Prefixes rather than exact ids because mounts
+    # and interfaces are discovered, so their full ids are not knowable in advance.
+    hardware_host_include: str = ""
+    hardware_host_exclude: str = ""
+    # Seconds between automatic rediscovery passes, so a peripheral plugged in after
+    # startup appears without a restart. 0 disables it; rediscovery is otherwise
+    # driven by `leap hw scan`. Runs on the monitor cadence, never on a turn.
+    hardware_rediscover_interval_s: float = 0.0
+    # Enumerate displays as previewable devices. Off by default: a platform that
+    # presents the screen as just another video input would otherwise put "stream this
+    # person's screen" on the board beside the webcam, one click away. Still available,
+    # because it is a legitimate capability -- it is the default that must not decide.
+    hardware_media_screens: bool = False
+    # Enumerate microphones alongside cameras.
+    hardware_media_microphones: bool = True
+    # The broker enforces hard ceilings. The board's default is a balanced profile below
+    # these limits (960px / 8fps / JPEG 75); Detail is 1280px / 30fps / JPEG 85. A viewer
+    # can choose a profile for its own live preview but never exceed these caps, and no
+    # profile changes durable configuration. The ceiling is declared at discovery.
+    hardware_preview_max_fps: float = 30.0
+    hardware_preview_max_width: int = 1280
+    hardware_preview_quality: int = 85
+    # Explicit browser Stop releases immediately. This is only the lost-client fallback.
+    hardware_preview_idle_timeout_s: float = 5.0
     runtime_dir: Path = field(default_factory=lambda: _bootstrap_profile_layout().runtime_dir)
 
     # Audit
@@ -934,6 +1043,52 @@ def _build_settings_from_env(
     plugins_dsh_max_message_bytes = int(os.getenv("LEAPFLOW_PLUGINS_DSH_MAX_MESSAGE_BYTES", "1000000"))
     plugins_dsh_max_stderr_bytes = int(os.getenv("LEAPFLOW_PLUGINS_DSH_MAX_STDERR_BYTES", "64000"))
     plugins_dsh_max_memory_mb = int(os.getenv("LEAPFLOW_PLUGINS_DSH_MAX_MEMORY_MB", "128"))
+    mcp_approval_mode = (
+        os.getenv("LEAPFLOW_MCP_APPROVAL_MODE", "mutating_only").strip().lower()
+        or "mutating_only"
+    )
+    if mcp_approval_mode not in ("mutating_only", "always", "off"):
+        logger.warning(
+            "Unknown mcp.approval_mode %r; falling back to mutating_only", mcp_approval_mode
+        )
+        mcp_approval_mode = "mutating_only"
+    hardware_enabled = os.getenv("LEAPFLOW_HARDWARE_ENABLED", "1").strip().lower() in ("1", "true", "yes")
+    hardware_providers = os.getenv("LEAPFLOW_HARDWARE_PROVIDERS", "").strip()
+    hardware_devices_dir = os.getenv("LEAPFLOW_HARDWARE_DEVICES_DIR", "").strip()
+    hardware_max_devices = int(os.getenv("LEAPFLOW_HARDWARE_MAX_DEVICES", "16"))
+    hardware_unverified_policy = (
+        os.getenv("LEAPFLOW_HARDWARE_UNVERIFIED_POLICY", "deny_write").strip().lower()
+        or "deny_write"
+    )
+    hardware_require_describe = os.getenv("LEAPFLOW_HARDWARE_REQUIRE_DESCRIBE", "1").strip().lower() in ("1", "true", "yes")
+    hardware_envelope_grant = os.getenv("LEAPFLOW_HARDWARE_ENVELOPE_GRANT", "1").strip().lower() in ("1", "true", "yes")
+    hardware_trust_skip_enabled = os.getenv("LEAPFLOW_HARDWARE_TRUST_SKIP_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+    hardware_stream_enabled = os.getenv("LEAPFLOW_HARDWARE_STREAM_ENABLED", "1").strip().lower() in ("1", "true", "yes")
+    hardware_stream_ring_capacity = int(os.getenv("LEAPFLOW_HARDWARE_STREAM_RING_CAPACITY", "4096"))
+    hardware_persist_readings = os.getenv("LEAPFLOW_HARDWARE_PERSIST_READINGS", "1").strip().lower() in ("1", "true", "yes")
+    hardware_downsample_interval_s = float(os.getenv("LEAPFLOW_HARDWARE_DOWNSAMPLE_INTERVAL_S", "60"))
+    hardware_raw_retention_days = float(os.getenv("LEAPFLOW_HARDWARE_RAW_RETENTION_DAYS", "7"))
+    hardware_history_retention_days = float(
+        os.getenv("LEAPFLOW_HARDWARE_HISTORY_RETENTION_DAYS", "90")
+    )
+    hardware_raw_segment_mb = float(os.getenv("LEAPFLOW_HARDWARE_RAW_SEGMENT_MB", "32"))
+    hardware_reading_store_sensitive = os.getenv(
+        "LEAPFLOW_HARDWARE_READING_STORE_SENSITIVE", "1"
+    ).strip().lower() in ("1", "true", "yes")
+    hardware_host_interval_s = float(os.getenv("LEAPFLOW_HARDWARE_HOST_INTERVAL_S", "0") or 0.0)
+    hardware_host_include = os.getenv("LEAPFLOW_HARDWARE_HOST_INCLUDE", "").strip()
+    hardware_host_exclude = os.getenv("LEAPFLOW_HARDWARE_HOST_EXCLUDE", "").strip()
+    hardware_rediscover_interval_s = float(
+        os.getenv("LEAPFLOW_HARDWARE_REDISCOVER_INTERVAL_S", "0") or 0.0
+    )
+    hardware_media_screens = os.getenv("LEAPFLOW_HARDWARE_MEDIA_SCREENS", "0").strip().lower() in ("1", "true", "yes")
+    hardware_media_microphones = os.getenv("LEAPFLOW_HARDWARE_MEDIA_MICROPHONES", "1").strip().lower() in ("1", "true", "yes")
+    hardware_preview_max_fps = float(os.getenv("LEAPFLOW_HARDWARE_PREVIEW_MAX_FPS", "30") or 30.0)
+    hardware_preview_max_width = int(os.getenv("LEAPFLOW_HARDWARE_PREVIEW_MAX_WIDTH", "1280") or 1280)
+    hardware_preview_quality = int(os.getenv("LEAPFLOW_HARDWARE_PREVIEW_QUALITY", "85") or 85)
+    hardware_preview_idle_timeout_s = float(
+        os.getenv("LEAPFLOW_HARDWARE_PREVIEW_IDLE_TIMEOUT_S", "5") or 5.0
+    )
     web_transport = os.getenv("LEAPFLOW_WEB_TRANSPORT", "auto").strip().lower() or "auto"
     web_timeout_s = float(os.getenv("LEAPFLOW_WEB_TIMEOUT_S", "20"))
     web_max_bytes = int(os.getenv("LEAPFLOW_WEB_MAX_BYTES", "2000000"))
@@ -1295,6 +1450,33 @@ def _build_settings_from_env(
         plugins_dsh_max_message_bytes=plugins_dsh_max_message_bytes,
         plugins_dsh_max_stderr_bytes=plugins_dsh_max_stderr_bytes,
         plugins_dsh_max_memory_mb=plugins_dsh_max_memory_mb,
+        mcp_approval_mode=mcp_approval_mode,
+        hardware_enabled=hardware_enabled,
+        hardware_devices_dir=hardware_devices_dir,
+        hardware_providers=hardware_providers,
+        hardware_max_devices=hardware_max_devices,
+        hardware_unverified_policy=hardware_unverified_policy,
+        hardware_require_describe=hardware_require_describe,
+        hardware_envelope_grant=hardware_envelope_grant,
+        hardware_trust_skip_enabled=hardware_trust_skip_enabled,
+        hardware_stream_enabled=hardware_stream_enabled,
+        hardware_stream_ring_capacity=hardware_stream_ring_capacity,
+        hardware_persist_readings=hardware_persist_readings,
+        hardware_downsample_interval_s=hardware_downsample_interval_s,
+        hardware_raw_retention_days=hardware_raw_retention_days,
+        hardware_history_retention_days=hardware_history_retention_days,
+        hardware_raw_segment_mb=hardware_raw_segment_mb,
+        hardware_reading_store_sensitive=hardware_reading_store_sensitive,
+        hardware_host_interval_s=hardware_host_interval_s,
+        hardware_host_include=hardware_host_include,
+        hardware_host_exclude=hardware_host_exclude,
+        hardware_rediscover_interval_s=hardware_rediscover_interval_s,
+        hardware_media_screens=hardware_media_screens,
+        hardware_media_microphones=hardware_media_microphones,
+        hardware_preview_max_fps=hardware_preview_max_fps,
+        hardware_preview_max_width=hardware_preview_max_width,
+        hardware_preview_quality=hardware_preview_quality,
+        hardware_preview_idle_timeout_s=hardware_preview_idle_timeout_s,
         web_transport=web_transport,
         web_timeout_s=web_timeout_s,
         web_max_bytes=web_max_bytes,
