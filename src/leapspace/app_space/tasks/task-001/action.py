@@ -8,10 +8,12 @@ Three parts in one file:
   to notice. ``boss_followup`` answers the user's reply at
   after_message_sent.
 - reference(actor): the human reference flow, run host-side through the
-  actor's action surface. Element addressing for focus and activation
-  (the click on a Qt list item is an AX Toggle no-op, so list navigation
-  goes through focus + Down); typing and single keys ride the SDK path,
-  which delivers verbatim where the driver mangles or drops input.
+  actor's action surface, fully human-real: every click is a real pixel
+  click on the element's screen-space center (firing Qt's
+  currentItemChanged on the contact switch — the driver's element click
+  resolves to the AX Toggle action, which moves AT-SPI selection without
+  opening the conversation) and the reply is typed one real keystroke at
+  a time, so the in-box observers record the whole session.
 - expect(): the verdict, run in-sandbox (``python3 action.py``). Reads the
   ground truth under /tmp/leapspace, prints PASS/FAIL per check, and exits
   non-zero on any failure. Interface-name prechecks (config interface ⊆
@@ -72,40 +74,34 @@ def boss_followup(app) -> None:
 
 
 async def reference(actor: LeapAppActor) -> None:
-    from leapspace.app_space.actor import find_element
+    from leapspace.app_space.actor import element_center, find_ax_element
 
     window = await actor.wait_for_window(APP_TITLE)
-    pid, window_id = window["pid"], window["window_id"]
     # Precondition: exactly one unread surfaces in the title.
     assert window["title"] == f"{APP_TITLE} (1)", window["title"]
 
-    # Open the boss conversation — the unread the badge announced. This
-    # switch is what marks the seeded message read. The driver's element
-    # click on a Qt list item resolves to its AX Toggle action, which moves
-    # the AT-SPI selection without firing currentItemChanged, so the app
-    # never opens boss that way; focus the list itself (an AX action Qt
-    # honors) and let one Down from the seeded alice row land on boss.
-    # Element indices expire on the next snapshot, so every action gets a
-    # fresh tree.
-    tree = await actor.snapshot_tree(pid, window_id)
-    await actor.click(
-        pid, window_id, element_index=find_element(tree, "contact_list")
-    )
-    await actor.press_key("down")
+    # Open the boss conversation — the unread the badge announced. A real
+    # click on the row's center is what marks the seeded message read (the
+    # app's read-marking hangs off Qt's currentItemChanged, which the
+    # driver's element click never fires).
+    elements = await actor.ax_elements()
+    x, y = element_center(find_ax_element(elements, "boss", role="list item"))
+    await actor.click(x=x, y=y)
 
-    # Focus the input and type the reply — both go through the SDK path,
-    # which delivers verbatim; the driver's type_text would lowercase the
-    # text and drop the final character, and the verdict compares exactly.
-    tree = await actor.snapshot_tree(pid, window_id)
-    await actor.click(
-        pid, window_id, element_index=find_element(tree, "message_input")
-    )
-    await actor.type_text(REPLY)
+    # Click into the input, then type the reply one real keystroke at a
+    # time — the input tap records every char and the verdict compares
+    # exactly. The typed text is read back through the same ax dump: a
+    # human glances at the field before hitting send.
+    elements = await actor.ax_elements()
+    x, y = element_center(find_ax_element(elements, "message_input", role="text"))
+    await actor.click(x=x, y=y)
+    await actor.type_keys(REPLY)
+    elements = await actor.ax_elements()
+    typed = find_ax_element(elements, "message_input", role="text")["value"]
+    assert typed == REPLY, f"typed {typed!r}"
 
-    tree = await actor.snapshot_tree(pid, window_id)
-    await actor.click(
-        pid, window_id, element_index=find_element(tree, "send_button")
-    )
+    x, y = element_center(find_ax_element(elements, "send_button", role="push button"))
+    await actor.click(x=x, y=y)
 
 
 # ── expect (in-sandbox; the verdict) ─────────────────────────────────────

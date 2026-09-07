@@ -31,7 +31,7 @@ from leapspace.app_space.signal import (
 from leapspace.app_space.utils import (
     LeapAppImage,
     get_image,
-    get_image_python,
+    get_image_venv_python,
     get_sandbox_state_dir,
     load_action,
 )
@@ -61,7 +61,6 @@ class LeapAppHarness:
         """Bind the image preset; sandbox name defaults to a per-image name."""
         self.image = image
         self.sandbox_name = sandbox_name or f"leapspace-app-{image.value}"
-        self.app_pids: dict[str, int] = dict()
 
     async def _prepare_files(self, config: AppTaskConfig, actor: LeapAppActor) -> None:
         """Inject the task's wiring into each app's state dir.
@@ -84,13 +83,16 @@ class LeapAppHarness:
             )
             await actor.fs_write(str(state_dir / "hooks.py"), action_source)
 
-    async def _launch_apps(self, config: AppTaskConfig, actor: LeapAppActor) -> None:
+    async def _launch_apps(
+        self, config: AppTaskConfig, actor: LeapAppActor
+    ) -> dict[str, int]:
         """Start every configured app concurrently and wait until all settle.
 
         gather() overlaps the slow Qt startups. return_exceptions=True
         collects instead of racing: every failing app is reported (the
         extras logged, the first re-raised), and healthy siblings die
         with the sandbox at teardown — no cleanup needed here.
+        Returns the app_id → pid map so later phases can kill apps.
         """
         results = await asyncio.gather(
             *(self._launch_app(app_id, config, actor) for app_id in config.app_ids),
@@ -105,28 +107,29 @@ class LeapAppHarness:
             for app_id, exc in failures[1:]:
                 logger.error("app %s also failed to launch", app_id, exc_info=exc)
             raise failures[0][1]
+        return dict(zip(config.app_ids, results))
 
     async def _launch_app(
         self, app_id: str, config: AppTaskConfig, actor: LeapAppActor
-    ) -> dict[str, Any]:
+    ) -> int:
         """Start one app in the background and wait until it is usable.
 
         Usable means the first state.json is written (construction,
         before_launch hooks, initial persist), a window with the
         envelope's app_title is on screen, and the app's persisted
         interface covers the names config.interface declares for it.
-        Returns the envelope so callers can run further checks without
-        re-reading it.
+        Returns the spawned pid so later phases can kill the app.
         """
         app_module = APP_MODULES.get(app_id)
         if app_module is None:
             raise ValueError(
                 f"unknown app_id {app_id!r}; must be one of {sorted(APP_MODULES)}"
             )
-        # background=True: pid only, no exit code — startup crashes are
-        # caught by the state poll below, not by this call
-        python = get_image_python(system=self.image.value)
-        await actor.shell_run(f"{python} -m {app_module}", background=True)
+        # background=True: stdout is the spawned pid, no exit code —
+        # startup crashes are caught by the state poll below, not by this call
+        python = get_image_venv_python(system=self.image.value)
+        launch = await actor.shell_run(f"{python} -m {app_module}", background=True)
+        pid = int(launch.stdout.strip())
 
         envelope = await self._wait_for_app_state(app_id, actor)
         await actor.wait_for_window(envelope["app_title"])
@@ -139,7 +142,7 @@ class LeapAppHarness:
                 f"app {app_id!r} does not expose interface {sorted(missing)} "
                 f"required by task {config.id}"
             )
-        return envelope
+        return pid
 
     async def _wait_for_app_state(
         self, app_id: str, actor: LeapAppActor
@@ -191,10 +194,7 @@ class LeapAppHarness:
             local=True,
             runtime=QEMURuntime(mode="bare-metal"),
         ) as sandbox:
-            async with LeapAppActor(sandbox=sandbox) as actor:
-                await self._prepare_files(config, actor)
-                await self._launch_apps(config, actor)
-
+            async with LeapAppActor(sandbox=sandbox, system=self.image.value) as actor:
                 if mode == "signal":
                     await self._run_signal(config, actor)
                 elif mode == "e2e":
@@ -213,7 +213,17 @@ class LeapAppHarness:
         state. The verdict itself is `python hooks.py` — action.py's
         __main__ runs expect() — through shell_run(check=False) so a FAIL
         exit code stays a measured result, not an infra failure.
+
+        App-side setup lives here, not in run_task: the e2e path drives a
+        completely different flow and must not inherit signal-mode wiring.
         """
+        await self._prepare_files(config, actor)
+        await self._launch_apps(config, actor)
+        # The driver's agent-cursor overlay is a full-screen window
+        # above every app: it swallows all pixel input, so it must
+        # be gone before any human-real stimulus runs.
+        await actor.disable_agent_cursor()
+
         # Resolve the run's control paths and load the task's action pair.
         state_root = get_sandbox_state_dir(in_sandbox=False, system=self.image.value)
         signal_dir = state_root / config.id / "signal"
@@ -225,7 +235,7 @@ class LeapAppHarness:
         # this run exists to observe — while the control files (this run's
         # signal dir) stay unwatched, so the harness never records its own
         # record_stop handshake as signal.
-        python = get_image_python(system=self.image.value)
+        python = get_image_venv_python(system=self.image.value)
         watch_flags = "".join(
             f" --watch {shlex.quote(str(state_root / app_id))}"
             for app_id in config.app_ids

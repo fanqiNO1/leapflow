@@ -12,6 +12,15 @@ is real X11 input, visible to the in-sandbox observers. Element addressing
 equivalent and stay driver-only; fs/clipboard actions are SDK-only because
 the sandbox MCP exposes no such tools.
 
+A second layer serves reference scripts that must be human-real — every
+action observable by the in-box input tap AND effective in the app:
+disable_agent_cursor() removes the driver's full-screen overlay that eats
+all pixel clicks, ax_elements() provides screen-space element bounds for
+coordinate targeting, and type_keys() emits one XTest device event per
+character (SDK type_text is observer-invisible XSendEvent). Their
+implementations live in the in-box action_utils module, invoked as
+`python -m` with the interpreter that owns each dependency stack.
+
 Action signatures mirror the cua-driver MCP tool reference
 (https://github.com/trycua/cua/blob/main/docs/content/docs/reference/cua-driver/mcp-tools.mdx):
 params the driver marks required (pid on double_click/right_click/
@@ -39,7 +48,13 @@ from cua_sandbox.interfaces.shell import CommandResult
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from leapspace.app_space.utils import CUA_MCP_PORT
+from leapspace.app_space.utils import (
+    CUA_MCP_PORT,
+    LINUX_LEAPFLOW_SRC,
+    get_actor_stage_dir,
+    get_image_venv_python,
+    get_image_system_python,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +98,39 @@ def find_element(tree_markdown: str, name: str, *, role: str | None = None) -> i
     return matches[0][0]
 
 
+def find_ax_element(
+    elements: list[dict[str, Any]], name: str, *, role: str | None = None
+) -> dict[str, Any]:
+    """Resolve one element from an ax_elements() dump by accessible name.
+
+    Same contract as find_element: absent or ambiguous names are scripting
+    bugs (LookupError), not runtime conditions.
+    """
+    matches = [
+        element
+        for element in elements
+        if element.get("name") == name and (role is None or element.get("role") == role)
+    ]
+    if not matches:
+        raise LookupError(f"no element named {name!r} in ax dump")
+    if len(matches) > 1:
+        raise LookupError(f"ambiguous element name {name!r}: {len(matches)} matches")
+    return matches[0]
+
+
+def element_center(element: dict[str, Any]) -> tuple[int, int]:
+    """Screen-space center of an ax_elements() dump entry — the pixel a
+    human-real click targets."""
+    return element["x"] + element["w"] // 2, element["y"] + element["h"] // 2
+
+
+# In-box helper module the human-real layer invokes as
+# `python -m <module> <function> [args...]`; see its docstring for the
+# environment gaps it closes.
+_ACTION_UTILS = "leapspace.app_space.action_utils"
+
+
+
 class LeapAppActor:
     """Human-operation emitter driving a sandbox from the host.
 
@@ -93,8 +141,12 @@ class LeapAppActor:
     availability instead of assuming the documented surface.
     """
 
-    def __init__(self, sandbox: Sandbox):
+    def __init__(self, sandbox: Sandbox, *, system: str = "linux") -> None:
         self.sandbox = sandbox
+        self.system = system
+        self._stage_dir = get_actor_stage_dir(system)
+        self._venv_python = get_image_venv_python(system)
+        self._system_python = get_image_system_python(system)
 
         self.exit_stack = AsyncExitStack()
         self.cua_mcp: ClientSession | None = None
@@ -605,6 +657,69 @@ class LeapAppActor:
                 "element_token": element_token,
                 "snapshot_id": snapshot_id,
             },
+        )
+
+    # ── human-real input: observable + effective X11 events ────────────
+    #
+    # click(x, y) / press_key already deliver real device events, but two
+    # environment gaps make the rest of a human session invisible or
+    # ineffective. These helpers close them through the in-box
+    # action_utils module (see its docstring for the mechanism).
+
+    async def disable_agent_cursor(self) -> None:
+        """Clear the driver's agent-cursor overlay out of the X input path.
+
+        The overlay is a full-screen window stacked above every app, so all
+        pixel input lands on it instead of the app under the pointer. The
+        config-level disable stops the driver from showing it again, but
+        leaves an already-created window mapped — the unmap is what
+        actually frees the input path. Call once, after the apps are up and
+        before any pixel input.
+        """
+        result = await self._call_mcp_tool(
+            "set_agent_cursor_enabled", {"enabled": False, "session": "default"}
+        )
+        if not result.ok:
+            # The unmap below still fixes the live window; only the future
+            # re-show guard is missing, so this is a warning, not a failure.
+            logger.warning(
+                "agent cursor config disable failed (unmapping anyway): %s",
+                result.error,
+            )
+        unmap = await self.shell_run(f"{self._venv_python} -m {_ACTION_UTILS} unmap_overlay")
+        logger.info("agent cursor overlay: %s", (unmap.stdout or "").strip())
+
+    async def ax_elements(self) -> list[dict[str, Any]]:
+        """Dump every named accessible element on the desktop.
+
+        Each entry carries its screen-space bounds (x/y/w/h, XY_SCREEN)
+        and its text value when the element exposes one — the coordinate
+        source for human-real pixel clicks and the readback path for
+        typed-text verification. Runs on the OS python (apt pyatspi,
+        reached via PYTHONPATH into the checkout) because the in-box
+        driver's get_window_state returns only tree_markdown, no bounds.
+        """
+        dump_path = f"{self._stage_dir}/ax_elements.jsonl"
+        await self.shell_run(f"mkdir -p {shlex.quote(str(self._stage_dir))}")
+        await self.shell_run(
+            f"PYTHONPATH={LINUX_LEAPFLOW_SRC} {self._system_python}"
+            f" -m {_ACTION_UTILS} dump_elements {shlex.quote(dump_path)}"
+        )
+        raw = await self.fs_read(dump_path)
+        return [json.loads(line) for line in raw.splitlines() if line.strip()]
+
+    async def type_keys(self, text: str) -> None:
+        """Type text into the focused widget, one real keystroke per char.
+
+        Unlike type_text (SDK XSendEvent — verbatim but invisible to
+        XRecord-based observers; driver — mangles text), every character
+        here is an XTest device event: the input tap records it and the
+        focused widget receives it, exactly like a physical keyboard.
+        Latin-1 characters only; anything else fails the run naming the
+        untypeable characters.
+        """
+        await self.shell_run(
+            f"{self._venv_python} -m {_ACTION_UTILS} type_text {shlex.quote(text)}"
         )
 
     async def _to_screen(

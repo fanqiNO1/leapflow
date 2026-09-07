@@ -7,7 +7,7 @@ import pytest
 
 from leapspace.app_space.utils import (
     check,
-    get_image_python,
+    get_image_venv_python,
     get_sandbox_state_dir,
     load_action,
 )
@@ -45,14 +45,14 @@ def test_state_dir_detects_running_os_in_sandbox(monkeypatch):
     assert str(get_sandbox_state_dir(True)) == "C:\\ProgramData\\leapspace"
 
 
-def test_image_python_pins_linux_venv():
+def test_image_venv_python_pins_linux_venv():
     # `make space-sync` is a bare `uv sync`, so the venv is .venv
-    assert get_image_python("linux") == "/opt/leapflow/.venv/bin/python"
+    assert get_image_venv_python("linux") == "/opt/leapflow/.venv/bin/python"
 
 
-def test_image_python_undefined_for_other_systems():
+def test_image_venv_python_undefined_for_other_systems():
     with pytest.raises(NotImplementedError, match="macos"):
-        get_image_python("macos")
+        get_image_venv_python("macos")
 
 
 ACTION = '''\

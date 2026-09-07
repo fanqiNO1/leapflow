@@ -123,6 +123,10 @@ PYQT_SYSTEM_LIBS = [
 # Repo checkout path inside the sandbox image.
 LINUX_LEAPFLOW_PATH = "/opt/leapflow"
 
+# Source tree inside the checkout — PYTHONPATH for interpreters outside the
+# repo venv (the OS python's apt stack: pyatspi).
+LINUX_LEAPFLOW_SRC = f"{LINUX_LEAPFLOW_PATH}/src"
+
 # Host-side archive landing spot: copied into the image, untarred, removed.
 LEAPFLOW_ARCHIVE_DST = "/tmp/leapflow-checkout.tar.gz"
 
@@ -178,7 +182,7 @@ def get_image(image: LeapAppImage) -> Image:
         raise NotImplementedError(f"image preset not defined for {image}")
 
 
-def get_image_python(system: Literal["linux", "macos", "windows"]) -> str:
+def get_image_venv_python(system: Literal["linux", "macos", "windows"]) -> str:
     """Interpreter inside the image's repo venv, keyed by sandbox OS.
 
     The venv is built by the image's `make space-sync` step (uv sync,
@@ -189,4 +193,27 @@ def get_image_python(system: Literal["linux", "macos", "windows"]) -> str:
     """
     if system == "linux":
         return f"{LINUX_LEAPFLOW_PATH}/.venv/bin/python"
-    raise NotImplementedError(f"image python path not defined for {system}")
+    raise NotImplementedError(f"image venv python path not defined for {system}")
+
+
+def get_image_system_python(system: Literal["linux", "macos", "windows"]) -> str:
+    """Interpreter carrying the image's OS-level Python packages.
+
+    apt installs land on the system interpreter (pyatspi, ...) while pip
+    installs land in the repo venv (pynput, python-Xlib); staged helper
+    scripts must pick the interpreter that owns their imports.
+    """
+    if system == "linux":
+        return "/usr/bin/python3"
+    raise NotImplementedError(f"image system python not defined for {system}")
+
+
+def get_actor_stage_dir(system: Literal["linux", "macos", "windows"]) -> PurePath:
+    """Staging dir for the actor's in-sandbox run payloads (element dumps).
+
+    Sits under the state root but outside every app's state dir, so the
+    signal watch surface (the apps' ground-truth writes) never records
+    the actor's own traffic as signal. Helper scripts are not staged:
+    they ship with the package and run via ``python -m action_utils``.
+    """
+    return get_sandbox_state_dir(in_sandbox=False, system=system) / ".actor"

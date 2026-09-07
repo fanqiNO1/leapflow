@@ -4,7 +4,19 @@ import pytest
 
 pytest.importorskip("cua_sandbox")  # leapspace dependency group only
 
-from leapspace.app_space.actor import ActionResult, LeapAppActor
+from cua_sandbox.interfaces.shell import CommandResult
+
+from leapspace.app_space.actor import (
+    ActionResult,
+    LeapAppActor,
+    element_center,
+    find_ax_element,
+)
+from leapspace.app_space.utils import get_image_venv_python
+
+VENV_PYTHON = get_image_venv_python("linux")
+SYSTEM_PYTHON = "/usr/bin/python3"
+STAGE_DIR = "/tmp/leapspace/.actor"
 
 
 def make_actor() -> LeapAppActor:
@@ -267,3 +279,102 @@ async def test_scroll_pixel_path_goes_sdk_first():
     result = await actor.scroll("down", pid=1, window_id=2, x=5, y=5, amount=3)
     assert result.via == "sdk"
     assert mcp_calls == []
+
+
+# ── human-real input: action_utils dispatch, element lookup ────────────────
+
+
+class ShellFake:
+    """Records the shell traffic the action_utils-backed helpers produce."""
+
+    def __init__(self):
+        self.commands: list[str] = []
+
+    async def shell_run(self, command, timeout=30, background=False, check=True):
+        self.commands.append(command)
+        return CommandResult(stdout="{}", stderr="", returncode=0)
+
+
+@pytest.mark.asyncio
+async def test_disable_agent_cursor_disables_config_then_unmaps():
+    actor, _, mcp_calls = make_routing_actor()
+    shell = ShellFake()
+    actor.shell_run = shell.shell_run  # type: ignore[method-assign]
+    await actor.disable_agent_cursor()
+    assert mcp_calls == [
+        ("set_agent_cursor_enabled", {"enabled": False, "session": "default"})
+    ]
+    assert shell.commands == [
+        f"{VENV_PYTHON} -m leapspace.app_space.action_utils unmap_overlay"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_disable_agent_cursor_unmaps_even_when_config_disable_fails():
+    actor, _, _ = make_routing_actor()
+
+    async def failing_tool(name: str, args: dict) -> ActionResult:
+        return ActionResult(ok=False, via="mcp", error="tool not exposed")
+
+    shell = ShellFake()
+    actor._call_mcp_tool = failing_tool  # type: ignore[method-assign]
+    actor.shell_run = shell.shell_run  # type: ignore[method-assign]
+    await actor.disable_agent_cursor()
+    assert shell.commands == [
+        f"{VENV_PYTHON} -m leapspace.app_space.action_utils unmap_overlay"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ax_elements_parses_the_dump():
+    actor = make_actor()
+    shell = ShellFake()
+    dump = (
+        '{"name": "boss", "role": "list item", "x": 15, "y": 80, "w": 226, "h": 14, "value": null}\n'
+        '{"name": "message_input", "role": "text", "x": 248, "y": 365, "w": 142, "h": 22, "value": "hi"}\n'
+    )
+
+    async def fs_read(path):
+        assert path == f"{STAGE_DIR}/ax_elements.jsonl"
+        return dump
+
+    actor.shell_run = shell.shell_run  # type: ignore[method-assign]
+    actor.fs_read = fs_read  # type: ignore[method-assign]
+    elements = await actor.ax_elements()
+    assert [element["name"] for element in elements] == ["boss", "message_input"]
+    # the AT-SPI walk runs on the OS python (apt pyatspi), imported from the
+    # checkout via PYTHONPATH; the dump lands in the staging dir
+    assert shell.commands == [
+        f"mkdir -p {STAGE_DIR}",
+        f"PYTHONPATH=/opt/leapflow/src {SYSTEM_PYTHON}"
+        f" -m leapspace.app_space.action_utils dump_elements"
+        f" {STAGE_DIR}/ax_elements.jsonl",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_type_keys_dispatches_to_action_utils():
+    actor = make_actor()
+    shell = ShellFake()
+    actor.shell_run = shell.shell_run  # type: ignore[method-assign]
+    await actor.type_keys("Hi there.")
+    # text travels as the typed argument; spaces survive via shell quoting
+    assert shell.commands == [
+        f"{VENV_PYTHON} -m leapspace.app_space.action_utils type_text 'Hi there.'"
+    ]
+
+
+def test_find_ax_element_resolves_by_name_and_role():
+    elements = [
+        {"name": "boss", "role": "list item", "x": 1, "y": 2, "w": 3, "h": 4},
+        {"name": "boss", "role": "text", "x": 5, "y": 6, "w": 7, "h": 8},
+    ]
+    assert find_ax_element(elements, "boss", role="list item") is elements[0]
+    with pytest.raises(LookupError, match="ambiguous"):
+        find_ax_element(elements, "boss")
+    with pytest.raises(LookupError, match="no element named 'ghost'"):
+        find_ax_element(elements, "ghost")
+
+
+def test_element_center_computes_screen_center():
+    assert element_center({"x": 15, "y": 80, "w": 226, "h": 14}) == (128, 87)
