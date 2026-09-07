@@ -20,7 +20,7 @@ def test_constructor_creates_missing_signal_dir(tmp_path):
 
 
 def test_await_stop_returns_immediately_when_stop_file_exists(tmp_path):
-    (tmp_path / RECORD_STOP_FILE).write_text("")
+    (tmp_path / RECORD_STOP_FILE).write_text('{"stop": true}')
     asyncio.run(LeapSignal(tmp_path)._await_stop())
 
 
@@ -30,7 +30,7 @@ def test_await_stop_polls_until_stop_file_lands(tmp_path, monkeypatch):
 
     async def touch_later():
         await asyncio.sleep(0.05)
-        (tmp_path / RECORD_STOP_FILE).write_text("")
+        (tmp_path / RECORD_STOP_FILE).write_text('{"stop": true}')
 
     async def scenario():
         # a serial wait would deadlock: _await_stop only returns once the
@@ -62,7 +62,7 @@ def test_run_success_writes_start_then_done(tmp_path, monkeypatch):
     monkeypatch.setattr(LeapSignal, "_start", fake_start)
     monkeypatch.setattr(LeapSignal, "_stop", fake_stop)
     # stop file pre-created: run() must pass through the real _await_stop
-    (tmp_path / RECORD_STOP_FILE).write_text("")
+    (tmp_path / RECORD_STOP_FILE).write_text('{"stop": true}')
 
     rc = asyncio.run(LeapSignal(tmp_path, goal="g").run())
 

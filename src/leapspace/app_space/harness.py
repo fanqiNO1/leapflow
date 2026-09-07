@@ -61,6 +61,7 @@ class LeapAppHarness:
         """Bind the image preset; sandbox name defaults to a per-image name."""
         self.image = image
         self.sandbox_name = sandbox_name or f"leapspace-app-{image.value}"
+        self.app_pids: dict[str, int] = dict()
 
     async def _prepare_files(self, config: AppTaskConfig, actor: LeapAppActor) -> None:
         """Inject the task's wiring into each app's state dir.
@@ -219,11 +220,19 @@ class LeapAppHarness:
         reference, _expect = load_action(config.action_path)
 
         # background=True: pid only; a startup death surfaces as the death
-        # certificate (record_done.json) or not at all, both caught by the poll
+        # certificate (record_done.json) or not at all, both caught by the poll.
+        # The watch surface is the apps' state dirs — the ground-truth writes
+        # this run exists to observe — while the control files (this run's
+        # signal dir) stay unwatched, so the harness never records its own
+        # record_stop handshake as signal.
         python = get_image_python(system=self.image.value)
+        watch_flags = "".join(
+            f" --watch {shlex.quote(str(state_root / app_id))}"
+            for app_id in config.app_ids
+        )
         await actor.shell_run(
             f"{python} -m leapspace.app_space.signal {shlex.quote(str(signal_dir))}"
-            f" --goal {shlex.quote(config.instruction)}",
+            f" --goal {shlex.quote(config.instruction)}{watch_flags}",
             background=True,
         )
         # Readiness gate: record_start.json proves recording is live before the
@@ -245,7 +254,9 @@ class LeapAppHarness:
 
         # Close the recording window, then wait for record_done.json — the
         # drain proof that every event has been persisted before the verdict.
-        await actor.fs_create(str(signal_dir / RECORD_STOP_FILE))
+        await actor.fs_create(
+            str(signal_dir / RECORD_STOP_FILE), json.dumps({"stop": True})
+        )
         _, done = await self._await_sentinel(
             actor, signal_dir, (RECORD_DONE_FILE,), SIGNAL_DONE_TIMEOUT_S
         )

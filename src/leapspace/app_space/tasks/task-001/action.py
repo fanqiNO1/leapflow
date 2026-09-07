@@ -8,8 +8,10 @@ Three parts in one file:
   to notice. ``boss_followup`` answers the user's reply at
   after_message_sent.
 - reference(actor): the human reference flow, run host-side through the
-  same MCP tool surface the agent under test uses. Semantic addressing
-  only; click to focus + type_text for keystroke fidelity.
+  actor's action surface. Element addressing for focus and activation
+  (the click on a Qt list item is an AX Toggle no-op, so list navigation
+  goes through focus + Down); typing and single keys ride the SDK path,
+  which delivers verbatim where the driver mangles or drops input.
 - expect(): the verdict, run in-sandbox (``python3 action.py``). Reads the
   ground truth under /tmp/leapspace, prints PASS/FAIL per check, and exits
   non-zero on any failure. Interface-name prechecks (config interface ⊆
@@ -78,20 +80,27 @@ async def reference(actor: LeapAppActor) -> None:
     assert window["title"] == f"{APP_TITLE} (1)", window["title"]
 
     # Open the boss conversation — the unread the badge announced. This
-    # switch is what marks the seeded message read. Element indices expire
-    # on the next snapshot, so every action gets a fresh tree.
+    # switch is what marks the seeded message read. The driver's element
+    # click on a Qt list item resolves to its AX Toggle action, which moves
+    # the AT-SPI selection without firing currentItemChanged, so the app
+    # never opens boss that way; focus the list itself (an AX action Qt
+    # honors) and let one Down from the seeded alice row land on boss.
+    # Element indices expire on the next snapshot, so every action gets a
+    # fresh tree.
     tree = await actor.snapshot_tree(pid, window_id)
     await actor.click(
-        pid, window_id, element_index=find_element(tree, "boss", role="list item")
+        pid, window_id, element_index=find_element(tree, "contact_list")
     )
+    await actor.press_key("down")
 
-    # Focus the input and type the reply — keystroke-faithful, so the
-    # signal layer sees the full input process.
+    # Focus the input and type the reply — both go through the SDK path,
+    # which delivers verbatim; the driver's type_text would lowercase the
+    # text and drop the final character, and the verdict compares exactly.
     tree = await actor.snapshot_tree(pid, window_id)
     await actor.click(
         pid, window_id, element_index=find_element(tree, "message_input")
     )
-    await actor.type_text(REPLY, pid=pid, window_id=window_id)
+    await actor.type_text(REPLY)
 
     tree = await actor.snapshot_tree(pid, window_id)
     await actor.click(

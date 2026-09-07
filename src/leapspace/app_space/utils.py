@@ -4,6 +4,8 @@ task action loading."""
 import importlib.util
 import os
 import platform
+import subprocess
+import tempfile
 from enum import Enum
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Awaitable, Callable, Literal
@@ -121,29 +123,59 @@ PYQT_SYSTEM_LIBS = [
 # Repo checkout path inside the sandbox image.
 LINUX_LEAPFLOW_PATH = "/opt/leapflow"
 
-# Image spec dicts consumed by cua.Image.from_dict(). Install layers
-# (apt_install, env, ...) stay empty until the app UI stack is chosen.
-# Host feasibility: LINUX runs under local QEMU+KVM; WINDOWS is untested;
-# MACOS requires an Apple Silicon host (Lume).
-LINUX_IMAGE_CONFIG: Image = (Image.linux(distro="ubuntu", version="24.04", kind="vm")
-                             .expose(CUA_MCP_PORT)
-                             .apt_install("python3-pyatspi", *PYQT_SYSTEM_LIBS, "git", "make")
-                             .pip_install("PyQt6", "uv")
-                             .run(f"git clone https://github.com/modelscope/leapflow.git {LINUX_LEAPFLOW_PATH}")
-                             .run(f"cd {LINUX_LEAPFLOW_PATH} && make space-sync"))
+# Host-side archive landing spot: copied into the image, untarred, removed.
+LEAPFLOW_ARCHIVE_DST = "/tmp/leapflow-checkout.tar.gz"
 
-IMAGE_CONFIGS: dict[LeapAppImage, Image] = {
-    LeapAppImage.LINUX: LINUX_IMAGE_CONFIG,
-}
+
+def _archive_checkout() -> Path:
+    """Pack this checkout's committed state for the image to copy in.
+
+    The build VM reaches GitHub only through the host's flaky link, so the
+    repo travels as a host-built archive: no in-box clone, and the box runs
+    exactly the code under test (HEAD, not some remote ref).
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    fd, name = tempfile.mkstemp(suffix=".tar.gz")
+    os.close(fd)
+    result = subprocess.run(
+        ["git", "archive", "--format=tar.gz", "-o", name, "HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"git archive failed: {result.stderr.strip()}")
+    return Path(name)
 
 
 def get_image(image: LeapAppImage) -> Image:
-    """Return the preset image spec.
+    """Return the preset image spec, rooted in an archive of this checkout.
 
     Image is frozen and chainable — every mutation returns a new instance —
-    so the shared preset can be handed out directly.
+    so callers get a fresh spec (and a fresh archive) per run. needrestart
+    is removed before apt: installing python3-dev upgrades service
+    libraries, and needrestart's service restarts SIGTERM the layer's own
+    command transport. Host feasibility: LINUX runs under local QEMU+KVM;
+    WINDOWS is untested; MACOS requires an Apple Silicon host (Lume).
     """
-    return IMAGE_CONFIGS[image]
+    archive = _archive_checkout()
+    if image == LeapAppImage.LINUX:
+        return (
+            Image.linux(distro="ubuntu", version="24.04", kind="vm")
+            .expose(CUA_MCP_PORT)
+            .run("sudo apt-get remove -y needrestart")
+            .apt_install("python3-pyatspi", "python3-dev", *PYQT_SYSTEM_LIBS, "git", "make")
+            .pip_install("PyQt6", "uv")
+            .copy(str(archive), LEAPFLOW_ARCHIVE_DST)
+            .run(
+                f"mkdir -p {LINUX_LEAPFLOW_PATH} && "
+                f"tar xzf {LEAPFLOW_ARCHIVE_DST} -C {LINUX_LEAPFLOW_PATH} && "
+                f"rm {LEAPFLOW_ARCHIVE_DST}"
+            )
+            .run(f"cd {LINUX_LEAPFLOW_PATH} && make space-sync")
+        )
+    else:
+        raise NotImplementedError(f"image preset not defined for {image}")
 
 
 def get_image_python(system: Literal["linux", "macos", "windows"]) -> str:

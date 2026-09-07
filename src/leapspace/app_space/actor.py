@@ -3,9 +3,13 @@
 Drives the in-sandbox apps through the cua-driver MCP tool surface plus
 direct sandbox handles (sb.shell, sb.clipboard, ...).
 
-Routing policy: evaluation-relevant actions go MCP-first (AX element
-addressing, same tool surface as the agent under test) and fall back to
-the Sandbox SDK when MCP fails. fs/clipboard actions are SDK-only because
+Routing policy: input actions the Sandbox SDK can perform go SDK-first and
+fall back to the driver when the SDK raises. The driver's input paths are
+unreliable in this image (press_key reports success without delivering any
+event; type_text lowercases and drops the final character), while SDK input
+is real X11 input, visible to the in-sandbox observers. Element addressing
+(element_index/element_token) and keystroke-path scroll have no SDK
+equivalent and stay driver-only; fs/clipboard actions are SDK-only because
 the sandbox MCP exposes no such tools.
 
 Action signatures mirror the cua-driver MCP tool reference
@@ -20,13 +24,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import shlex
 import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from types import TracebackType
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal
 
 from cua_sandbox import Sandbox
 from cua_sandbox.interfaces.files import FileEntry
@@ -35,6 +40,8 @@ from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from leapspace.app_space.utils import CUA_MCP_PORT
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -104,8 +111,15 @@ class LeapAppActor:
     ) -> None:
         # Safe when MCP was never prepared (aclose on an untouched stack is
         # a no-op) or when preparation failed midway (the half-entered HTTP
-        # client is still popped from the stack).
-        await self.exit_stack.aclose()
+        # client is still popped from the stack). The streamable-http client
+        # teardown raises cancel-scope/task-affinity RuntimeErrors after a
+        # GET-stream reconnect — the transport is being discarded with the
+        # sandbox anyway, so that noise is logged instead of masking the
+        # exception (if any) the caller is actually unwinding.
+        try:
+            await self.exit_stack.aclose()
+        except Exception:
+            logger.warning("cua MCP teardown failed (ignored)", exc_info=True)
         self.cua_mcp = None
         self.cua_mcp_tools = None
 
@@ -183,6 +197,40 @@ class LeapAppActor:
         if bool(getattr(raw, "isError", False)):
             return ActionResult(ok=False, via="mcp", error=str(data))
         return ActionResult(ok=True, via="mcp", data=data, images=images)
+
+    async def _run_sdk_first(
+        self,
+        sdk_op: Callable[[], Awaitable[None]],
+        tool_name: str,
+        tool_args: dict[str, Any],
+    ) -> ActionResult:
+        """Run one input action through the SDK, falling back to the driver.
+
+        The SDK delivers real X11 input; the driver's equivalents are broken
+        in this image (press_key delivers nothing, type_text mangles text),
+        so the SDK goes first wherever it can perform the operation. Only
+        when the SDK raises does the driver get the call; both failing is
+        the error, and it carries both failure texts.
+        """
+        try:
+            await sdk_op()
+        except Exception as exc:
+            result = await self._call_mcp_tool(tool_name, tool_args)
+            if result.ok:
+                return result
+            raise RuntimeError(
+                f"{tool_name} failed via SDK ({exc}) and MCP ({result.error})"
+            ) from exc
+        return ActionResult(ok=True, via="sdk")
+
+    async def _mcp_only(self, tool_name: str, tool_args: dict[str, Any]) -> ActionResult:
+        """Call a driver-only tool; no SDK equivalent exists to fall back to."""
+        result = await self._call_mcp_tool(tool_name, tool_args)
+        if not result.ok:
+            raise RuntimeError(
+                f"{tool_name} failed via MCP and has no SDK fallback: {result.error}"
+            )
+        return result
 
     # ── Observation (MCP only) ──────────────────────────────────────────
 
@@ -313,10 +361,11 @@ class LeapAppActor:
             ) from exc
         return ActionResult(ok=True, via="sdk")
 
-    # ── UI actions (MCP first, SDK pixel/focus fallback) ─────────────────
-    # Fallbacks are pixel-only: an element-addressed call that fails has no
-    # SDK retargeting and raises the MCP error directly. A call raises only
-    # when both paths have failed, with both errors in the message.
+    # ── UI actions (SDK first, driver fallback; element addressing is
+    # driver-only). The SDK delivers real X11 input; the driver is the
+    # fallback for pixel targets and the only path for element-addressed
+    # targets, which the SDK has no AX knowledge to resolve. A call raises
+    # only when both paths have failed, with both errors in the message.
 
     async def click(
         self,
@@ -335,35 +384,27 @@ class LeapAppActor:
         Window scope (pid given): x/y are window-local screenshot pixels.
         Desktop scope (no pid): x/y are true screen pixels.
         """
-        result = await self._call_mcp_tool(
-            "click",
-            {
-                "pid": pid,
-                "window_id": window_id,
-                "element_index": element_index,
-                "element_token": element_token,
-                "snapshot_id": snapshot_id,
-                "x": x,
-                "y": y,
-                "button": button,
-                "scope": "desktop" if pid is None else None,
-            },
-        )
-        if result.ok:
-            return result
+        args = {
+            "pid": pid,
+            "window_id": window_id,
+            "element_index": element_index,
+            "element_token": element_token,
+            "snapshot_id": snapshot_id,
+            "x": x,
+            "y": y,
+            "button": button,
+            "scope": "desktop" if pid is None else None,
+        }
         if x is None or y is None:
-            raise RuntimeError(
-                f"click failed via MCP and has no pixel target for SDK fallback: "
-                f"{result.error}"
-            )
-        try:
+            # Element-addressed or targetless click: the SDK cannot
+            # synthesize a click without pixel coordinates.
+            return await self._mcp_only("click", args)
+
+        async def sdk_op() -> None:
             sx, sy = await self._to_screen(pid, window_id, x, y)
             await self.sandbox.mouse.click(sx, sy, button=button)
-        except Exception as exc:
-            raise RuntimeError(
-                f"click failed via MCP ({result.error}) and SDK ({exc})"
-            ) from exc
-        return ActionResult(ok=True, via="sdk")
+
+        return await self._run_sdk_first(sdk_op, "click", args)
 
     async def double_click(
         self,
@@ -379,34 +420,22 @@ class LeapAppActor:
         """Double-click an element or a pixel point.
 
         Unlike click/right_click, the driver's pixel path here takes true
-        screen coordinates, so the SDK fallback needs no translation.
+        screen coordinates, so the SDK path needs no translation.
         """
-        result = await self._call_mcp_tool(
-            "double_click",
-            {
-                "pid": pid,
-                "window_id": window_id,
-                "element_index": element_index,
-                "element_token": element_token,
-                "snapshot_id": snapshot_id,
-                "x": x,
-                "y": y,
-            },
-        )
-        if result.ok:
-            return result
+        args = {
+            "pid": pid,
+            "window_id": window_id,
+            "element_index": element_index,
+            "element_token": element_token,
+            "snapshot_id": snapshot_id,
+            "x": x,
+            "y": y,
+        }
         if x is None or y is None:
-            raise RuntimeError(
-                f"double_click failed via MCP and has no pixel target for SDK fallback: "
-                f"{result.error}"
-            )
-        try:
-            await self.sandbox.mouse.double_click(x, y)
-        except Exception as exc:
-            raise RuntimeError(
-                f"double_click failed via MCP ({result.error}) and SDK ({exc})"
-            ) from exc
-        return ActionResult(ok=True, via="sdk")
+            return await self._mcp_only("double_click", args)
+        return await self._run_sdk_first(
+            lambda: self.sandbox.mouse.double_click(x, y), "double_click", args
+        )
 
     async def right_click(
         self,
@@ -420,33 +449,23 @@ class LeapAppActor:
         y: int | None = None,
     ) -> ActionResult:
         """Right-click an element or a window-local pixel point."""
-        result = await self._call_mcp_tool(
-            "right_click",
-            {
-                "pid": pid,
-                "window_id": window_id,
-                "element_index": element_index,
-                "element_token": element_token,
-                "snapshot_id": snapshot_id,
-                "x": x,
-                "y": y,
-            },
-        )
-        if result.ok:
-            return result
+        args = {
+            "pid": pid,
+            "window_id": window_id,
+            "element_index": element_index,
+            "element_token": element_token,
+            "snapshot_id": snapshot_id,
+            "x": x,
+            "y": y,
+        }
         if x is None or y is None:
-            raise RuntimeError(
-                f"right_click failed via MCP and has no pixel target for SDK fallback: "
-                f"{result.error}"
-            )
-        try:
+            return await self._mcp_only("right_click", args)
+
+        async def sdk_op() -> None:
             sx, sy = await self._to_screen(pid, window_id, x, y)
             await self.sandbox.mouse.right_click(sx, sy)
-        except Exception as exc:
-            raise RuntimeError(
-                f"right_click failed via MCP ({result.error}) and SDK ({exc})"
-            ) from exc
-        return ActionResult(ok=True, via="sdk")
+
+        return await self._run_sdk_first(sdk_op, "right_click", args)
 
     async def type_text(
         self,
@@ -460,71 +479,61 @@ class LeapAppActor:
         x: int | None = None,
         y: int | None = None,
     ) -> ActionResult:
-        """Type text into an element/pixel target, or the frontmost app when
-        no target is given (desktop scope)."""
-        result = await self._call_mcp_tool(
-            "type_text",
-            {
-                "text": text,
-                "pid": pid,
-                "window_id": window_id,
-                "element_index": element_index,
-                "element_token": element_token,
-                "snapshot_id": snapshot_id,
-                "x": x,
-                "y": y,
-                "scope": "desktop" if pid is None else None,
-            },
-        )
-        if result.ok:
-            return result
+        """Type text into an element/pixel target, or the focused widget when
+        no target is given (desktop scope).
+
+        The SDK path types into whatever has focus (clicking x/y first when
+        a pixel target is given) and delivers the text verbatim; the
+        driver's type_text mangles it (lowercases, drops the last
+        character), so it serves only as the fallback.
+        """
+        args = {
+            "text": text,
+            "pid": pid,
+            "window_id": window_id,
+            "element_index": element_index,
+            "element_token": element_token,
+            "snapshot_id": snapshot_id,
+            "x": x,
+            "y": y,
+            "scope": "desktop" if pid is None else None,
+        }
         if element_index is not None or element_token is not None:
-            raise RuntimeError(
-                f"type_text failed via MCP and element addressing has no SDK fallback: "
-                f"{result.error}"
-            )
-        try:
+            # Element addressing needs the driver's AX knowledge; the SDK
+            # has no way to resolve an element to a focus target.
+            return await self._mcp_only("type_text", args)
+
+        async def sdk_op() -> None:
             if x is not None and y is not None:
                 sx, sy = await self._to_screen(pid, window_id, x, y)
                 await self.sandbox.mouse.click(sx, sy)
             await self.sandbox.keyboard.type(text)
-        except Exception as exc:
-            raise RuntimeError(
-                f"type_text failed via MCP ({result.error}) and SDK ({exc})"
-            ) from exc
-        return ActionResult(ok=True, via="sdk")
+
+        return await self._run_sdk_first(sdk_op, "type_text", args)
 
     async def press_key(self, key: str, *, pid: int | None = None) -> ActionResult:
-        """Press a single key (return, escape, tab, ...)."""
-        result = await self._call_mcp_tool(
-            "press_key",
-            {"key": key, "pid": pid, "scope": "desktop" if pid is None else None},
+        """Press a single key (return, escape, tab, ...).
+
+        The SDK keypress delivers a real X11 key event to the focused
+        widget; the driver's press_key is a silent no-op in this image —
+        it reports success without delivering any event — so it serves
+        only as the fallback.
+        """
+        args = {"key": key, "pid": pid, "scope": "desktop" if pid is None else None}
+        return await self._run_sdk_first(
+            lambda: self.sandbox.keyboard.keypress(key), "press_key", args
         )
-        if result.ok:
-            return result
-        try:
-            await self.sandbox.keyboard.keypress(key)
-        except Exception as exc:
-            raise RuntimeError(
-                f"press_key failed via MCP ({result.error}) and SDK ({exc})"
-            ) from exc
-        return ActionResult(ok=True, via="sdk")
 
     async def hotkey(self, keys: list[str], *, pid: int | None = None) -> ActionResult:
         """Press a key combination, e.g. ["ctrl", "c"]."""
-        result = await self._call_mcp_tool(
-            "hotkey",
-            {"keys": keys, "pid": pid, "scope": "desktop" if pid is None else None},
+        args = {
+            "keys": keys,
+            "pid": pid,
+            "scope": "desktop" if pid is None else None,
+        }
+        return await self._run_sdk_first(
+            lambda: self.sandbox.keyboard.keypress(keys), "hotkey", args
         )
-        if result.ok:
-            return result
-        try:
-            await self.sandbox.keyboard.keypress(keys)
-        except Exception as exc:
-            raise RuntimeError(
-                f"hotkey failed via MCP ({result.error}) and SDK ({exc})"
-            ) from exc
-        return ActionResult(ok=True, via="sdk")
 
     async def scroll(
         self,
@@ -541,43 +550,39 @@ class LeapAppActor:
         y: int | None = None,
     ) -> ActionResult:
         """Scroll a window-local point (pixel-wheel path) or the focused
-        region (keystroke path, no target)."""
-        result = await self._call_mcp_tool(
-            "scroll",
-            {
-                "direction": direction,
-                "pid": pid,
-                "window_id": window_id,
-                "amount": amount,
-                "by": by,
-                "element_index": element_index,
-                "element_token": element_token,
-                "snapshot_id": snapshot_id,
-                "x": x,
-                "y": y,
-                "scope": "desktop" if pid is None else None,
-            },
-        )
-        if result.ok:
-            return result
-        if x is None or y is None:
-            raise RuntimeError(
-                f"scroll failed via MCP and has no pixel target for SDK fallback: "
-                f"{result.error}"
-            )
+        region (keystroke path, no target).
+
+        The pixel-wheel path is dual (SDK first, driver fallback); the
+        keystroke path and element addressing are driver-only — the SDK
+        mouse cannot scroll without pixel coordinates.
+        """
+        args = {
+            "direction": direction,
+            "pid": pid,
+            "window_id": window_id,
+            "amount": amount,
+            "by": by,
+            "element_index": element_index,
+            "element_token": element_token,
+            "snapshot_id": snapshot_id,
+            "x": x,
+            "y": y,
+            "scope": "desktop" if pid is None else None,
+        }
+        if x is None or y is None or element_index is not None or element_token is not None:
+            return await self._mcp_only("scroll", args)
+
         scroll_x, scroll_y = 0, 0
         if direction in ("up", "down"):
             scroll_y = amount if direction == "down" else -amount
         else:
             scroll_x = amount if direction == "right" else -amount
-        try:
+
+        async def sdk_op() -> None:
             sx, sy = await self._to_screen(pid, window_id, x, y)
             await self.sandbox.mouse.scroll(sx, sy, scroll_x=scroll_x, scroll_y=scroll_y)
-        except Exception as exc:
-            raise RuntimeError(
-                f"scroll failed via MCP ({result.error}) and SDK ({exc})"
-            ) from exc
-        return ActionResult(ok=True, via="sdk")
+
+        return await self._run_sdk_first(sdk_op, "scroll", args)
 
     async def set_value(
         self,
@@ -590,7 +595,7 @@ class LeapAppActor:
         snapshot_id: str | None = None,
     ) -> ActionResult:
         """Set an element's value directly. MCP-only: the SDK has no equivalent."""
-        result = await self._call_mcp_tool(
+        return await self._mcp_only(
             "set_value",
             {
                 "pid": pid,
@@ -601,9 +606,6 @@ class LeapAppActor:
                 "snapshot_id": snapshot_id,
             },
         )
-        if not result.ok:
-            raise RuntimeError(f"set_value failed via MCP: {result.error}")
-        return result
 
     async def _to_screen(
         self, pid: int | None, window_id: int | None, x: int, y: int

@@ -310,13 +310,13 @@ def test_signal_run_drives_protocol_in_order(tmp_path, capsys):
         (
             "shell",
             f"{PYTHON} -m leapspace.app_space.signal /tmp/leapspace/task-t/signal"
-            f" --goal {goal}",
+            f" --goal {goal} --watch /tmp/leapspace/chat",
             True,
         ),
         ("exists", "/tmp/leapspace/task-t/signal/record_start.json"),
         ("read", "/tmp/leapspace/task-t/signal/record_start.json"),
         ("stimulus",),
-        ("create", "/tmp/leapspace/task-t/signal/record_stop"),
+        ("create", "/tmp/leapspace/task-t/signal/record_stop.json"),
         ("exists", "/tmp/leapspace/task-t/signal/record_done.json"),
         ("read", "/tmp/leapspace/task-t/signal/record_done.json"),
         ("verdict", f"{PYTHON} /tmp/leapspace/chat/hooks.py"),

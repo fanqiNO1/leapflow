@@ -3,7 +3,7 @@
 One process owns the whole observation stack: EventBus (real normalizer
 and privacy gate), ObservationDaemon, and ImitationPipeline. Control
 flows through record_* sentinel files — the host polls
-record_start.json, creates record_stop, and waits on record_done.json —
+record_start.json, creates record_stop.json, and waits on record_done.json —
 so no port, process signal, or RPC is needed. Host-side code never
 imports this; it runs inside the sandbox via the image venv interpreter.
 """
@@ -28,10 +28,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Control protocol between the in-sandbox runner and the host harness.
-# The two .json files carry JSON payloads written by this process;
-# record_stop is an empty file the host creates to end the stimulus window.
+# record_start.json and record_done.json carry JSON payloads written by
+# this process; record_stop.json is the host's JSON payload to end the
+# stimulus window — this process polls its existence only.
 RECORD_START_FILE = "record_start.json"
-RECORD_STOP_FILE = "record_stop"
+RECORD_STOP_FILE = "record_stop.json"
 RECORD_DONE_FILE = "record_done.json"
 
 SENTINEL_POLL_S = 0.2
@@ -141,7 +142,7 @@ class LeapSignal:
         )
 
     async def _await_stop(self) -> None:
-        """Poll until the host creates record_stop."""
+        """Poll until the host creates record_stop.json."""
         while not (self._dir / RECORD_STOP_FILE).exists():
             await asyncio.sleep(SENTINEL_POLL_S)
 
