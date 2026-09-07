@@ -6,13 +6,20 @@ import asyncio
 import json
 import logging
 import platform
+import shlex
 from pathlib import Path
 
 import pytest
+from cua_sandbox.interfaces.shell import CommandResult
 
 import leapspace.app_space.harness as harness_module
 from leapspace.app_space.config import AppTaskConfig
 from leapspace.app_space.harness import LeapAppHarness
+from leapspace.app_space.signal import (
+    RECORD_DONE_FILE,
+    RECORD_START_FILE,
+    RECORD_STOP_FILE,
+)
 from leapspace.app_space.utils import LeapAppImage, get_image_python
 
 PYTHON = get_image_python("linux")
@@ -113,7 +120,7 @@ class LaunchActor:
         self.launched = 0
         self.calls = []
 
-    async def shell_checked(self, command, timeout=30, background=False):
+    async def shell_run(self, command, timeout=30, background=False, check=True):
         self.calls.append(("shell", command, background))
         self.launched += 1
         return None
@@ -217,3 +224,135 @@ def test_interface_precheck_requires_persisted_names():
     actor = LaunchActor(envelope)
     with pytest.raises(RuntimeError, match="does not expose"):
         launch(actor, launch_config(("chat",), interface={"chat": ("send_message",)}))
+
+
+SIGNAL_ACTION = """\
+async def reference(actor):
+    actor.calls.append(("stimulus",))
+
+def expect(state_root="/tmp/leapspace"):
+    return 0
+"""
+
+
+class SignalActor:
+    """Fakes the actor surface the signal path drives.
+
+    record_start.json appears once the LeapSignal shell has fired,
+    record_done.json once the record_stop create has (or immediately,
+    when LeapSignal died at startup) — so the call log doubles as a
+    protocol-order assertion: the stimulus must land between the launch
+    shell and the stop create.
+    """
+
+    def __init__(self, done_payload=None, verdict=None, *, start_appears=True,
+                 died_at_startup=False):
+        self.launched = False
+        self.stopped = False
+        self.died_at_startup = died_at_startup
+        self.start_appears = start_appears
+        self.done_payload = done_payload or {
+            "ok": True,
+            "trajectory_id": "traj-1",
+            "steps": 3,
+            "episodes": 1,
+        }
+        self.verdict = verdict or CommandResult(
+            stdout="PASS reply-sent: ok\n", stderr="", returncode=0
+        )
+        self.calls = []
+
+    async def shell_run(self, command, timeout=30, background=False, check=True):
+        if check:
+            self.calls.append(("shell", command, background))
+            self.launched = "leapspace.app_space.signal" in command
+            return CommandResult(stdout="4242", stderr="", returncode=0)
+        self.calls.append(("verdict", command))
+        return self.verdict
+
+    async def fs_create(self, path, content=""):
+        self.calls.append(("create", path))
+        self.stopped = path.endswith(RECORD_STOP_FILE)
+
+    async def fs_exists(self, path):
+        self.calls.append(("exists", path))
+        if path.endswith(RECORD_START_FILE):
+            return self.launched and self.start_appears
+        if path.endswith(RECORD_DONE_FILE):
+            return self.stopped or self.died_at_startup
+        return False
+
+    async def fs_read(self, path):
+        self.calls.append(("read", path))
+        if path.endswith(RECORD_START_FILE):
+            return json.dumps({"trajectory_id": "traj-1", "observers": {}})
+        return json.dumps(self.done_payload)
+
+
+def signal_run(tmp_path, actor):
+    (tmp_path / "action.py").write_text(SIGNAL_ACTION)
+    config = AppTaskConfig(
+        id="task-t",
+        title="t",
+        app_ids=("chat",),
+        instruction="confirm the meeting",
+        action_path=tmp_path / "action.py",
+    )
+    return asyncio.run(LeapAppHarness(LeapAppImage.LINUX)._run_signal(config, actor))
+
+
+def test_signal_run_drives_protocol_in_order(tmp_path, capsys):
+    actor = SignalActor()
+    rc = signal_run(tmp_path, actor)
+    assert rc == 0
+    goal = shlex.quote("confirm the meeting")
+    assert actor.calls == [
+        (
+            "shell",
+            f"{PYTHON} -m leapspace.app_space.signal /tmp/leapspace/task-t/signal"
+            f" --goal {goal}",
+            True,
+        ),
+        ("exists", "/tmp/leapspace/task-t/signal/record_start.json"),
+        ("read", "/tmp/leapspace/task-t/signal/record_start.json"),
+        ("stimulus",),
+        ("create", "/tmp/leapspace/task-t/signal/record_stop"),
+        ("exists", "/tmp/leapspace/task-t/signal/record_done.json"),
+        ("read", "/tmp/leapspace/task-t/signal/record_done.json"),
+        ("verdict", f"{PYTHON} /tmp/leapspace/chat/hooks.py"),
+    ]
+    # the verdict program's PASS/FAIL lines are the run's user-facing output
+    assert capsys.readouterr().out == "PASS reply-sent: ok\n"
+
+
+def test_signal_run_propagates_verdict_exit_code(tmp_path):
+    # FAIL is a measured result: the line prints, the code returns, no raise
+    actor = SignalActor(
+        verdict=CommandResult(stdout="FAIL reply-sent: nope\n", stderr="", returncode=1)
+    )
+    assert signal_run(tmp_path, actor) == 1
+
+
+def test_signal_ready_timeout(monkeypatch, tmp_path):
+    monkeypatch.setattr(harness_module, "SIGNAL_READY_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(harness_module, "SIGNAL_POLL_S", 0.01)
+    with pytest.raises(RuntimeError, match="record_start.json/record_done.json did not appear"):
+        signal_run(tmp_path, SignalActor(start_appears=False))
+
+
+def test_signal_startup_death_surfaces_the_error(tmp_path):
+    # LeapSignal writes record_done.json even when dying during startup; the
+    # ready poll must surface that error, not a bare timeout
+    actor = SignalActor(
+        done_payload={"ok": False, "error": "ImportError: no module named x"},
+        start_appears=False,
+        died_at_startup=True,
+    )
+    with pytest.raises(RuntimeError, match="ImportError: no module named x"):
+        signal_run(tmp_path, actor)
+
+
+def test_signal_done_failure_reported(tmp_path):
+    actor = SignalActor(done_payload={"ok": False, "error": "boom: drain hung"})
+    with pytest.raises(RuntimeError, match="boom: drain hung"):
+        signal_run(tmp_path, actor)

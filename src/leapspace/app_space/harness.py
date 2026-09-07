@@ -11,8 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shlex
 import time
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, Literal
 
 from cua_sandbox import Sandbox
@@ -22,17 +23,26 @@ from leapspace.app_space.apps import APP_MODULES
 from leapspace.app_space.actor import LeapAppActor
 from leapspace.app_space.action_lint import lint_task
 from leapspace.app_space.config import AppTaskConfig
+from leapspace.app_space.signal import (
+    RECORD_DONE_FILE,
+    RECORD_START_FILE,
+    RECORD_STOP_FILE,
+)
 from leapspace.app_space.utils import (
     LeapAppImage,
     get_image,
     get_image_python,
     get_sandbox_state_dir,
+    load_action,
 )
 
 logger = logging.getLogger(__name__)
 
 LAUNCH_READY_TIMEOUT_S = 60.0
 LAUNCH_READY_POLL_S = 1.0
+SIGNAL_READY_TIMEOUT_S = 60.0
+SIGNAL_DONE_TIMEOUT_S = 60.0
+SIGNAL_POLL_S = 0.5
 
 
 class LeapAppHarness:
@@ -115,7 +125,7 @@ class LeapAppHarness:
         # background=True: pid only, no exit code — startup crashes are
         # caught by the state poll below, not by this call
         python = get_image_python(system=self.image.value)
-        await actor.shell_checked(f"{python} -m {app_module}", background=True)
+        await actor.shell_run(f"{python} -m {app_module}", background=True)
 
         envelope = await self._wait_for_app_state(app_id, actor)
         await actor.wait_for_window(envelope["app_title"])
@@ -181,4 +191,111 @@ class LeapAppHarness:
             runtime=QEMURuntime(mode="bare-metal"),
         ) as sandbox:
             async with LeapAppActor(sandbox=sandbox) as actor:
-                pass
+                await self._prepare_files(config, actor)
+                await self._launch_apps(config, actor)
+
+                if mode == "signal":
+                    await self._run_signal(config, actor)
+                elif mode == "e2e":
+                    raise NotImplementedError("e2e mode is not yet implemented")
+                else:
+                    raise ValueError(f"unknown mode {mode!r}; must be 'signal' or 'e2e'")
+
+    async def _run_signal(self, config: AppTaskConfig, actor: LeapAppActor) -> int:
+        """Drive one signal-mode run: record the stimulus, then judge it.
+
+        Launch order encodes the recording window — LeapSignal starts
+        after the apps are ready and before the stimulus, so recording
+        begins at process start. record_start.json gates the stimulus;
+        record_done.json proves the drain finished (stop_recording
+        drains internally), so the in-box verdict only reads fully-settled
+        state. The verdict itself is `python hooks.py` — action.py's
+        __main__ runs expect() — through shell_run(check=False) so a FAIL
+        exit code stays a measured result, not an infra failure.
+        """
+        # Resolve the run's control paths and load the task's action pair.
+        state_root = get_sandbox_state_dir(in_sandbox=False, system=self.image.value)
+        signal_dir = state_root / config.id / "signal"
+        reference, _expect = load_action(config.action_path)
+
+        # background=True: pid only; a startup death surfaces as the death
+        # certificate (record_done.json) or not at all, both caught by the poll
+        python = get_image_python(system=self.image.value)
+        await actor.shell_run(
+            f"{python} -m leapspace.app_space.signal {shlex.quote(str(signal_dir))}"
+            f" --goal {shlex.quote(config.instruction)}",
+            background=True,
+        )
+        # Readiness gate: record_start.json proves recording is live before the
+        # stimulus starts.
+        first, payload = await self._await_sentinel(
+            actor,
+            signal_dir,
+            (RECORD_START_FILE, RECORD_DONE_FILE),
+            SIGNAL_READY_TIMEOUT_S,
+        )
+        if first == RECORD_DONE_FILE:
+            raise RuntimeError(
+                f"signal: LeapSignal failed during startup: {payload.get('error')}"
+            )
+        logger.info("signal: recording trajectory %s", payload.get("trajectory_id"))
+
+        # The stimulus: the task's reference actions, the signal being recorded.
+        await reference(actor)
+
+        # Close the recording window, then wait for record_done.json — the
+        # drain proof that every event has been persisted before the verdict.
+        await actor.fs_create(str(signal_dir / RECORD_STOP_FILE))
+        _, done = await self._await_sentinel(
+            actor, signal_dir, (RECORD_DONE_FILE,), SIGNAL_DONE_TIMEOUT_S
+        )
+        if not done.get("ok"):
+            raise RuntimeError(f"signal: LeapSignal failed: {done.get('error')}")
+        logger.info("signal: %s", done)
+
+        # hooks.py is action.py's in-box twin; identical copies land in every
+        # app's state_dir, expect runs from the first app's copy
+        hooks_path = state_root / config.app_ids[0] / "hooks.py"
+        result = await actor.shell_run(f"{python} {shlex.quote(str(hooks_path))}", check=False)
+        # PASS/FAIL lines are the run's user-facing verdict: print them
+        # verbatim and let the exit code travel up as the result.
+        if result.stdout:
+            print(result.stdout, end="")
+        else:
+            logger.error(
+                "verdict: no PASS/FAIL lines (exit %d): %s",
+                result.returncode,
+                result.stderr.strip(),
+            )
+        if result.returncode != 0:
+            logger.error(
+                "verdict: task %s failed expect (exit %d)", config.id, result.returncode
+            )
+        return result.returncode
+
+    async def _await_sentinel(
+        self,
+        actor: LeapAppActor,
+        signal_dir: PurePath,
+        names: tuple[str, ...],
+        timeout_s: float,
+    ) -> tuple[str, dict[str, Any]]:
+        """Poll until any of the named record_* JSON sentinels lands.
+
+        Waiting for record_start.json also watches record_done.json —
+        LeapSignal's death certificate, written even when it dies during
+        startup — so a crash surfaces as its real error, not a bare
+        timeout.
+        """
+        paths = {name: str(signal_dir / name) for name in names}
+        deadline = time.monotonic() + timeout_s
+        while True:
+            for name, path in paths.items():
+                if await actor.fs_exists(path):
+                    return name, json.loads(await actor.fs_read(path))
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"signal: {'/'.join(names)} did not appear within "
+                    f"{timeout_s}s — LeapSignal died or hung"
+                )
+            await asyncio.sleep(SIGNAL_POLL_S)

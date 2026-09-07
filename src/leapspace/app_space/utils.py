@@ -1,12 +1,17 @@
-"""Shared leapspace helpers: image presets and the state-dir convention."""
+"""Shared leapspace helpers: image presets, the state-dir convention, and
+task action loading."""
 
+import importlib.util
 import os
 import platform
 from enum import Enum
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
-from typing import Literal
+from typing import TYPE_CHECKING, Awaitable, Callable, Literal
 
 from cua_sandbox import Image
+
+if TYPE_CHECKING:
+    from leapspace.app_space.actor import LeapAppActor
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -25,6 +30,27 @@ def check(name: str, cond: bool, detail: str = "") -> bool:
     """
     print(f"{'PASS' if cond else 'FAIL'} {name}: {detail}")
     return cond
+
+
+def load_action(
+    action_path: Path | str,
+) -> tuple[Callable[["LeapAppActor"], Awaitable[None]], Callable[..., int]]:
+    """Import a task's action.py once; return its (reference, expect) pair.
+
+    Module-level imports are lint-guaranteed in-sandbox-safe (stdlib /
+    PyQt6 / leapspace) — a set the host import satisfies as well — and
+    exec_module honors the __main__ guard, so loading never triggers the
+    verdict.
+    """
+    action_path = Path(action_path)
+    spec = importlib.util.spec_from_file_location(
+        f"leapspace_task_{action_path.stem}", str(action_path)
+    )
+    if spec is None or spec.loader is None:
+        raise ValueError(f"{action_path}: cannot be imported as a Python module")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.reference, module.expect
 
 
 class LeapAppImage(str, Enum):

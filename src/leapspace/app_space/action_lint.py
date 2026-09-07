@@ -52,6 +52,7 @@ def lint_task(config: AppTaskConfig) -> list[str]:
         *_check_hooks(config, functions),
         *_check_reference(functions),
         *_check_expect(functions),
+        *_check_main(tree),
     ]
 
 
@@ -136,6 +137,47 @@ def _check_expect(
     required += sum(default is None for default in fn.args.kw_defaults)
     if required:
         return ["expect: all parameters must have defaults (the harness calls expect())"]
+    return []
+
+
+def _is_main_guard(node: ast.If) -> bool:
+    """True for `if __name__ == "__main__":` regardless of operand order."""
+    test = node.test
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1):
+        return False
+    sides = [test.left, *test.comparators]
+    has_name = any(
+        isinstance(side, ast.Name) and side.id == "__name__" for side in sides
+    )
+    has_main = any(
+        isinstance(side, ast.Constant) and side.value == "__main__" for side in sides
+    )
+    return has_name and has_main
+
+
+def _check_main(tree: ast.Module) -> list[str]:
+    """The in-box verdict entry is `python hooks.py`; __main__ must launch expect."""
+    guard = next(
+        (node for node in tree.body if isinstance(node, ast.If) and _is_main_guard(node)),
+        None,
+    )
+    if guard is None:
+        return [
+            '__main__: missing — the in-box verdict entry is `python hooks.py`, '
+            'whose guard must launch expect()'
+        ]
+    launches_expect = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "expect"
+        for stmt in guard.body
+        for node in ast.walk(stmt)
+    )
+    if not launches_expect:
+        return [
+            "__main__: never launches expect() — the in-box verdict entry "
+            "`python hooks.py` would do nothing"
+        ]
     return []
 
 

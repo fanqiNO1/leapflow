@@ -18,6 +18,7 @@ hooks:
 
 GOOD_ACTION = '''\
 import json
+import sys
 from PyQt6.QtCore import QTimer
 
 def seed(app):
@@ -31,6 +32,9 @@ async def reference(actor):
 
 def expect(state_root="/tmp/leapspace"):
     return 0
+
+if __name__ == "__main__":
+    sys.exit(expect())
 '''
 
 
@@ -126,6 +130,28 @@ def test_expect_params_need_defaults(tmp_path):
     action = GOOD_ACTION.replace('state_root="/tmp/leapspace"', "state_root")
     problems = lint(make_task(tmp_path, action=action))
     assert any("must have defaults" in p for p in problems)
+
+
+def test_main_guard_required(tmp_path):
+    action = GOOD_ACTION.replace('if __name__ == "__main__":\n    sys.exit(expect())\n', "")
+    problems = lint(make_task(tmp_path, action=action))
+    assert any("__main__: missing" in p for p in problems)
+
+
+def test_main_guard_must_launch_expect(tmp_path):
+    action = GOOD_ACTION.replace(
+        'if __name__ == "__main__":\n    sys.exit(expect())',
+        'if __name__ == "__main__":\n    print("no verdict")',
+    )
+    problems = lint(make_task(tmp_path, action=action))
+    assert any("__main__: never launches expect()" in p for p in problems)
+
+
+def test_main_guard_operand_order_agnostic(tmp_path):
+    action = GOOD_ACTION.replace(
+        'if __name__ == "__main__":', 'if "__main__" == __name__:'
+    )
+    assert lint(make_task(tmp_path, action=action)) == []
 
 
 def test_host_only_import_at_module_level(tmp_path):

@@ -1,10 +1,16 @@
 """Tests for leapspace.app_space.utils: check() lines and path conventions."""
 
+import asyncio
 import platform
 
 import pytest
 
-from leapspace.app_space.utils import check, get_image_python, get_sandbox_state_dir
+from leapspace.app_space.utils import (
+    check,
+    get_image_python,
+    get_sandbox_state_dir,
+    load_action,
+)
 
 
 def test_check_pass_line(capsys):
@@ -47,3 +53,32 @@ def test_image_python_pins_linux_venv():
 def test_image_python_undefined_for_other_systems():
     with pytest.raises(NotImplementedError, match="macos"):
         get_image_python("macos")
+
+
+ACTION = '''\
+import sys
+
+async def reference(actor):
+    return "stim"
+
+def expect(state_root="/tmp/leapspace"):
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(expect())
+'''
+
+
+def test_load_action_returns_reference_and_expect(tmp_path):
+    (tmp_path / "action.py").write_text(ACTION)
+    reference, expect = load_action(tmp_path / "action.py")
+    assert asyncio.iscoroutinefunction(reference)
+    assert expect() == 0
+
+
+def test_load_action_leaves_main_guard_inert(tmp_path):
+    # a load that ran the guard would raise SystemExit(expect()) here
+    (tmp_path / "action.py").write_text(
+        ACTION.replace("return 0", "return 2")
+    )
+    load_action(tmp_path / "action.py")

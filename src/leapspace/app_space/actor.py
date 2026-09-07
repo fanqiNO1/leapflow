@@ -281,7 +281,7 @@ class LeapAppActor:
         if result.ok:
             return result
         try:
-            await self.shell_checked(f"nohup {shlex.quote(name)} >/dev/null 2>&1 &")
+            await self.shell_run(f"nohup {shlex.quote(name)} >/dev/null 2>&1 &")
         except Exception as exc:
             raise RuntimeError(
                 f"launch_app failed via MCP ({result.error}) and shell ({exc})"
@@ -306,7 +306,7 @@ class LeapAppActor:
         if result.ok:
             return result
         try:
-            await self.shell_checked(f"kill -9 {int(pid)}")
+            await self.shell_run(f"kill -9 {int(pid)}")
         except Exception as exc:
             raise RuntimeError(
                 f"kill_app failed via MCP ({result.error}) and shell ({exc})"
@@ -646,7 +646,7 @@ class LeapAppActor:
         await self.sandbox.files.write_text(path, content)
 
     async def fs_move(self, src: str, dst: str) -> None:
-        await self.shell_checked(f"mv -- {shlex.quote(src)} {shlex.quote(dst)}")
+        await self.shell_run(f"mv -- {shlex.quote(src)} {shlex.quote(dst)}")
 
     async def fs_delete(self, path: str) -> None:
         if await self.sandbox.files.is_dir(path):
@@ -697,20 +697,26 @@ class LeapAppActor:
     async def clip_get(self) -> str:
         return await self.sandbox.clipboard.get()
 
-    async def shell_checked(
-        self, command: str, timeout: int = 30, background: bool = False
+    async def shell_run(
+        self,
+        command: str,
+        timeout: int = 30,
+        background: bool = False,
+        check: bool = True,
     ) -> CommandResult:
-        """Run an in-sandbox shell command, raising on non-zero exit.
+        """Run an in-sandbox shell command; check=True raises on non-zero exit.
 
-        Public escape hatch for scenario setup (installs, service starts)
-        that has no dedicated actor method; also backs the launch/kill
-        fallbacks and fs_move. With background=True the command returns
-        immediately and stdout carries the spawned pid — no exit code to
-        check, so this is the way to start long-lived services (demo apps,
-        Flask).
+        check=False is the verdict channel: expect programs exit non-zero
+        on failure while their stdout is the payload, so the caller needs
+        the raw result, not an exception. With background=True the command
+        returns immediately and stdout carries the spawned pid — the way
+        to start long-lived services (demo apps, Flask). Public escape
+        hatch for scenario setup (installs, service starts) that has no
+        dedicated actor method; also backs the launch/kill fallbacks and
+        fs_move.
         """
         result = await self.sandbox.shell.run(command, timeout=timeout, background=background)
-        if not result.success:
+        if check and not result.success:
             raise RuntimeError(
                 f"in-sandbox command failed ({result.returncode}): {result.stderr.strip()}"
             )
