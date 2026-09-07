@@ -55,6 +55,13 @@ dashboard = ["aiohttp>=3.9"]
 # extractor always ships: this upgrades quality, it does not enable the feature.
 web = ["trafilatura>=2.2"]
 
+# LeapSpace (src/leapspace) heavier dependencies. The package itself ships
+# with the leapflow distribution, but PyQt6/cua-sandbox/pydantic are only
+# installed with this group. Installed with
+# `uv sync --all-extras --group leapspace`.
+[dependency-groups]
+leapspace = ["pyqt6>=6.7", "cua-sandbox", "pydantic>=2"]
+
 [project.scripts]
 leap = "leapflow.__main__:main"
 
@@ -67,7 +74,7 @@ version = {attr = "leapflow.version.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["leapflow*"]
+include = ["leapflow*", "leapspace*"]
 
 [tool.setuptools.package-data]
 "leapflow.gateway.action_packs" = ["*.yaml"]
