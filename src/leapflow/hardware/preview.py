@@ -189,7 +189,21 @@ class PreviewBroker:
             # hide a TypeError *inside* a driver and call it compatibility.
             if _accepts_keyword(transport.read_frame, "fps"):
                 kwargs["fps"] = effective_fps
-            reading = await transport.read_frame(channel_id, **kwargs)
+            # Serialised on the device's own I/O lock, exactly as a scalar read, a write and
+            # the sampling loop are. ``MediaTransport`` happens to hold an internal lock of
+            # its own, which is why the absence of this was invisible in tree -- but a
+            # third-party ``FrameTransport`` sharing a bus with a scalar channel had no such
+            # protection, and a shared bus is a single conversation: two coroutines
+            # interleaving request and response frames yields a plausible reading carrying
+            # the wrong channel's value.
+            #
+            # Lock order is the same one ``_release`` uses -- this per-channel lock first,
+            # then ``device_io`` -- so the two cannot deadlock against each other. No path
+            # takes them the other way round: every caller that holds ``device_io``
+            # (hw_read, the sampling loop, request_hardware_reading) reaches a transport
+            # directly and never asks the broker for anything.
+            async with self._registry.device_io(device_id):
+                reading = await transport.read_frame(channel_id, **kwargs)
             lease.last_frame = reading
             lease.last_capture_at = time.monotonic()
             lease.last_capture_age_ms = max(0.0, (time.time() - reading.observed_at) * 1000.0)

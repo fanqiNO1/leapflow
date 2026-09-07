@@ -241,7 +241,12 @@ class HardwareTools:
             return None
 
     async def hw_status(self, device_id: str = "", **_: Any) -> dict[str, Any]:
-        """Return live transport health and recent observations for one device."""
+        """Return live transport health and recent observations for one device.
+
+        Deliberately not serialised on ``device_io``: see ``HardwareTransport.probe``. This
+        is the call somebody makes *because* a device looks stuck, so queueing it behind
+        the read that is stuck would withhold the one answer they need.
+        """
         context = self._registry.context(device_id)
         if context is None:
             return self._unknown_device(device_id)
@@ -345,6 +350,10 @@ class HardwareTools:
         Deliberately ungated: waiting for consent to stop a moving machine is
         physically absurd. It is still audited, because frequent halts are a fault
         signal worth keeping.
+
+        Un-serialised for the same class of reason -- see ``HardwareTransport.halt``.
+        Whatever holds the device's I/O lock is often the operation that needs stopping,
+        so taking the lock first would delay the halt by the runaway operation's duration.
         """
         context = self._registry.context(device_id)
         if context is None:

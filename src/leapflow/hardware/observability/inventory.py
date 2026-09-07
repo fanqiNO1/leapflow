@@ -134,6 +134,7 @@ def build_device_view(registry: Any, device_id: str, *, now: float | None = None
     opened = set(_safely(registry.opened_devices, default=()))
     channels = tuple(getattr(context, "channels", ()))[:DEVICE_CHANNEL_LIMIT]
     provenance = getattr(context, "provenance", None)
+    live = _live_previews(registry, context.device_id)
 
     return {
         "ok": True,
@@ -152,12 +153,31 @@ def build_device_view(registry: Any, device_id: str, *, now: float | None = None
         "traces": _traces(registry, context, channels),
         "controls": [_control_row(channel) for channel in channels if channel.is_writable],
         "previews": [
-            _preview_row(registry.settings, context, channel)
+            _preview_row(registry.settings, context, channel, live.get(channel.channel_id))
             for channel in channels
             if _is_previewable(channel)
         ],
         "events": _device_events(registry, context.device_id),
         "channels_omitted": max(0, len(getattr(context, "channels", ())) - len(channels)),
+    }
+
+
+def _live_previews(registry: Any, device_id: str) -> dict[str, dict[str, Any]]:
+    """Return this device's live preview leases, keyed by channel.
+
+    Read through ``registry.active_previews()`` so an observability call cannot build a
+    broker (and its sweeper task) just to report that nothing is switched on.
+
+    This is the only thing on the page that says a device is *actually* capturing.
+    ``opened`` cannot: a media transport reports ``connected`` once its declaration is
+    bound, deliberately before any capture, so a camera whose light is on and one that was
+    merely resolved look identical there.
+    """
+    snapshot = _safely(registry.active_previews, default=())
+    return {
+        str(entry.get("channel_id") or ""): dict(entry)
+        for entry in snapshot
+        if str(entry.get("device_id") or "") == str(device_id)
     }
 
 
@@ -275,16 +295,27 @@ def _is_previewable(channel: Any) -> bool:
     return channel.is_privacy_gated and channel.representation == Representation.SCALAR.value
 
 
-def _preview_row(settings: Any, context: Any, channel: Any) -> dict[str, Any]:
-    """Describe a previewable channel without fetching a single byte or reading a value."""
+def _preview_row(
+    settings: Any, context: Any, channel: Any, live: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Describe a previewable channel without fetching a single byte or reading a value.
+
+    ``live`` is this channel's preview lease when one exists, so the panel can say whether
+    the device is being watched right now, by how many viewers, and how old the last frame
+    was. Absent means nobody is watching -- which is the honest answer, and the one
+    ``opened`` could never give.
+    """
+    lease = live or {}
     return {
         "device_id": context.device_id,
         "channel_id": channel.channel_id,
         "label": f"{getattr(context, 'display_name', '') or context.device_id} · {channel.channel_id}",
-        # What the client renders with: a picture, or a meter. Derived from the declared
-        # representation rather than the device class, so a non-camera frame source and a
-        # non-microphone level source both work without a new case.
-        "kind": "microphone" if not channel.is_media else "camera",
+        # What the client renders with: a picture for a frame, a live meter for anything
+        # else previewable. This *is* the declared representation, passed through rather
+        # than translated -- the previous value said "camera"/"microphone", which named
+        # device classes the protocol deliberately does not branch on, so a non-microphone
+        # level source was labelled a microphone and a non-camera frame source a camera.
+        "representation": channel.representation,
         "media_type": channel.media_type or ("image/jpeg" if channel.is_media else ""),
         "max_fps": channel.max_frame_rate_hz,
         # Runtime ceilings sent to the page so it can label each profile truthfully. They
@@ -299,6 +330,14 @@ def _preview_row(settings: Any, context: Any, channel: Any) -> dict[str, Any]:
         "privacy": channel.privacy,
         "consent_required": channel.is_privacy_gated,
         "consent_reason": _consent_reason(channel),
+        # Live lease state. ``active`` is the only field on this page that means the
+        # device is genuinely capturing, so it is what a person checks before believing an
+        # indicator light they can see.
+        "active": bool(lease),
+        "viewers": int(lease.get("viewers", 0) or 0),
+        "frames_served": int(lease.get("frames_served", 0) or 0),
+        "frame_age_ms": float(lease.get("frame_age_ms", 0.0) or 0.0),
+        "idle_s": float(lease.get("idle_s", 0.0) or 0.0),
     }
 
 

@@ -883,6 +883,26 @@ class HardwareRegistry:
             )
         return self._preview_broker
 
+    def active_previews(self) -> tuple[dict[str, Any], ...]:
+        """Report live preview leases without building a broker to answer.
+
+        Deliberately not ``self.preview_broker.active()``: that property is lazy, so an
+        observability read would *create* the broker -- and a broker that exists starts a
+        sweeper task. A read-only view of what is switched on must not be the reason a
+        background task appears in a profile that has never previewed anything.
+
+        An empty tuple therefore means "nothing is being watched", which is exactly what
+        "no broker yet" means.
+        """
+        broker = self._preview_broker
+        if broker is None:
+            return ()
+        try:
+            return tuple(broker.active())
+        except Exception as exc:  # noqa: BLE001 - an observability read must not fail a page
+            logger.debug("active preview snapshot failed: %s", exc, exc_info=True)
+            return ()
+
     def bind_persistence(
         self,
         *,

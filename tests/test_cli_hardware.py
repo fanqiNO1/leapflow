@@ -143,6 +143,37 @@ def test_hw_read_reads_one_channel_on_demand(monkeypatch, tmp_path, capsys) -> N
     assert payload["reading"]["value"] == 21.5
 
 
+def test_the_read_plane_releases_every_device_before_it_exits(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """This process builds its own registry, so nothing else will close it.
+
+    The plugin path registers ``close_all`` on its EffectScope; a one-shot command has no
+    scope, so without an explicit release a ``leap hw read`` of a camera or microphone
+    would exit while a capture process still held the device -- indicator light included.
+    Asserted on the failure path too, because that is the one a defect takes.
+    """
+    from leapflow.cli.commands.hardware import cmd_hardware
+
+    registry = _loaded_registry()
+    closed: list[str] = []
+    original = registry.close_all
+
+    async def _close_all() -> None:
+        closed.append("closed")
+        await original()
+
+    registry.close_all = _close_all  # type: ignore[method-assign]
+    _install_local_registry(monkeypatch, tmp_path, registry)
+
+    assert cmd_hardware(_ns("read", device="rig", channel="temp")) == 0
+    assert closed == ["closed"], "a successful read left the device claimed"
+
+    capsys.readouterr()
+    assert cmd_hardware(_ns("read", device="nope", channel="temp")) != 0
+    assert closed == ["closed", "closed"], "a refused read left the device claimed"
+
+
 def test_hw_status_rolls_up_when_device_omitted(monkeypatch, tmp_path, capsys) -> None:
     from leapflow.cli.commands.hardware import cmd_hardware
 

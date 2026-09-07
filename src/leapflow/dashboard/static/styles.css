@@ -289,6 +289,9 @@ button:hover { border-color: var(--accent); color: var(--accent); }
 .media-toggle:hover, .control-actions button:hover { border-color: var(--accent); color: var(--accent); }
 .control-actions button.primary { border-color: var(--ink); }
 .consent-notice { display: flex; align-items: center; gap: 8px; font-size: .82rem; color: var(--muted); }
+/* The daemon's live lease, not this tab's state: it is what explains an indicator light
+   somebody can see while this page shows no stream of its own. */
+.preview-live { display: flex; align-items: center; gap: 8px; font-size: .82rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 .level-meter { display: flex; align-items: center; gap: 10px; }
 .level-track { flex: 1; height: 6px; background: var(--track); border: 1px solid var(--line); }

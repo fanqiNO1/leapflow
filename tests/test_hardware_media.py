@@ -625,6 +625,207 @@ def test_daemon_preview_stream_reports_latest_metadata_and_release_status() -> N
 # ════════════════════════════════════════════════════════════════
 
 
+def test_a_metadata_read_releases_the_capture_it_started(monkeypatch) -> None:
+    """A read with no preview lease behind it must not leave the camera powered.
+
+    This is the one path that bypassed the lease: ``transport.read`` on a frame channel
+    started a capture only ``close``/``halt`` could stop, so a single ``hw_read`` left the
+    indicator light on for the life of the daemon -- owned by nobody, swept by nothing.
+    A capture a *preview* owns must survive the same read, which is the second half here.
+    """
+    from leapflow.hardware.providers.media_provider import FRAME_CHANNEL as _FRAME
+
+    grabbers: list[_CountingGrabber] = []
+
+    def _build(device: Any, **kwargs: Any) -> "_CountingGrabber":
+        grabber = _CountingGrabber()
+        grabbers.append(grabber)
+        return grabber
+
+    monkeypatch.setattr("leapflow.hardware.transports.media.build_grabber", _build)
+    transport = MediaTransport(
+        {"kind": "camera", "index": 0, "spec": "0:none", "input_format": "avfoundation"}
+    )
+
+    async def _run() -> None:
+        await transport.open(_camera_context())
+
+        reading = await transport.read(_FRAME)
+        assert str(reading.value).startswith("frame:")
+        assert transport._grabber is None, "an unleased read left the device claimed"  # noqa: SLF001
+        assert grabbers[0].stopped == 1, "the capture it started was never stopped"
+
+        # A preview owns this one, so the same read must leave it running.
+        await transport.read_frame(_FRAME)
+        assert transport._grabber is not None  # noqa: SLF001
+        await transport.read(_FRAME)
+        assert transport._grabber is not None, (  # noqa: SLF001
+            "a metadata read stopped a capture the preview lease owns"
+        )
+        assert grabbers[1].stopped == 0
+
+        await transport.close()
+        assert grabbers[1].stopped == 1, "close must release the preview's capture"
+
+    asyncio.run(_run())
+
+
+class _CountingGrabber:
+    """A capture backend that records start/stop, so ownership is observable."""
+
+    backend = "fake"
+
+    def __init__(self) -> None:
+        self.started = 0
+        self.stopped = 0
+
+    async def start(self) -> None:
+        self.started += 1
+
+    async def grab(self) -> tuple[bytes, int, int]:
+        return _JPEG, 4, 2
+
+    async def stop(self) -> None:
+        self.stopped += 1
+
+
+def test_a_frame_read_is_serialised_on_the_devices_io_lock() -> None:
+    """A frame read must take the same lock a scalar read, a write and sampling take.
+
+    ``MediaTransport`` holds an internal lock of its own, which is why the absence of this
+    was invisible in tree -- but a third-party ``FrameTransport`` sharing a bus with a
+    scalar channel had no such protection, and a shared bus is a single conversation.
+
+    Asserted as "the lock was held *at the moment* ``read_frame`` ran". Merely counting
+    acquisitions is not enough: ``_release`` already takes this lock to drop the transport,
+    so a count-based assertion passes with the frame read still unguarded -- which is
+    exactly what the first version of this test did.
+    """
+    depth = {"held": 0}
+
+    class _DepthRecordingSource(_FakeFrameSource):
+        """Records how deep the device's I/O lock was when the frame was demanded."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.depth_during_read = -1
+
+        async def read_frame(
+            self, channel_id: str, *, max_width: int = 0, quality: int = 0
+        ) -> FrameReading:
+            self.depth_during_read = depth["held"]
+            return await super().read_frame(channel_id, max_width=max_width, quality=quality)
+
+    source = _DepthRecordingSource()
+    registry = _registry(_camera_context(), source)
+    real_device_io = registry.device_io
+
+    class _Tracking:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        async def __aenter__(self) -> Any:
+            depth["held"] += 1
+            return await self._inner.__aenter__()
+
+        async def __aexit__(self, *exc: object) -> Any:
+            depth["held"] -= 1
+            return await self._inner.__aexit__(*exc)
+
+    registry.device_io = lambda device_id: _Tracking(real_device_io(device_id))  # type: ignore[method-assign]
+
+    async def _run() -> None:
+        await registry.preview_broker.frame("cam", FRAME_CHANNEL, viewer_id="board")
+        await registry.preview_broker.close()
+
+    asyncio.run(_run())
+
+    assert source.depth_during_read == 1, (
+        "read_frame ran outside the device's I/O lock, so a shared bus is unprotected"
+    )
+    assert depth["held"] == 0, "the device's I/O lock was not released"
+
+
+def test_the_device_view_reports_a_live_preview_without_building_a_broker() -> None:
+    """``opened`` cannot say a camera is capturing; only the lease can.
+
+    A media transport reports ``connected`` once its declaration is bound, deliberately
+    before any capture, so the Connection stat looks identical whether the light is on or
+    off. The view must therefore carry the lease -- and reading it must not *create* the
+    broker, because a broker that exists starts a sweeper task.
+    """
+    from leapflow.hardware.observability import build_device_view
+
+    source = _FakeFrameSource()
+    registry = _registry(_camera_context(), source)
+
+    # Nothing has previewed yet: no lease, and no broker brought into being by asking.
+    assert registry.active_previews() == ()
+    assert registry._preview_broker is None  # noqa: SLF001 - the point of the assertion
+    idle = build_device_view(registry, "cam")
+    assert idle["previews"][0]["active"] is False
+    assert idle["previews"][0]["viewers"] == 0
+    assert registry._preview_broker is None, (  # noqa: SLF001
+        "an observability read built a broker, and with it a sweeper task"
+    )
+
+    async def _run() -> None:
+        await registry.preview_broker.frame("cam", FRAME_CHANNEL, viewer_id="board")
+        live = build_device_view(registry, "cam")
+        preview = live["previews"][0]
+        assert preview["active"] is True
+        assert preview["viewers"] == 1
+        assert preview["frames_served"] == 1
+        await registry.preview_broker.close()
+
+    asyncio.run(_run())
+
+
+def test_a_preview_names_its_render_mode_by_declared_representation() -> None:
+    """The render mode is the declared representation, not a device class.
+
+    It used to be reported as ``camera``/``microphone``, which named classes the protocol
+    deliberately never branches on: a level source that was not a microphone arrived at the
+    browser labelled one, and the client keyed its picture-vs-meter choice on that label.
+    A frame source that is not a camera -- a thermal array, a line-scan sensor -- has to
+    render as a picture on the strength of its declaration alone.
+    """
+    from leapflow.hardware.context import Representation
+    from leapflow.hardware.observability import build_device_view
+
+    frame_view = build_device_view(_registry(_camera_context(), _FakeFrameSource()), "cam")
+    preview = frame_view["previews"][0]
+    assert preview["representation"] == Representation.FRAME.value
+    assert "kind" not in preview, "the device-class field must be gone, not merely unused"
+    # No *value* may be a bare device class. Checked on exact values rather than a substring
+    # search: the label legitimately carries the device's display name ("Fake camera"), and
+    # a substring test would forbid calling a camera a camera where a human reads it.
+    assert not {"camera", "microphone"} & {v for v in preview.values() if isinstance(v, str)}, (
+        "a device class leaked back into the render-mode contract"
+    )
+
+    # The same builder, a privacy-gated scalar: a meter, declared rather than guessed.
+    level = HardwareContext(
+        device_id="probe",
+        display_name="Line probe",
+        device_class="instrument",
+        transport=TransportRef(kind="mock"),
+        channels=(Channel(
+            channel_id=LEVEL_CHANNEL,
+            direction=Direction.READ.value,
+            quantity="audio_level",
+            unit="dBFS",
+            effect=HardwareEffect.READ.value,
+            envelope=Envelope(declared=True, min_value=-90.0, max_value=0.0),
+            privacy=PrivacyTier.ENVIRONMENT.value,
+            representation=Representation.SCALAR.value,
+        ),),
+        provenance=ContextProvenance(source=ContextSource.DISCOVERED.value),
+    )
+    scalar_view = build_device_view(_registry(level, _FakeFrameSource()), "probe")
+    assert scalar_view["previews"][0]["representation"] == Representation.SCALAR.value
+
+
 def test_the_media_transport_satisfies_the_frame_protocol_and_refuses_writes() -> None:
     """Read-only, and provably so: the call never reaches a device.
 

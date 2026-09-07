@@ -268,7 +268,19 @@ class HardwareTransport(Protocol):
         ...
 
     async def probe(self) -> TransportStatus:
-        """Liveness and health check. Side-effect free."""
+        """Liveness and health check. Side-effect free.
+
+        Deliberately **not** serialised by the registry's per-device I/O lock, unlike
+        ``read`` and ``write``. A diagnostic that queues behind the operation being
+        diagnosed cannot answer the question it exists for: "is this device responding
+        *right now*, while that read appears to be stuck?"
+
+        The cost is that this may run concurrently with a read on the same device, so a
+        transport whose probe touches a shared bus must make that safe itself -- by
+        answering from cached state, or by taking its own lock. A probe that issues an
+        unguarded bus transaction can interleave with a read's response frames, and the
+        reading that comes back will look plausible while carrying the wrong value.
+        """
         ...
 
     async def halt(self) -> TransportStatus:
@@ -279,6 +291,11 @@ class HardwareTransport(Protocol):
         that device while keeping its readable channels available. "Cannot stop"
         becomes a discoverable capability degradation instead of a silent
         assumption.
+
+        Lock-free for a stronger reason than ``probe``: waiting for a lock in order to
+        stop a moving machine is physically wrong. Whatever holds the device's I/O lock is
+        very often the thing that needs stopping, so acquiring it first would delay the
+        halt for exactly as long as the runaway operation takes.
         """
         ...
 

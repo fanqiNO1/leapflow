@@ -161,6 +161,10 @@ class MediaTransport:
         frame's identity and size, because a ``Reading`` is appended to NDJSON segments
         and handed to models, and a few hundred kilobytes of JPEG in either place is a
         cost with no benefit. Bytes come from ``read_frame``.
+
+        A one-shot read also leaves the device as it found it -- see
+        ``_read_frame_metadata``. That is what separates this from the preview path:
+        ``read`` has no lease behind it, so it must not be the reason a camera stays on.
         """
         self._require_open(channel_id)
         channel = self._context.channel(channel_id) if self._context is not None else None
@@ -170,7 +174,7 @@ class MediaTransport:
         if self._device.kind == MICROPHONE:
             value: Any = await self._read_level()
         else:
-            frame = await self.read_frame(channel_id)
+            frame = await self._read_frame_metadata(channel_id)
             value = f"frame:{frame.sequence}:{frame.width}x{frame.height}"
 
         self._sequence += 1
@@ -187,26 +191,66 @@ class MediaTransport:
     async def read_frame(
         self, channel_id: str, *, max_width: int = 0, quality: int = 0, fps: float = 0.0
     ) -> FrameReading:
-        """Capture one frame, starting the backend on first use.
+        """Capture one frame, starting the backend on first use and leaving it running.
 
         Satisfies ``FrameTransport``. Requested dimensions, quality and cadence are
         honoured by restarting the backend when they change, because FFmpeg fixes all
         three at start: silently returning the prior encoder's output would make the page
         report a selected profile while spending a different profile's compute budget.
+
+        The capture deliberately outlives the call, because this is the preview path and
+        ``PreviewBroker`` owns that claim: its lease is what eventually releases the
+        device. A caller holding no lease must use ``read`` instead, which releases what
+        it started.
         """
         self._require_open(channel_id)
         async with self._lock:
-            await self._ensure_grabber(max_width=max_width, quality=quality, fps=fps)
-            grabber = self._grabber
-            if grabber is None:  # pragma: no cover - _ensure_grabber raises instead
-                raise TransportError("capture unavailable", failure_code="capture_unavailable")
+            return await self._capture_locked(
+                channel_id, max_width=max_width, quality=quality, fps=fps
+            )
+
+    async def _read_frame_metadata(self, channel_id: str) -> FrameReading:
+        """Capture one frame for a metadata read, leaving the claim as it was found.
+
+        A ``read`` has no preview lease behind it, so it must not be the reason a camera
+        stays powered. Before this, reading a frame channel started a capture that only
+        ``close``/``halt`` could stop: one ``hw_read`` left the indicator light on for the
+        life of the daemon, owned by nobody, with no lease to sweep it and no release to
+        call -- the same failure the preview lease exists to prevent, reached by the one
+        path that bypassed it.
+
+        The ownership test, the capture and the stop all happen under one lock hold, so a
+        preview starting concurrently cannot have its grabber stopped by this read.
+        """
+        self._require_open(channel_id)
+        async with self._lock:
+            leased = self._grabber is not None
             try:
-                data, width, height = await grabber.grab()
-            except MediaCaptureError as exc:
-                # The process is gone or unusable; drop it so the next attempt restarts
-                # rather than grabbing from a dead pipe forever.
-                await self._stop_grabber()
-                raise TransportError(str(exc), failure_code=exc.failure_code) from exc
+                return await self._capture_locked(channel_id, max_width=0, quality=0, fps=0.0)
+            finally:
+                # Idempotent: a failed capture already dropped the grabber.
+                if not leased:
+                    await self._stop_grabber()
+
+    async def _capture_locked(
+        self, channel_id: str, *, max_width: int, quality: int, fps: float
+    ) -> FrameReading:
+        """Grab the newest frame. The caller must hold ``self._lock``.
+
+        The sequence number and the reading are produced inside the same hold as the
+        capture, so two concurrent readers cannot label their frames out of order.
+        """
+        await self._ensure_grabber(max_width=max_width, quality=quality, fps=fps)
+        grabber = self._grabber
+        if grabber is None:  # pragma: no cover - _ensure_grabber raises instead
+            raise TransportError("capture unavailable", failure_code="capture_unavailable")
+        try:
+            data, width, height = await grabber.grab()
+        except MediaCaptureError as exc:
+            # The process is gone or unusable; drop it so the next attempt restarts
+            # rather than grabbing from a dead pipe forever.
+            await self._stop_grabber()
+            raise TransportError(str(exc), failure_code=exc.failure_code) from exc
 
         self._sequence += 1
         reading = FrameReading(

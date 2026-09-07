@@ -155,20 +155,28 @@ async def _run_local(action: str, args: argparse.Namespace, json_mode: bool) -> 
     # ungated and identity-agnostic, so nothing here should adopt a session that
     # belongs to another client.
     tools = HardwareTools(registry)
-    if action == "list":
-        result = await tools.hw_list()
-    elif action == "describe":
-        result = await tools.hw_describe(device_id=str(args.device))
-    elif action == "read":
-        result = await tools.hw_read(
-            device_id=str(args.device), channel_id=str(args.channel)
-        )
-    elif action == "status":
-        result = await _collect_status(tools, registry, str(getattr(args, "device", "") or ""))
-    elif action == "estop":
-        result = await tools.hw_estop(device_id=str(args.device))
-    else:  # pragma: no cover - guarded by _dispatch
-        result = {"ok": False, "code": "unknown_action", "error": action}
+    try:
+        if action == "list":
+            result = await tools.hw_list()
+        elif action == "describe":
+            result = await tools.hw_describe(device_id=str(args.device))
+        elif action == "read":
+            result = await tools.hw_read(
+                device_id=str(args.device), channel_id=str(args.channel)
+            )
+        elif action == "status":
+            result = await _collect_status(tools, registry, str(getattr(args, "device", "") or ""))
+        elif action == "estop":
+            result = await tools.hw_estop(device_id=str(args.device))
+        else:  # pragma: no cover - guarded by _dispatch
+            result = {"ok": False, "code": "unknown_action", "error": action}
+    finally:
+        # This process owns the registry it just built, and answering a read claims the
+        # device -- a camera or microphone included. Nothing else will release it: the
+        # plugin path registers ``close_all`` on its EffectScope, but this registry has no
+        # scope, so without this the command could exit leaving a capture process holding
+        # the device and its indicator light on. ``close_all`` never raises.
+        await registry.close_all()
     return _emit_result(action, result, json_mode)
 
 

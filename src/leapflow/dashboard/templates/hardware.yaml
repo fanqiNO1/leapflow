@@ -104,6 +104,14 @@ layout:
       # Before the numbers: on a device that has one, the picture is why the page was
       # opened. Each entry carries its own consent state, so the panel is visible while
       # the stream is not, until a grant exists.
+      #
+      # ``active``/``viewers``/``frame_age_ms`` are the live lease, and they are the only
+      # fields here that mean the device is genuinely capturing -- the Connection stat
+      # above reports a bound declaration, which a media transport sets before any
+      # capture. Somebody checking why an indicator light is on needs the former.
+      #
+      # There is deliberately no ``autostart``: opening a camera must follow a person
+      # asking, not a page loading.
       - type: Section
         when: previews
         props:
@@ -117,17 +125,19 @@ layout:
               title: "{{ preview.channel_id }}"
               device: "{{ preview.device_id }}"
               channel: "{{ preview.channel_id }}"
-              kind: "{{ preview.kind }}"
+              representation: "{{ preview.representation }}"
               media_type: "{{ preview.media_type }}"
               max_fps: "{{ preview.max_fps }}"
               max_width: "{{ preview.max_width }}"
               max_quality: "{{ preview.max_quality }}"
-              autostart: "{{ preview.autostart }}"
               unit: "{{ preview.unit }}"
               floor: "{{ preview.floor }}"
               privacy: "{{ preview.privacy }}"
               consent_required: "{{ preview.consent_required }}"
               consent_reason: "{{ preview.consent_reason }}"
+              active: "{{ preview.active }}"
+              viewers: "{{ preview.viewers }}"
+              frame_age_ms: "{{ preview.frame_age_ms }}"
 
       # ── D3. Channels ──
       - type: Section

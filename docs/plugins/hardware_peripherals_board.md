@@ -207,7 +207,7 @@ An unanswered prompt cannot leak, because a routed request registers, denies-on-
 unregisters exactly as a slash command does.
 
 A local environment camera uses a **session consent family**, not a per-device prompt:
-one consent covers its probe, the following MJPEG stream, and another local camera looking
+one consent covers its probe, the following live stream, and another local camera looking
 at the same physical space. Camera and microphone remain separate families; personal,
 remote and unknown device classes remain per-device. The action summary, risk assessment
 and audit record still name the actual device/channel, so only reusable grant identity is
@@ -260,48 +260,78 @@ exactly why those are not in the default set.
 Two shapes, one gate. A **frame** channel streams pictures; a privacy-gated **scalar**
 channel is a live meter, which is how a microphone's input level is presented. Both are
 continuous disclosures of the surroundings, both need consent, and both are useless as a
-static table cell. `inventory._is_previewable` decides from the declared representation, so
-a non-camera frame source and a non-microphone level source work without a new case.
+static table cell. `inventory._is_previewable` decides from the declared representation,
+and the preview row reports that representation verbatim as its render mode — so a frame
+source that is not a camera renders as a picture, and a level source that is not a
+microphone renders as a meter, on the strength of the declaration alone. No field in this
+contract carries a device class.
 
 | Channel | Endpoint | Transport |
 |---|---|---|
-| `representation: frame` | `GET /api/media/stream` | MJPEG (`multipart/x-mixed-replace`) |
+| `representation: frame` | `GET /api/media/ws` | WebSocket, binary JPEG frames, latest-only |
+| `representation: frame` | `GET /api/media/frame` | one still frame, and the only place a refusal can be read as text |
 | privacy-gated scalar | `GET /api/media/level` | JSON, polled four times a second into a browser-local waveform |
+| either | `POST /api/media/release` | releases this viewer's lease at once, without waiting for the idle sweep |
 
-MJPEG because an `<img>` renders it natively — no player, no codec, no decode path in
-JavaScript. The level channel is polled instead: the value is a number, so there is no
-response to hold open. The board draws its last 96 readings as a **browser-local waveform**;
-values are never persisted as audio history.
+A binary WebSocket rather than MJPEG: an `<img src="…multipart…">` buffers at the browser's
+discretion, and a viewer that falls behind is shown a backlog rather than the present —
+which is how a 30fps preview came to display frames tens of seconds old. Frames now arrive
+as discrete binary messages, are decoded with `createImageBitmap`, and only the newest is
+drawn to a `<canvas>`; a frame that arrives while one is decoding replaces the pending one
+instead of queueing. The level channel is polled because its value is a number, so there is
+no response to hold open. The board draws its last 96 readings as a **browser-local
+waveform**; values are never persisted as audio history.
 
 The client asks for one frame (or one reading) first. That probe is what surfaces a
-refusal as text — an `<img>` cannot report *why* it failed, because `onerror` carries no
-body. If the person chooses **Allow once**, that probe is the complete result; choosing
-**Allow for this session** starts the continuous stream without asking a second time.
+refusal as text — a stream cannot report *why* it failed. If the person chooses **Allow
+once**, that probe is the complete result; choosing **Allow for this session** starts the
+continuous stream without asking a second time.
 
 `PreviewBroker` (`src/leapflow/hardware/preview.py`) owns the one path where a device
-stays claimed across requests. Three properties, each present because its absence is a
+stays claimed across requests. Four properties, each present because its absence is a
 real failure:
 
 1. **Shared upstream.** Most devices admit a single reader, so two viewers of one camera
    must not open it twice. Frames are captured once per channel and handed to whoever
    asks.
 2. **Profile-bounded work.** The page offers Economy (640px / 4fps / JPEG 60), Balanced
-   (960px / 8fps / JPEG 75, default) and Detail (1280px / 12fps / JPEG 85). The daemon
+   (960px / 8fps / JPEG 75, default) and Detail (1280px / 30fps / JPEG 85). The daemon
    clamps every request against the channel declaration and `hardware.preview_*` ceilings;
    a hand-edited URL cannot raise capture cost. Profile identity is part of the cached
    frame key, so selecting Detail never shows a cached Economy frame.
-3. **Self-releasing.** A browser tab closing is not an event the daemon can observe, so
-   the lease expires on **silence**: no frame requested within
-   `hardware.preview_idle_timeout_s` drops the transport, which is what actually powers
-   the camera down.
+3. **Viewer-owned, explicitly released.** Each viewer holds a named lease, and closing a
+   panel releases *that* lease immediately — only the last one to leave closes the device.
+   The idle sweep (`hardware.preview_idle_timeout_s`, 5s) remains as the lost-client
+   fallback, not the primary mechanism: a browser tab closing is not an event the daemon
+   can observe, but a tab that closes cleanly must not leave a camera on for the timeout.
+4. **Serialised like every other device access.** The frame read runs inside the registry's
+   per-device I/O lock, exactly as a scalar read, a write and the sampling loop do. A
+   transport-internal lock is not enough: a third-party `FrameTransport` sharing a bus with
+   a scalar channel would otherwise interleave request and response frames.
+
+A one-shot `read` of a frame channel is **not** a preview and holds no lease, so it
+releases whatever capture it started. Only the broker's path leaves a device claimed —
+otherwise a single `hw_read` would light an indicator nothing owned and nothing would
+switch it off.
+
+What is actually capturing is reported, not inferred: each preview row carries `active`,
+`viewers` and `frame_age_ms` from the live lease. The device page's Connection stat cannot
+say this — a media transport reports `connected` once its declaration is bound, before any
+capture — so the lease is the only field that explains an indicator light somebody can see.
+Reading it goes through `registry.active_previews()`, which answers "nothing" without
+building a broker, because a broker that exists starts a sweeper task.
 
 The Preview selector is **not** a durable config editor. It records a browser-local
 preference per device/channel and sends a bounded request for the next live preview; the
 daemon is authoritative for every compute limit. The default balanced profile is chosen
 to make a camera useful without spending Detail's CPU/bandwidth in every open board.
 
-The wire path is `MediaPreview` → `GET /api/media/stream` (MJPEG) → `hardware.frame` RPC
-→ broker → `read_frame`.
+There is deliberately no autostart: opening a camera follows a person asking, not a page
+loading.
+
+The wire path is `MediaPreview` → `GET /api/media/ws` → `hardware.preview.stream` RPC →
+broker → `read_frame` (under the device's I/O lock). `hardware.preview.release` and
+`hardware.preview.status` are the matching control and introspection RPCs.
 
 ---
 
